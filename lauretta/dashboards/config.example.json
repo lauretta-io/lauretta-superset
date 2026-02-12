@@ -1,0 +1,28 @@
+{
+  "dashboards": [
+    {
+      "name": "property_dashboard.zip",
+      "connections": [
+        {
+          "database_name": "whitepcWDB",
+          "password": "your_database_password"
+        }
+      ]
+    },
+    {
+      "name": "sales_dashboard.zip",
+      "connections": [
+        {
+          "database_name": "Sales DB",
+          "password": "sales_db_password"
+        },
+        {
+          "database_name": "Analytics DB",
+          "password": "analytics_db_password"
+        }
+      ]
+    }
+  ]
+}
+
+
