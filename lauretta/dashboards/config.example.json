@@ -2,16 +2,14 @@
   "dashboards": [
     {
       "path": "/lauretta/dashboards/property_demo.zip",
-      "connections": [
-        {
-          "host": "HOST_NAME",
-          "port": 123,
-          "password": "PASSWORD",
-          "username": "USERNAME",
-          "db": "DATABASE_NAME"
-        }
-      ]
+      "connections": {
+        "database_name": "my_database",
+        "host": "localhost",
+        "port": 5432,
+        "password": "your_password",
+        "username": "your_username",
+        "db": "your_database_name"
+      }
     }
   ]
 }
- 
