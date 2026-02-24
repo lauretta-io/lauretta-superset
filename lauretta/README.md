@@ -49,18 +49,8 @@ cd lauretta/dashboards
 cp config.example.json config.json
 nano config.json  # Add your database passwords
 
-# 3. Start Superset
-# If you haven't built the frontend assets yet,or anything change related to frontend do it now:
-cd superset-frontend
-npm install
-npm run build
-
 cd ..
-docker-compose up -d
-
-# 4. Wait for initialization (30-60 seconds)
-docker-compose logs -f superset-init
-
+docker-compose -f docker-compose-non-dev.yml up --build -d
 # 5. Access Superset
 # Open: http://localhost:8088
 # Login: admin / admin
