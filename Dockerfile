@@ -209,7 +209,7 @@ COPY --from=superset-node /app/superset/translations superset/translations
 COPY --from=python-translation-compiler /app/translations_mo superset/translations
 
 # Copy update_connections.py script
-COPY docker/update_connections.py /app/docker/update_connections.py
+COPY docker/import-dashboards.py /app/docker/import-dashboards.py
 
 HEALTHCHECK CMD curl -f "http://localhost:${SUPERSET_PORT}/health"
 CMD ["/app/docker/entrypoints/run-server.sh"]
