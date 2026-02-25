@@ -4,7 +4,7 @@
     {
       "path": "/lauretta/dashboards/property_demo.zip",
       "connections": {
-        "database_name": "my_database",
+        "database_display_name": "my_database",
         "host": "localhost",
         "port": 5432,
         "password": "your_password",

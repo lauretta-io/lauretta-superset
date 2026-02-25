@@ -12,7 +12,7 @@ def update_via_superset_shell():
         if zip_path.startswith('/lauretta/'): zip_path = '/app' + zip_path
         
         conn_config = dash.get("connections")
-        new_name = conn_config.get("database_name")
+        new_name = conn_config.get("database_display_name")
         new_uri = f"postgresql+psycopg2://{conn_config['username']}:{conn_config['password']}@{conn_config['host']}:{conn_config['port']}/{conn_config['db']}"
 
         # Step 1:  Trace UUID from file ZIP
