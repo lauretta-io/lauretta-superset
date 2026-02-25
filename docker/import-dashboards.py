@@ -15,7 +15,7 @@ def update_via_superset_shell():
         new_name = conn_config.get("database_name")
         new_uri = f"postgresql+psycopg2://{conn_config['username']}:{conn_config['password']}@{conn_config['host']}:{conn_config['port']}/{conn_config['db']}"
 
-        # BƯỚC 1: Lấy UUID từ file ZIP
+        # Step 1:  Trace UUID from file ZIP
         old_db_uuid = None
         with zipfile.ZipFile(zip_path, 'r') as z:
             db_files = [f for f in z.namelist() if 'databases/' in f and f.endswith(('.yaml', '.yml'))]

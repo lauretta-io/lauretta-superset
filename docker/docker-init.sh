@@ -66,8 +66,8 @@ echo_step "3" "Starting" "Setting up roles and perms"
 superset init
 echo_step "3" "Complete" "Setting up roles and perms"
 
-# Update database connections from config.json
-python /app/docker/update_connections.py
+# Import custom Lauretta dashboards
+python /app/docker/import-dashboards.py
 
 # if [ "$SUPERSET_LOAD_EXAMPLES" = "yes" ]; then
 #     # Load some data to play with
@@ -80,8 +80,3 @@ python /app/docker/update_connections.py
 #     fi
 #     echo_step "4" "Complete" "Loading examples"
 # fi
-
-# Import custom Lauretta dashboards
-if [ -f "/app/docker/import-dashboards.sh" ]; then
-    /app/docker/import-dashboards.sh
-fi
