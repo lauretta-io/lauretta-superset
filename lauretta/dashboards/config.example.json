@@ -1,3 +1,4 @@
+// Support 1 Dashboard with 1 Connection. Will extend to support multiple connections and dashboards in the future.
 {
   "dashboards": [
     {
