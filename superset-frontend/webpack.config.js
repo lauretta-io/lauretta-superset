@@ -514,7 +514,11 @@ Object.entries(packageConfig.dependencies).forEach(([pkg, relativeDir]) => {
   const srcPath = path.join(APP_DIR, `./node_modules/${pkg}/src`);
   const dir = relativeDir.replace('file:', '');
 
-  if (/^@superset-ui/.test(pkg) && fs.existsSync(srcPath)) {
+  // Support @superset-ui/* packages and custom plugins from custom_plugin/ folder
+  const isSuperset = /^@superset-ui/.test(pkg);
+  const isCustomPlugin = dir.startsWith('./custom_plugin/');
+  
+  if ((isSuperset || isCustomPlugin) && fs.existsSync(srcPath)) {
     console.log(`[Superset Plugin] Use symlink source for ${pkg} @ ${dir}`);
     config.resolve.alias[pkg] = path.resolve(APP_DIR, `${dir}/src`);
   }
