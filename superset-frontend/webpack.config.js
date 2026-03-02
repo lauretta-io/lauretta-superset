@@ -437,7 +437,7 @@ const config = {
         issuer: {
           not: [/\/src\/assets\/staticPages\//],
         },
-        type: 'asset',
+        type: 'asset/resource',
         generator: {
           filename: '[name].[contenthash:8][ext]',
         },
@@ -445,7 +445,7 @@ const config = {
       {
         test: /\.png$/,
         issuer: /\/src\/assets\/staticPages\//,
-        type: 'asset',
+        type: 'asset/resource',
       },
       {
         test: /\.svg(\?v=\d+\.\d+\.\d+)?$/,
@@ -464,7 +464,7 @@ const config = {
         ],
       },
       {
-        test: /\.(jpg|gif)$/,
+        test: /\.(jpe?g|gif)$/,
         type: 'asset/resource',
         generator: {
           filename: '[name].[contenthash:8][ext]',

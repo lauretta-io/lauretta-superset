@@ -24,12 +24,12 @@ import {
 } from './types';
 import { StorePolyline, getFootfallColor } from './StorePolyline';
 import { ZoomPanWrapper } from './ZoomPanWrapper';
-import floorImageCF from './images/TRX_floorplan_CF.png';
-import floorImageCM from './images/TRX_floorplan_CM.png';
-import floorImageGF from './images/TRX_floorplan_GF.png';
-import floorImageL1 from './images/TRX_floorplan_L1.png';
-import floorImageL2 from './images/TRX_floorplan_L2.png';
-import floorImagePL from './images/TRX_floorplan_PL.png';
+import floorImageCF from './images/TRX_floorplan_CF.jpeg';
+import floorImageCM from './images/TRX_floorplan_CM.jpg';
+import floorImageGF from './images/TRX_floorplan_GF.jpeg';
+import floorImageL1 from './images/TRX_floorplan_L1.jpeg';
+import floorImageL2 from './images/TRX_floorplan_L2.jpeg';
+import floorImagePL from './images/TRX_floorplan_PL.jpeg';
 // The following Styles component is a <div> element, which has been styled using Emotion
 // For docs, visit https://emotion.sh/docs/styled
 
@@ -52,8 +52,7 @@ const Styles = styled.div<SupersetPluginChartFloorMapStylesProps>`
     width: 100%;
     height: 100%;
     image {
-      image-rendering: crisp-edges;
-      image-rendering: pixelated;
+      image-rendering: auto;
     }
   }
 
