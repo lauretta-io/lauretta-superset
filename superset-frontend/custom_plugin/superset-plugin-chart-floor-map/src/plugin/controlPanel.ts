@@ -16,7 +16,7 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { t, validateNonEmpty } from '@superset-ui/core';
+import { t } from '@superset-ui/core';
 import {
   ControlPanelConfig,
   sharedControls,
@@ -106,85 +106,53 @@ const config: ControlPanelConfig = {
       controlSetRows: [
         [
           {
-            name: 'cols',
+            name: 'floor_selection',
             config: {
-              ...sharedControls.groupby,
-              label: t('Columns'),
-              description: t('Columns to group by'),
+              type: 'SelectControl',
+              label: t('Floor'),
+              default: 'C',
+              choices: [
+                ['C', t('C')],
+                ['M', t('M')],
+                ['G', t('G')],
+                ['L1', t('L1')],
+                ['L2', t('L2')],
+                ['PL', t('PL')],
+              ],
+              renderTrigger: true,
+              description: t('Select the floor to display'),
             },
           },
         ],
         [
           {
-            name: 'metrics',
+            name: 'cols',
             config: {
-              ...sharedControls.metrics,
-              // it's possible to add validators to controls if
-              // certain selections/types need to be enforced
-              validators: [validateNonEmpty],
+              ...sharedControls.groupby,
+              label: t('Columns'),
+              description: t('Columns to group by'),
+              // default: ['store', 'category', 'color', 'points', 'total_footfall'],
             },
           },
         ],
+        // [
+        //   {
+        //     name: 'metrics',
+        //     config: {
+        //       ...sharedControls.metrics,
+        //       // it's possible to add validators to controls if
+        //       // certain selections/types need to be enforced
+        //       validators: [validateNonEmpty],
+        //     },
+        //   },
+        // ],
         ['adhoc_filters'],
         [
           {
             name: 'row_limit',
             config: sharedControls.row_limit,
           },
-        ],
-      ],
-    },
-    {
-      label: t('Hello Controls!'),
-      expanded: true,
-      controlSetRows: [
-        [
-          {
-            name: 'header_text',
-            config: {
-              type: 'TextControl',
-              default: 'Hello, World!',
-              renderTrigger: true,
-              // ^ this makes it apply instantaneously, without triggering a "run query" button
-              label: t('Header Text'),
-              description: t('The text you want to see in the header'),
-            },
-          },
-        ],
-        [
-          {
-            name: 'bold_text',
-            config: {
-              type: 'CheckboxControl',
-              label: t('Bold Text'),
-              renderTrigger: true,
-              default: true,
-              description: t('A checkbox to make the '),
-            },
-          },
-        ],
-        [
-          {
-            name: 'header_font_size',
-            config: {
-              type: 'SelectControl',
-              label: t('Font Size'),
-              default: 'xl',
-              choices: [
-                // [value, label]
-                ['xxs', 'xx-small'],
-                ['xs', 'x-small'],
-                ['s', 'small'],
-                ['m', 'medium'],
-                ['l', 'large'],
-                ['xl', 'x-large'],
-                ['xxl', 'xx-large'],
-              ],
-              renderTrigger: true,
-              description: t('The size of your header font'),
-            },
-          },
-        ],
+        ]
       ],
     },
   ],

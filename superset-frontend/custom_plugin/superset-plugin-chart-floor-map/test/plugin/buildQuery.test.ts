@@ -16,18 +16,19 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { SupersetPluginChartHelloWorld } from '../src';
+import buildQuery from '../../src/plugin/buildQuery';
 
-/**
- * The example tests in this file act as a starting point, and
- * we encourage you to build more. These tests check that the
- * plugin loads properly, and focus on `transformProps`
- * to ake sure that data, controls, and props are all
- * treated correctly (e.g. formData from plugin controls
- * properly transform the data and/or any resulting props).
- */
-describe('superset-plugin-chart-hello-world', () => {
-  it('exists', () => {
-    expect(SupersetPluginChartHelloWorld).toBeDefined();
+describe('SupersetPluginChartFloorMap buildQuery', () => {
+  const formData = {
+    datasource: '5__table',
+    granularity_sqla: 'ds',
+    series: 'foo',
+    viz_type: 'my_chart',
+  };
+
+  it('should build groupby with series in form data', () => {
+    const queryContext = buildQuery(formData);
+    const [query] = queryContext.queries;
+    expect(query.columns).toEqual(['foo']);
   });
 });

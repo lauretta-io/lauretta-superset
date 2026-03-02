@@ -22,7 +22,7 @@ import controlPanel from './controlPanel';
 import transformProps from './transformProps';
 import thumbnail from '../images/thumbnail.png';
 
-export default class SupersetPluginChartHelloWorld extends ChartPlugin {
+export default class SupersetPluginChartFloorMap extends ChartPlugin {
   /**
    * The constructor is used to pass relevant metadata and callbacks that get
    * registered in respective registries that are used throughout the library
@@ -35,15 +35,15 @@ export default class SupersetPluginChartHelloWorld extends ChartPlugin {
    */
   constructor() {
     const metadata = new ChartMetadata({
-      description: 'Superset Plugin Chart Hello World',
-      name: t('Hello World'),
+      description: 'Superset Plugin Chart Floor Map',
+      name: t('Floor Map'),
       thumbnail,
     });
 
     super({
       buildQuery,
       controlPanel,
-      loadChart: () => import('../SupersetPluginChartHelloWorld'),
+      loadChart: () => import('../SupersetPluginChartFloorMap'),
       metadata,
       transformProps,
     });

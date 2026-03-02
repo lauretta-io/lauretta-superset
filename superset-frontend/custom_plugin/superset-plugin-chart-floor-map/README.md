@@ -1,6 +1,6 @@
-# superset-plugin-chart-hello-world
+# superset-plugin-chart-floor-map
 
-This is the Superset Plugin Chart Hello World Superset Chart Plugin.
+This is the Superset Plugin Chart Floor Map Superset Chart Plugin.
 
 ### Usage
 
@@ -17,9 +17,9 @@ Alternatively, to run the plugin in development mode (=rebuilding whenever chang
 npm run dev
 ```
 
-To add the package to Superset, go to the `superset-frontend` subdirectory in your Superset source folder (assuming both the `superset-plugin-chart-hello-world` plugin and `superset` repos are in the same root directory) and run
+To add the package to Superset, go to the `superset-frontend` subdirectory in your Superset source folder (assuming both the `superset-plugin-chart-floor-map` plugin and `superset` repos are in the same root directory) and run
 ```
-npm i -S ../../superset-plugin-chart-hello-world
+npm i -S ../../superset-plugin-chart-floor-map
 ```
 
 If your Superset plugin exists in the `superset-frontend` directory and you wish to resolve TypeScript errors about `@superset-ui/core` not being resolved correctly, add the following to your `tsconfig.json` file:
@@ -50,12 +50,12 @@ Finally, if you wish to ensure your plugin `tsconfig.json` is aligned with the r
 After this edit the `superset-frontend/src/visualizations/presets/MainPreset.js` and make the following changes:
 
 ```js
-import { SupersetPluginChartHelloWorld } from 'superset-plugin-chart-hello-world';
+import { SupersetPluginChartFloorMap } from 'superset-plugin-chart-floor-map';
 ```
 
 to import the plugin and later add the following to the array that's passed to the `plugins` property:
 ```js
-new SupersetPluginChartHelloWorld().configure({ key: 'superset-plugin-chart-hello-world' }),
+new SupersetPluginChartFloorMap().configure({ key: 'ext-floor-map' }),
 ```
 
 After that the plugin should show up when you run Superset, e.g. the development server:
