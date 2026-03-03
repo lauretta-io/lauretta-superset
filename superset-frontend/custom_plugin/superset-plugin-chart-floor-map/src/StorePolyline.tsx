@@ -24,6 +24,7 @@ export interface StorePolylineProps {
   isHovered: boolean;
   onHoverEnter: (e: React.MouseEvent<SVGPolylineElement>) => void;
   onHoverLeave: () => void;
+  onClick?: (e: React.MouseEvent<SVGPolylineElement>) => void;
 }
 
 export const getFootfallColor = (
@@ -56,8 +57,20 @@ export function StorePolyline({
   isHovered,
   onHoverEnter,
   onHoverLeave,
+  onClick,
 }: StorePolylineProps) {
   const fillColor = getFootfallColor(store.total_footfall);
+
+  // Skip rendering if points is NULL, undefined, or empty
+  if (!store.points || store.points === 'null' || store.points === '') {
+    console.log(
+      'Skipping item without points:',
+      store.name || store,
+      'footfall:',
+      store.total_footfall,
+    );
+    return null;
+  }
 
   return (
     <g key={index}>
@@ -65,15 +78,19 @@ export function StorePolyline({
       <polyline
         onMouseEnter={onHoverEnter}
         onMouseLeave={onHoverLeave}
+        onClick={e => {
+          e.stopPropagation();
+          onClick?.(e);
+        }}
         style={{
-          stroke: '#000000',
+          stroke: isHovered ? '#000000' : 'rgba(0, 0, 0, 0.3)',
           fill: fillColor,
-          opacity: 0.7,
+          opacity: isHovered ? 0.9 : 0.7,
           transition: 'all 0.3s ease',
           pointerEvents: 'auto',
           zIndex: isHovered ? 10 : 2,
           cursor: 'pointer',
-          strokeWidth: isHovered ? 4 : 2,
+          strokeWidth: isHovered ? 4 : 1,
           strokeLinejoin: 'round',
           strokeLinecap: 'round',
         }}

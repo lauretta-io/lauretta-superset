@@ -16,8 +16,17 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import React, { ReactNode } from 'react';
-import { TransformWrapper, TransformComponent } from 'react-zoom-pan-pinch';
+import React, {
+  ReactNode,
+  useRef,
+  useImperativeHandle,
+  forwardRef,
+} from 'react';
+import {
+  TransformWrapper,
+  TransformComponent,
+  ReactZoomPanPinchRef,
+} from 'react-zoom-pan-pinch';
 import { styled } from '@superset-ui/core';
 
 const ZoomPanContainer = styled.div`
@@ -105,10 +114,41 @@ interface ZoomPanWrapperProps {
   children: ReactNode;
 }
 
-export function ZoomPanWrapper({ children }: ZoomPanWrapperProps) {
+export interface ZoomPanWrapperRef {
+  zoomToElement: (elementId: string, scale?: number) => void;
+  setTransform: (x: number, y: number, scale: number) => void;
+  resetTransform: () => void;
+}
+
+export const ZoomPanWrapper = forwardRef<
+  ZoomPanWrapperRef,
+  ZoomPanWrapperProps
+>(({ children }, ref) => {
+  const transformRef = useRef<ReactZoomPanPinchRef>(null);
+
+  useImperativeHandle(ref, () => ({
+    zoomToElement: (elementId: string, scale = 2) => {
+      const element = document.getElementById(elementId);
+      if (element && transformRef.current) {
+        transformRef.current.zoomToElement(element, scale);
+      }
+    },
+    setTransform: (x: number, y: number, scale: number) => {
+      if (transformRef.current) {
+        transformRef.current.setTransform(x, y, scale);
+      }
+    },
+    resetTransform: () => {
+      if (transformRef.current) {
+        transformRef.current.resetTransform();
+      }
+    },
+  }));
+
   return (
     <ZoomPanContainer>
       <TransformWrapper
+        ref={transformRef}
         initialScale={1}
         initialPositionX={0}
         initialPositionY={0}
@@ -119,7 +159,7 @@ export function ZoomPanWrapper({ children }: ZoomPanWrapperProps) {
         panning={{ velocityDisabled: false }}
         doubleClick={{ disabled: false, step: 0.5 }}
       >
-        {({ zoomIn, zoomOut, resetTransform, ...rest }) => (
+        {({ zoomIn, zoomOut, resetTransform }) => (
           <>
             <div className="zoom-controls">
               <button onClick={() => zoomIn()} title="Zoom In">
@@ -142,4 +182,4 @@ export function ZoomPanWrapper({ children }: ZoomPanWrapperProps) {
       </TransformWrapper>
     </ZoomPanContainer>
   );
-}
+});

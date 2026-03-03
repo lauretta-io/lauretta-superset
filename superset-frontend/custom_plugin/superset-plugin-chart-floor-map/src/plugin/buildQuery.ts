@@ -35,28 +35,23 @@ import { buildQueryContext, QueryFormData } from '@superset-ui/core';
 export default function buildQuery(formData: QueryFormData) {
   const { cols: groupby } = formData;
 
-  // If no columns are selected, add a dummy metric to avoid "Empty query?" error
-  // This allows the chart to render with just the background image
+  // Always include a dummy metric to ensure a valid query
+  // This allows the chart to render with or without data
+  // Return actual data including store, category, points fields (points can be NULL)
   const hasGroupby = groupby && Array.isArray(groupby) && groupby.length > 0;
 
   return buildQueryContext(formData, baseQueryObject => [
     {
       ...baseQueryObject,
       groupby: hasGroupby ? groupby : [],
-      // When no columns selected, add a COUNT(*) metric to make the query valid
-      // and set row_limit to 0 to minimize data transfer
-      ...(hasGroupby
-        ? {}
-        : {
-            metrics: [
-              {
-                expressionType: 'SQL',
-                sqlExpression: 'COUNT(*)',
-                label: '_dummy_metric',
-              },
-            ],
-            row_limit: 0,
-          }),
+      // Always add a COUNT(*) dummy metric to ensure valid query
+      metrics: [
+        {
+          expressionType: 'SQL',
+          sqlExpression: 'COUNT(*)',
+          label: '_dummy_metric',
+        },
+      ],
     },
   ]);
 }

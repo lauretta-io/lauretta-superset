@@ -16,20 +16,24 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import React, { useEffect, createRef, useState } from 'react';
+import React, { useEffect, createRef, useState, useRef } from 'react';
 import { styled } from '@superset-ui/core';
 import {
   SupersetPluginChartFloorMapProps,
   SupersetPluginChartFloorMapStylesProps,
 } from './types';
 import { StorePolyline, getFootfallColor } from './StorePolyline';
-import { ZoomPanWrapper } from './ZoomPanWrapper';
+import { ZoomPanWrapper, ZoomPanWrapperRef } from './ZoomPanWrapper';
 import floorImageCF from './images/TRX_floorplan_CF.jpeg';
 import floorImageCM from './images/TRX_floorplan_CM.jpg';
 import floorImageGF from './images/TRX_floorplan_GF.jpeg';
 import floorImageL1 from './images/TRX_floorplan_L1.jpeg';
 import floorImageL2 from './images/TRX_floorplan_L2.jpeg';
 import floorImagePL from './images/TRX_floorplan_PL.jpeg';
+import layerEntrances from './images/entrances-layers.png';
+import layerCirculation from './images/circulation-layers.png';
+import layerPublic from './images/public-layers.png';
+import layerShops from './images/shops-layers.png';
 // The following Styles component is a <div> element, which has been styled using Emotion
 // For docs, visit https://emotion.sh/docs/styled
 
@@ -52,7 +56,8 @@ const Styles = styled.div<SupersetPluginChartFloorMapStylesProps>`
     width: 100%;
     height: 100%;
     image {
-      image-rendering: auto;
+      image-rendering: crisp-edges;
+      image-rendering: pixelated;
     }
   }
 
@@ -76,7 +81,7 @@ const TooltipBox = styled.div<{ isVisible: boolean; x: number; y: number }>`
   position: absolute;
   left: ${({ x }) => x}px;
   top: ${({ y }) => y}px;
-  transform: translate(-70%, -80%);
+  transform: translate(-50%, -130%);
   pointer-events: none;
   z-index: 1000;
   opacity: ${({ isVisible }) => (isVisible ? 1 : 0)};
@@ -126,6 +131,201 @@ const TooltipBox = styled.div<{ isVisible: boolean; x: number; y: number }>`
   }
 `;
 
+const StoreListWidget = styled.div`
+  position: absolute;
+  left: 20px;
+  top: 20px;
+  background: white;
+  border-radius: 8px;
+  padding: 12px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  z-index: 500;
+  max-height: calc(100% - 40px);
+  width: 250px;
+  display: flex;
+  flex-direction: column;
+  overflow-x: hidden;
+
+  .widget-header {
+    font-size: 14px;
+    font-weight: bold;
+    margin-bottom: 8px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid #e0e0e0;
+    color: #333;
+  }
+
+  .search-input {
+    width: 100%;
+    padding: 8px 10px;
+    border: 1px solid #d9d9d9;
+    border-radius: 4px;
+    font-size: 12px;
+    margin-bottom: 10px;
+    outline: none;
+    transition: border-color 0.2s ease;
+
+    &:focus {
+      border-color: #40a9ff;
+      box-shadow: 0 0 0 2px rgba(64, 169, 255, 0.2);
+    }
+
+    &::placeholder {
+      color: #bfbfbf;
+    }
+  }
+
+  .store-list {
+    overflow-y: auto;
+    overflow-x: hidden;
+    flex: 1;
+    max-height: 500px;
+
+    &::-webkit-scrollbar {
+      width: 6px;
+    }
+
+    &::-webkit-scrollbar-track {
+      background: #f1f1f1;
+      border-radius: 3px;
+    }
+
+    &::-webkit-scrollbar-thumb {
+      background: #888;
+      border-radius: 3px;
+    }
+
+    &::-webkit-scrollbar-thumb:hover {
+      background: #555;
+    }
+  }
+
+  .store-item {
+    padding: 8px;
+    margin-bottom: 6px;
+    border-radius: 4px;
+    background: #f9f9f9;
+    border-left: 4px solid;
+    transition: all 0.2s ease;
+    cursor: pointer;
+
+    &:hover {
+      background: #f0f0f0;
+      transform: translateX(2px);
+    }
+
+    &.selected {
+      background: #e6f7ff;
+      border-left-width: 6px;
+      box-shadow: 0 2px 6px rgba(24, 144, 255, 0.2);
+    }
+
+    .store-name {
+      font-size: 12px;
+      font-weight: 600;
+      color: #333;
+      margin-bottom: 4px;
+    }
+
+    .store-footfall {
+      font-size: 11px;
+      font-weight: 500;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+
+      .label {
+        color: #999;
+      }
+
+      .value {
+        font-weight: 600;
+      }
+    }
+  }
+
+  .no-results {
+    padding: 16px;
+    text-align: center;
+    color: #999;
+    font-size: 12px;
+  }
+
+  .layer-filter {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 10px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid #e0e0e0;
+  }
+
+  .layer-btn {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 6px 8px;
+    font-size: 9px;
+    border: 2px solid #d9d9d9;
+    border-radius: 6px;
+    background: #fff;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    color: #666;
+    min-width: 48px;
+
+    img {
+      width: 24px;
+      height: 24px;
+      margin-bottom: 3px;
+      object-fit: contain;
+    }
+
+    &:hover {
+      border-color: #40a9ff;
+      color: #40a9ff;
+    }
+
+    &.active {
+      background: #e6f7ff;
+      border-color: #1890ff;
+      color: #1890ff;
+    }
+  }
+
+  .loading-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(255, 255, 255, 0.8);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+    border-radius: 8px;
+  }
+
+  .loading-spinner {
+    width: 40px;
+    height: 40px;
+    border: 3px solid #f3f3f3;
+    border-top: 3px solid #1890ff;
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+  }
+
+  @keyframes spin {
+    0% {
+      transform: rotate(0deg);
+    }
+    100% {
+      transform: rotate(360deg);
+    }
+  }
+`;
+
 export default function SupersetPluginChartFloorMap(
   props: SupersetPluginChartFloorMapProps,
 ) {
@@ -142,40 +342,138 @@ export default function SupersetPluginChartFloorMap(
   // height and width are the height and width of the DOM element as it exists in the dashboard.
   // There is also a `data` prop, which is, of course, your DATA 🎉
   const { data, height, width, floorSelection } = props;
-  const [hoveredStoreName, setHoveredStoreName] = useState<string | null>(null);
-  const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
+  const [hoveredItemName, setHoveredItemName] = useState<string | null>(null);
   const [tooltipPos, setTooltipPos] = useState({ x: 0, y: 0 });
+  const [isFullScreen, setIsFullScreen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [selectedItemName, setSelectedItemName] = useState<string | null>(null);
+  const [layerFilters, setLayerFilters] = useState<string[]>(['Retail']);
+  const [isFilterLoading, setIsFilterLoading] = useState(false);
   const rootElem = createRef<HTMLDivElement>();
+  const zoomPanRef = useRef<ZoomPanWrapperRef>(null);
+
+  // Layer images mapping
+  const layerImages: Record<string, string> = {
+    Entrances: layerEntrances,
+    Circulation: layerCirculation,
+    Public: layerPublic,
+    Retail: layerShops,
+  };
+
+  // Detect fullscreen mode by checking if the parent has position:fixed (Superset adds this when fullscreen)
+  useEffect(() => {
+    const checkFullScreen = () => {
+      if (rootElem.current) {
+        // Check if any parent has position fixed (indicates fullscreen in Superset dashboard)
+        let parent = rootElem.current.parentElement;
+        while (parent) {
+          const style = window.getComputedStyle(parent);
+          if (style.position === 'fixed' && style.zIndex === '3000') {
+            setIsFullScreen(true);
+            return;
+          }
+          parent = parent.parentElement;
+        }
+        setIsFullScreen(false);
+      }
+    };
+
+    // Check initially and on resize
+    checkFullScreen();
+
+    // Use MutationObserver to detect style changes
+    const observer = new MutationObserver(checkFullScreen);
+    if (rootElem.current?.parentElement) {
+      observer.observe(document.body, {
+        attributes: true,
+        subtree: true,
+        attributeFilter: ['style', 'class'],
+      });
+    }
+
+    return () => observer.disconnect();
+  }, [height, width]);
 
   // Get the current floor image based on selection
   const currentFloorImage = floorImages[floorSelection] || floorImages.C;
 
-  // Group data by store name
-  const groupedByStore = React.useMemo(() => {
-    if (!data || !Array.isArray(data)) return {};
-    return data.reduce(
-      (acc: Record<string, (typeof data)[0][]>, store: any) => {
-        const storeName = store.store || 'Unknown';
-        if (!acc[storeName]) {
-          acc[storeName] = [];
-        }
-        acc[storeName].push(store);
-        return acc;
-      },
-      {},
-    );
+  // Helper function to map category to layer
+  const getCategoryLayer = (category: string | undefined | null): string => {
+    if (!category) return 'Retail';
+    const cat = category.toLowerCase();
+    if (cat.includes('entrance')) return 'Entrances';
+    if (cat.includes('circulation')) return 'Circulation';
+    if (cat.includes('public')) return 'Public';
+    return 'Retail';
+  };
+
+  // Get unique items with their total footfall for the list widget
+  const uniqueItems = React.useMemo(() => {
+    if (!data || !Array.isArray(data)) return [];
+    const itemMap = new Map();
+    data.forEach((item: any) => {
+      const itemName = item.name || 'Unknown';
+      if (!itemMap.has(itemName)) {
+        itemMap.set(itemName, {
+          name: itemName,
+          footfall: item.total_footfall || 0,
+          category: item.category || '',
+          layer: getCategoryLayer(item.category),
+        });
+      }
+    });
+    return Array.from(itemMap.values()).sort((a, b) => b.footfall - a.footfall);
   }, [data]);
 
-  // Often, you just want to access the DOM and do whatever you want.
-  // Here, you can do that with createRef, and the useEffect hook.
-  useEffect(() => {
-    const root = rootElem.current as HTMLElement;
-    console.log('Plugin element', root);
-  });
+  // Filter items based on search query and layer filter
+  const filteredItems = React.useMemo(() => {
+    let result = uniqueItems;
 
-  const handleStoreHoverEnter = (
-    index: number,
-    storeName: string,
+    // Apply layer filter (multiple selections)
+    if (layerFilters.length > 0) {
+      result = result.filter(item => layerFilters.includes(item.layer));
+    }
+
+    // Apply search filter
+    if (searchQuery.trim()) {
+      const query = searchQuery.toLowerCase().trim();
+      result = result.filter(item => item.name.toLowerCase().includes(query));
+    }
+
+    return result;
+  }, [uniqueItems, searchQuery, layerFilters]);
+
+  // Handle layer filter change with loading (toggle multiple selections)
+  const handleLayerChange = (layer: string) => {
+    setIsFilterLoading(true);
+    setLayerFilters(prev => {
+      if (prev.includes(layer)) {
+        // Remove layer if already selected (but keep at least one)
+        const newFilters = prev.filter(l => l !== layer);
+        return newFilters.length > 0 ? newFilters : prev;
+      } else {
+        // Add layer to selection
+        return [...prev, layer];
+      }
+    });
+    // Simulate processing time for visual feedback
+    setTimeout(() => {
+      setIsFilterLoading(false);
+    }, 300);
+  };
+
+  // Handle item click from the list - zoom to the item on the map
+  const handleItemClick = (itemName: string) => {
+    setSelectedItemName(itemName);
+    // Find the item element and zoom to it
+    const itemElementId = `store-polyline-${itemName.replace(/\s+/g, '-')}`;
+    if (zoomPanRef.current) {
+      zoomPanRef.current.zoomToElement(itemElementId, 2.5);
+    }
+  };
+
+  const handleItemHoverEnter = (
+    itemName: string,
     event: React.MouseEvent<SVGPolylineElement>,
   ) => {
     const rect = event.currentTarget.getBoundingClientRect();
@@ -187,25 +485,55 @@ export default function SupersetPluginChartFloorMap(
         y: rect.top - parentRect.top,
       });
     }
-    setHoveredIndex(index);
-    setHoveredStoreName(storeName);
+    setHoveredItemName(itemName);
   };
 
-  const handleStoreHoverLeave = () => {
-    setHoveredIndex(null);
-    setHoveredStoreName(null);
+  const handleItemHoverLeave = () => {
+    setHoveredItemName(null);
   };
 
-  const hoveredStore =
-    hoveredIndex !== null && data && Array.isArray(data)
-      ? data[hoveredIndex]
+  const handleMapClick = () => {
+    setHoveredItemName(null);
+    setSelectedItemName(null);
+  };
+
+  // Get the first item data for the hovered item name (to show only one tooltip)
+  const displayedItem =
+    hoveredItemName && data && Array.isArray(data)
+      ? data.find((item: any) => item.name === hoveredItemName)
       : null;
 
-  // Get the first store data for the hovered store name (to show only one tooltip)
-  const displayedStore =
-    hoveredStoreName && data && Array.isArray(data)
-      ? data.find((store: any) => store.store === hoveredStoreName)
+  // Get selected item data for tooltip when an item is focused/selected
+  const selectedItemData =
+    selectedItemName && data && Array.isArray(data)
+      ? data.find((item: any) => item.name === selectedItemName)
       : null;
+
+  // Calculate tooltip position for selected item
+  const [selectedTooltipPos, setSelectedTooltipPos] = useState({ x: 0, y: 0 });
+
+  // Update selected tooltip position when item is selected
+  useEffect(() => {
+    if (selectedItemName && rootElem.current) {
+      // Small delay to allow zoom animation to complete
+      const updatePosition = () => {
+        const parentRect = rootElem.current?.getBoundingClientRect();
+        if (parentRect) {
+          // Position tooltip in the center of the viewport
+          setSelectedTooltipPos({
+            x: parentRect.width / 2,
+            y: parentRect.height / 2,
+          });
+        }
+      };
+
+      // Run immediately and after a delay to catch zoom animation
+      updatePosition();
+      const timer = setTimeout(updatePosition, 500);
+      return () => clearTimeout(timer);
+    }
+    return undefined;
+  }, [selectedItemName, height, width]);
 
   return (
     <Styles
@@ -215,7 +543,7 @@ export default function SupersetPluginChartFloorMap(
       height={height}
       width={width}
     >
-      <ZoomPanWrapper>
+      <ZoomPanWrapper ref={zoomPanRef}>
         <svg
           xmlns="http://www.w3.org/2000/svg"
           xmlnsXlink="http://www.w3.org/1999/xlink"
@@ -224,6 +552,7 @@ export default function SupersetPluginChartFloorMap(
           height="100%"
           style={{ display: 'block', position: 'relative' }}
           preserveAspectRatio="xMidYMid meet"
+          onClick={handleMapClick}
         >
           <image
             x="0"
@@ -237,42 +566,150 @@ export default function SupersetPluginChartFloorMap(
           {/* Render polylines grouped by store */}
           {data &&
             Array.isArray(data) &&
-            data.map((store: any, index: number) => {
-              const storeName = store.store || 'Unknown';
-              const isStoreHovered = hoveredStoreName === storeName;
+            data.map((item: any, index: number) => {
+              const itemName = item.name || 'Unknown';
+              const itemLayer = getCategoryLayer(item.category);
+              const isItemHovered = hoveredItemName === itemName;
+              const isItemSelected = selectedItemName === itemName;
+
+              // Filter polylines based on layer selection (multiple)
+              if (
+                layerFilters.length > 0 &&
+                !layerFilters.includes(itemLayer)
+              ) {
+                return null;
+              }
+
               return (
-                <StorePolyline
+                <g
                   key={index}
-                  store={store}
-                  index={index}
-                  isHovered={isStoreHovered}
-                  onHoverEnter={e => handleStoreHoverEnter(index, storeName, e)}
-                  onHoverLeave={handleStoreHoverLeave}
-                />
+                  id={`store-polyline-${itemName.replace(/\s+/g, '-')}`}
+                >
+                  <StorePolyline
+                    store={item}
+                    index={index}
+                    isHovered={isItemHovered || isItemSelected}
+                    onHoverEnter={e => handleItemHoverEnter(itemName, e)}
+                    onHoverLeave={handleItemHoverLeave}
+                  />
+                </g>
               );
             })}
         </svg>
       </ZoomPanWrapper>
-      {displayedStore && hoveredStoreName !== null && (
-        <TooltipBox isVisible={true} x={tooltipPos.x} y={tooltipPos.y}>
-          <div className="store-name">{displayedStore.store}</div>
-          {displayedStore.category && (
-            <div className="category-section">
-              <div className="category-label">Category</div>
-              <div className="category-name">{displayedStore.category}</div>
+      {isFullScreen && uniqueItems.length > 0 && (
+        <StoreListWidget>
+          <div className="widget-header">Store Footfall</div>
+          <input
+            type="text"
+            className="search-input"
+            placeholder="Search stores..."
+            value={searchQuery}
+            onChange={e => setSearchQuery(e.target.value)}
+          />
+          <div className="layer-filter">
+            {['Entrances', 'Circulation', 'Public', 'Retail'].map(layer => (
+              <button
+                key={layer}
+                className={`layer-btn ${layerFilters.includes(layer) ? 'active' : ''}`}
+                onClick={() => handleLayerChange(layer)}
+              >
+                {layerImages[layer] && (
+                  <img src={layerImages[layer]} alt={layer} />
+                )}
+                {layer}
+              </button>
+            ))}
+          </div>
+          {isFilterLoading && (
+            <div className="loading-overlay">
+              <div className="loading-spinner"></div>
             </div>
           )}
-          {displayedStore.total_footfall !== undefined &&
-            displayedStore.total_footfall !== null && (
+          <div className="store-list">
+            {filteredItems.length > 0 ? (
+              filteredItems.map((item, index) => (
+                <div
+                  key={index}
+                  className={`store-item ${selectedItemName === item.name ? 'selected' : ''}`}
+                  style={{
+                    borderLeftColor: getFootfallColor(item.footfall),
+                  }}
+                  onClick={() => handleItemClick(item.name)}
+                >
+                  <div className="store-name">{item.name}</div>
+                  <div className="store-footfall">
+                    <span className="label">Footfall:</span>
+                    <span
+                      className="value"
+                      style={{ color: getFootfallColor(item.footfall) }}
+                    >
+                      {item.footfall.toLocaleString()}
+                    </span>
+                  </div>
+                </div>
+              ))
+            ) : (
+              <div className="no-results">No stores found</div>
+            )}
+          </div>
+        </StoreListWidget>
+      )}
+      {/* Show tooltip for hovered item */}
+      {displayedItem && hoveredItemName !== null && (
+        <TooltipBox isVisible={true} x={tooltipPos.x} y={tooltipPos.y}>
+          <div className="store-name">{displayedItem.name}</div>
+          {displayedItem.category && (
+            <div className="category-section">
+              <div className="category-label">Category</div>
+              <div className="category-name">{displayedItem.category}</div>
+            </div>
+          )}
+          {displayedItem.total_footfall !== undefined &&
+            displayedItem.total_footfall !== null && (
               <div className="footfall-section">
                 <div className="footfall-label">Footfall</div>
                 <div
                   className="footfall-value"
                   style={{
-                    color: getFootfallColor(displayedStore.total_footfall),
+                    color: getFootfallColor(
+                      displayedItem.total_footfall as number,
+                    ),
                   }}
                 >
-                  {displayedStore.total_footfall.toLocaleString()}
+                  {(displayedItem.total_footfall as number).toLocaleString()}
+                </div>
+              </div>
+            )}
+        </TooltipBox>
+      )}
+      {/* Show tooltip for selected item (when clicking from list) */}
+      {selectedItemData && !hoveredItemName && (
+        <TooltipBox
+          isVisible={true}
+          x={selectedTooltipPos.x}
+          y={selectedTooltipPos.y}
+        >
+          <div className="store-name">{selectedItemData.name}</div>
+          {selectedItemData.category && (
+            <div className="category-section">
+              <div className="category-label">Category</div>
+              <div className="category-name">{selectedItemData.category}</div>
+            </div>
+          )}
+          {selectedItemData.total_footfall !== undefined &&
+            selectedItemData.total_footfall !== null && (
+              <div className="footfall-section">
+                <div className="footfall-label">Footfall</div>
+                <div
+                  className="footfall-value"
+                  style={{
+                    color: getFootfallColor(
+                      selectedItemData.total_footfall as number,
+                    ),
+                  }}
+                >
+                  {(selectedItemData.total_footfall as number).toLocaleString()}
                 </div>
               </div>
             )}
