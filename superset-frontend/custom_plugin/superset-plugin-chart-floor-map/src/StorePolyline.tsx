@@ -22,53 +22,117 @@ export interface StorePolylineProps {
   store: any;
   index: number;
   isHovered: boolean;
+  layer: string;
+  maxFootfall: number;
   onHoverEnter: (e: React.MouseEvent<SVGPolylineElement>) => void;
   onHoverLeave: () => void;
   onClick?: (e: React.MouseEvent<SVGPolylineElement>) => void;
 }
 
-export const getFootfallColor = (
+// Color scales for each layer (6 bins from light to dark)
+export const layerColorScales: Record<string, string[]> = {
+  Retail: [
+    'rgb(252, 217, 171)', // lightest
+    'rgb(255, 198, 104)',
+    'rgb(255, 179, 0)',
+    'rgb(225, 158, 0)',
+    'rgb(196, 138, 0)',
+    'rgb(168, 118, 0)', // darkest
+  ],
+  Entrances: [
+    'rgb(181, 196, 218)', // lightest
+    'rgb(124, 156, 199)',
+    'rgb(51, 119, 179)',
+    'rgb(23, 103, 183)',
+    'rgb(24, 85, 184)',
+    'rgb(51, 63, 179)', // darkest
+  ],
+  Circulation: [
+    'rgb(234, 201, 238)', // lightest
+    'rgb(227, 163, 238)',
+    'rgb(219, 124, 238)',
+    'rgb(189, 93, 208)',
+    'rgb(159, 63, 179)',
+    'rgb(130, 28, 151)', // darkest
+  ],
+  Public: [
+    'rgb(187, 228, 231)', // lightest
+    'rgb(129, 218, 224)',
+    'rgb(15, 207, 218)',
+    'rgb(16, 173, 183)',
+    'rgb(16, 141, 149)',
+    'rgb(14, 110, 116)', // darkest
+  ],
+};
+
+// Get color based on footfall, layer, and max footfall (dynamic bins)
+export const getLayerFootfallColor = (
   footfall: number | undefined | null,
+  layer: string,
+  maxFootfall: number,
 ): string => {
+  // No data or 0 value -> uncolored (transparent with border only)
   if (footfall === undefined || footfall === null || footfall === 0) {
-    return 'rgb(237, 237, 237)'; // Light gray - No Data
+    return 'rgba(237, 237, 237, 0.93)'; // Very light gray, semi-transparent
   }
-  if (footfall <= 1) {
-    return 'rgb(252, 217, 171)'; // Light beige
-  }
-  if (footfall <= 1051) {
-    return 'rgb(255, 198, 104)'; // Orange
-  }
-  if (footfall <= 2101) {
-    return 'rgb(255, 179, 0)'; // Darker orange
-  }
-  if (footfall <= 3151) {
-    return 'rgb(225, 158, 0)'; // Even darker orange
-  }
-  if (footfall <= 4201) {
-    return 'rgb(196, 138, 0)'; // Brown-orange
-  }
-  return 'rgb(168, 118, 0)'; // Dark brown-orange
+
+  const colors = layerColorScales[layer] || layerColorScales.Retail;
+
+  // If maxFootfall is 0 or less, return first color
+  if (maxFootfall <= 1) return colors[0];
+
+  // Calculate bin size (6 equal bins from 1 to maxFootfall)
+  const binSize = Math.ceil((maxFootfall - 1) / 6);
+
+  // Determine which bin the footfall falls into (0-indexed)
+  const binIndex = Math.min(Math.floor((footfall - 1) / binSize), 5);
+
+  return colors[binIndex];
+};
+
+// Get color bins for legend display
+export const getColorBins = (
+  maxFootfall: number,
+  layer: string,
+): { min: number; max: number; color: string; label: string }[] => {
+  const colors = layerColorScales[layer] || layerColorScales.Retail;
+  // Calculate bin size (6 equal bins from 1 to maxFootfall)
+  const binSize = Math.ceil((maxFootfall - 1) / 6);
+
+  return colors.map((color, index) => {
+    const min = 1 + index * binSize;
+    const max = index === 5 ? maxFootfall : 1 + (index + 1) * binSize - 1;
+    return {
+      min,
+      max,
+      color,
+      label: `${min}`,
+    };
+  });
 };
 
 export function StorePolyline({
   store,
   index,
   isHovered,
+  layer,
+  maxFootfall,
   onHoverEnter,
   onHoverLeave,
   onClick,
 }: StorePolylineProps) {
-  const fillColor = getFootfallColor(store.total_footfall);
+  const fillColor = getLayerFootfallColor(
+    store.total_footfall,
+    layer,
+    maxFootfall,
+  );
+  const hasNoData =
+    store.total_footfall === undefined ||
+    store.total_footfall === null ||
+    store.total_footfall === 0;
 
   // Skip rendering if points is NULL, undefined, or empty
   if (!store.points || store.points === 'null' || store.points === '') {
-    console.log(
-      'Skipping item without points:',
-      store.name || store,
-      'footfall:',
-      store.total_footfall,
-    );
     return null;
   }
 
@@ -85,7 +149,7 @@ export function StorePolyline({
         style={{
           stroke: isHovered ? '#000000' : 'rgba(0, 0, 0, 0.3)',
           fill: fillColor,
-          opacity: isHovered ? 0.9 : 0.7,
+          opacity: isHovered ? 0.9 : hasNoData ? 0.4 : 0.7,
           transition: 'all 0.3s ease',
           pointerEvents: 'auto',
           zIndex: isHovered ? 10 : 2,

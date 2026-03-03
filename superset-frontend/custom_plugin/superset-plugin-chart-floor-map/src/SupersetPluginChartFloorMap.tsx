@@ -22,14 +22,18 @@ import {
   SupersetPluginChartFloorMapProps,
   SupersetPluginChartFloorMapStylesProps,
 } from './types';
-import { StorePolyline, getFootfallColor } from './StorePolyline';
+import {
+  StorePolyline,
+  getLayerFootfallColor,
+  getColorBins,
+} from './StorePolyline';
 import { ZoomPanWrapper, ZoomPanWrapperRef } from './ZoomPanWrapper';
-import floorImageCF from './images/TRX_floorplan_CF.jpeg';
-import floorImageCM from './images/TRX_floorplan_CM.jpg';
-import floorImageGF from './images/TRX_floorplan_GF.jpeg';
-import floorImageL1 from './images/TRX_floorplan_L1.jpeg';
-import floorImageL2 from './images/TRX_floorplan_L2.jpeg';
-import floorImagePL from './images/TRX_floorplan_PL.jpeg';
+import floorImageCF from './images/floors/TRX_floorplan_CF.jpeg';
+import floorImageCM from './images/floors/TRX_floorplan_CM.jpg';
+import floorImageGF from './images/floors/TRX_floorplan_GF.jpeg';
+import floorImageL1 from './images/floors/TRX_floorplan_L1.jpeg';
+import floorImageL2 from './images/floors/TRX_floorplan_L2.jpeg';
+import floorImagePL from './images/floors/TRX_floorplan_PL.jpeg';
 import layerEntrances from './images/entrances-layers.png';
 import layerCirculation from './images/circulation-layers.png';
 import layerPublic from './images/public-layers.png';
@@ -326,6 +330,99 @@ const StoreListWidget = styled.div`
   }
 `;
 
+const ColorLegend = styled.div`
+  position: absolute;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: white;
+  border-radius: 8px;
+  padding: 12px 16px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  z-index: 500;
+  display: flex;
+  align-items: flex-start;
+  gap: 20px;
+  border: 1px solid #ddd;
+  max-width: 90%;
+
+  .no-data-item {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+
+    .color-box {
+      width: 40px;
+      height: 12px;
+      background: #fff;
+      border: 1px solid #949494;
+      border-radius: 2px;
+    }
+
+    span {
+      font-size: 10px;
+      color: #666;
+    }
+  }
+
+  .layer-legend {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+
+    .layer-name {
+      font-size: 11px;
+      font-weight: 600;
+      color: #333;
+      text-align: center;
+    }
+
+    .color-bins {
+      display: flex;
+      flex-direction: column;
+
+      .color-row {
+        display: flex;
+      }
+
+      .no-data-box {
+        width: 40px;
+        height: 12px;
+        background: rgb(237, 237, 237);
+        border-radius: 2px 0 0 2px;
+      }
+
+      .labels-row {
+        display: flex;
+        position: relative;
+      }
+
+      .color-box {
+        width: 40px;
+        height: 12px;
+      }
+
+      .color-box:first-child {
+        border-radius: 2px 0 0 2px;
+      }
+
+      .color-box:last-child {
+        border-radius: 0 2px 2px 0;
+      }
+
+      .bin-label {
+        font-size: 9px;
+        color: #666;
+        white-space: nowrap;
+        text-align: left;
+        padding-top: 2px;
+        width: 40px;
+      }
+    }
+  }
+`;
+
 export default function SupersetPluginChartFloorMap(
   props: SupersetPluginChartFloorMapProps,
 ) {
@@ -427,12 +524,13 @@ export default function SupersetPluginChartFloorMap(
 
   // Filter items based on search query and layer filter
   const filteredItems = React.useMemo(() => {
+    // If no layers selected, return empty array
+    if (layerFilters.length === 0) return [];
+
     let result = uniqueItems;
 
     // Apply layer filter (multiple selections)
-    if (layerFilters.length > 0) {
-      result = result.filter(item => layerFilters.includes(item.layer));
-    }
+    result = result.filter(item => layerFilters.includes(item.layer));
 
     // Apply search filter
     if (searchQuery.trim()) {
@@ -443,14 +541,35 @@ export default function SupersetPluginChartFloorMap(
     return result;
   }, [uniqueItems, searchQuery, layerFilters]);
 
+  // Calculate max footfall per layer for dynamic color scaling
+  const maxFootfallByLayer = React.useMemo(() => {
+    if (!data || !Array.isArray(data)) return {};
+    const maxByLayer: Record<string, number> = {
+      Retail: 0,
+      Entrances: 0,
+      Circulation: 0,
+      Public: 0,
+    };
+
+    data.forEach((item: any) => {
+      const layer = getCategoryLayer(item.category);
+      const footfall = item.total_footfall || 0;
+      // Only consider items that are in the current filter
+      if (layerFilters.includes(layer) && footfall > maxByLayer[layer]) {
+        maxByLayer[layer] = footfall;
+      }
+    });
+
+    return maxByLayer;
+  }, [data, layerFilters]);
+
   // Handle layer filter change with loading (toggle multiple selections)
   const handleLayerChange = (layer: string) => {
     setIsFilterLoading(true);
     setLayerFilters(prev => {
       if (prev.includes(layer)) {
-        // Remove layer if already selected (but keep at least one)
-        const newFilters = prev.filter(l => l !== layer);
-        return newFilters.length > 0 ? newFilters : prev;
+        // Remove layer if already selected (allow empty selection)
+        return prev.filter(l => l !== layer);
       } else {
         // Add layer to selection
         return [...prev, layer];
@@ -574,7 +693,7 @@ export default function SupersetPluginChartFloorMap(
 
               // Filter polylines based on layer selection (multiple)
               if (
-                layerFilters.length > 0 &&
+                layerFilters.length === 0 ||
                 !layerFilters.includes(itemLayer)
               ) {
                 return null;
@@ -591,6 +710,8 @@ export default function SupersetPluginChartFloorMap(
                     isHovered={isItemHovered || isItemSelected}
                     onHoverEnter={e => handleItemHoverEnter(itemName, e)}
                     onHoverLeave={handleItemHoverLeave}
+                    layer={itemLayer}
+                    maxFootfall={maxFootfallByLayer[itemLayer] || 1}
                   />
                 </g>
               );
@@ -608,7 +729,7 @@ export default function SupersetPluginChartFloorMap(
             onChange={e => setSearchQuery(e.target.value)}
           />
           <div className="layer-filter">
-            {['Entrances', 'Circulation', 'Public', 'Retail'].map(layer => (
+            {['Retail', 'Entrances', 'Circulation', 'Public'].map(layer => (
               <button
                 key={layer}
                 className={`layer-btn ${layerFilters.includes(layer) ? 'active' : ''}`}
@@ -633,7 +754,11 @@ export default function SupersetPluginChartFloorMap(
                   key={index}
                   className={`store-item ${selectedItemName === item.name ? 'selected' : ''}`}
                   style={{
-                    borderLeftColor: getFootfallColor(item.footfall),
+                    borderLeftColor: getLayerFootfallColor(
+                      item.footfall,
+                      item.layer,
+                      maxFootfallByLayer[item.layer] || 1,
+                    ),
                   }}
                   onClick={() => handleItemClick(item.name)}
                 >
@@ -642,7 +767,13 @@ export default function SupersetPluginChartFloorMap(
                     <span className="label">Footfall:</span>
                     <span
                       className="value"
-                      style={{ color: getFootfallColor(item.footfall) }}
+                      style={{
+                        color: getLayerFootfallColor(
+                          item.footfall,
+                          item.layer,
+                          maxFootfallByLayer[item.layer] || 1,
+                        ),
+                      }}
                     >
                       {item.footfall.toLocaleString()}
                     </span>
@@ -672,8 +803,12 @@ export default function SupersetPluginChartFloorMap(
                 <div
                   className="footfall-value"
                   style={{
-                    color: getFootfallColor(
+                    color: getLayerFootfallColor(
                       displayedItem.total_footfall as number,
+                      getCategoryLayer(displayedItem.category as string),
+                      maxFootfallByLayer[
+                        getCategoryLayer(displayedItem.category as string)
+                      ] || 1,
                     ),
                   }}
                 >
@@ -704,8 +839,12 @@ export default function SupersetPluginChartFloorMap(
                 <div
                   className="footfall-value"
                   style={{
-                    color: getFootfallColor(
+                    color: getLayerFootfallColor(
                       selectedItemData.total_footfall as number,
+                      getCategoryLayer(selectedItemData.category as string),
+                      maxFootfallByLayer[
+                        getCategoryLayer(selectedItemData.category as string)
+                      ] || 1,
                     ),
                   }}
                 >
@@ -714,6 +853,40 @@ export default function SupersetPluginChartFloorMap(
               </div>
             )}
         </TooltipBox>
+      )}
+      {/* Color Legend */}
+      {isFullScreen && layerFilters.length > 0 && (
+        <ColorLegend>
+          {layerFilters.map(layer => {
+            const maxVal = maxFootfallByLayer[layer] || 0;
+            const bins = getColorBins(maxVal, layer);
+            return (
+              <div key={layer} className="layer-legend">
+                <div className="layer-name">{layer}</div>
+                <div className="color-bins">
+                  <div className="color-row">
+                    <div className="no-data-box"></div>
+                    {bins.map((bin, idx) => (
+                      <div
+                        key={idx}
+                        className="color-box"
+                        style={{ backgroundColor: bin.color }}
+                      ></div>
+                    ))}
+                  </div>
+                  <div className="labels-row">
+                    <span className="bin-label">0</span>
+                    {bins.map((bin, idx) => (
+                      <span key={idx} className="bin-label">
+                        {bin.label}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </ColorLegend>
       )}
     </Styles>
   );
