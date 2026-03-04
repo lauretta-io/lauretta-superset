@@ -28,12 +28,42 @@ import {
   getColorBins,
 } from './StorePolyline';
 import { ZoomPanWrapper, ZoomPanWrapperRef } from './ZoomPanWrapper';
-import floorImageCF from './images/floors/TRX_floorplan_CF.jpeg';
-import floorImageCM from './images/floors/TRX_floorplan_CM.jpg';
-import floorImageGF from './images/floors/TRX_floorplan_GF.jpeg';
-import floorImageL1 from './images/floors/TRX_floorplan_L1.jpeg';
-import floorImageL2 from './images/floors/TRX_floorplan_L2.jpeg';
-import floorImagePL from './images/floors/TRX_floorplan_PL.jpeg';
+
+// Dynamically import all floor images from the floors folder
+// This allows adding new floor images without code changes
+// Image naming convention: {FloorCode}.{ext} (e.g., CF.jpeg, CM.jpg, G.png)
+// Or with prefix: {prefix}_{FloorCode}.{ext} (e.g., TRX_floorplan_CF.jpeg)
+const floorImagesContext = require.context(
+  './images/floors',
+  false,
+  /\.(jpeg|jpg|png|gif|webp)$/i,
+);
+
+// Build floor images map from all images in the folder
+const buildFloorImagesMap = (): Record<string, string> => {
+  const images: Record<string, string> = {};
+  floorImagesContext.keys().forEach((key: string) => {
+    // Extract filename without extension: ./CF.jpeg -> CF, ./TRX_floorplan_CF.jpeg -> CF
+    const filename = key
+      .replace(/^\.\//, '')
+      .replace(/\.(jpeg|jpg|png|gif|webp)$/i, '');
+    // Extract floor code (last part after underscore, or full name if no underscore)
+    const parts = filename.split('_');
+    const floorCode = parts.length > 1 ? parts[parts.length - 1] : filename;
+    // Store with floor code as key (prioritize shorter filenames like CF.jpeg over TRX_floorplan_CF.jpeg)
+    if (
+      !images[floorCode] ||
+      filename.length <
+        Object.keys(images).find(k => images[k] === images[floorCode])?.length!
+    ) {
+      images[floorCode] = floorImagesContext(key);
+    }
+  });
+  return images;
+};
+
+const dynamicFloorImages = buildFloorImagesMap();
+
 import layerEntrances from './images/entrances-layers.png';
 import layerCirculation from './images/circulation-layers.png';
 import layerPublic from './images/public-layers.png';
@@ -426,15 +456,10 @@ const ColorLegend = styled.div`
 export default function SupersetPluginChartFloorMap(
   props: SupersetPluginChartFloorMapProps,
 ) {
-  // Map floor selection to floor images
-  const floorImages: Record<string, string> = {
-    C: floorImageCF,
-    M: floorImageCM,
-    G: floorImageGF,
-    L1: floorImageL1,
-    L2: floorImageL2,
-    PL: floorImagePL,
-  };
+  // Use dynamically loaded floor images from ./images/floors/ folder
+  // Images are loaded at build time using webpack's require.context
+  // To add new floors: just add image files to the floors folder with naming: {FloorCode}.{ext}
+  const floorImages = dynamicFloorImages;
 
   // height and width are the height and width of the DOM element as it exists in the dashboard.
   // There is also a `data` prop, which is, of course, your DATA 🎉
@@ -492,7 +517,9 @@ export default function SupersetPluginChartFloorMap(
   }, [height, width]);
 
   // Get the current floor image based on selection
-  const currentFloorImage = floorImages[floorSelection] || floorImages.C;
+  // Falls back to the first available floor image if selected floor not found
+  const currentFloorImage =
+    floorImages[floorSelection] || Object.values(floorImages)[0];
 
   // Helper function to map category to layer
   const getCategoryLayer = (category: string | undefined | null): string => {

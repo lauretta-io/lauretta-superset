@@ -31,3 +31,22 @@ declare module '*.jpeg' {
   const value: any;
   export default value;
 }
+
+// Webpack require.context for dynamic imports
+interface RequireContext {
+  keys(): string[];
+  (id: string): any;
+  <T>(id: string): T;
+  resolve(id: string): string;
+  id: string;
+}
+
+declare interface NodeRequire {
+  context(
+    directory: string,
+    useSubdirectories?: boolean,
+    regExp?: RegExp,
+  ): RequireContext;
+}
+
+declare const require: NodeRequire;
