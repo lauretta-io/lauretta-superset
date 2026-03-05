@@ -110,19 +110,19 @@ SQLLAB_CTAS_NO_LIMIT = True
 log_level_text = os.getenv("SUPERSET_LOG_LEVEL", "INFO")
 LOG_LEVEL = getattr(logging, log_level_text.upper(), logging.INFO)
 
-LAURETTA_FLOORS_DIR = Path("/app/lauretta/dashboards/floors")
+LAURETTA_IMAGES_DIR = Path("/app/lauretta/images")
 ALLOWED_FLOOR_IMAGE_EXTENSIONS = {".jpeg", ".jpg", ".png", ".gif", ".webp"}
 
 
 def _resolve_floor_image(floor_ref: str) -> Path | None:
-    if not LAURETTA_FLOORS_DIR.exists() or not floor_ref:
+    if not LAURETTA_IMAGES_DIR.exists() or not floor_ref:
         return None
 
     cleaned_ref = floor_ref.strip().lstrip("/")
-    candidate_by_name = (LAURETTA_FLOORS_DIR / cleaned_ref).resolve()
+    candidate_by_name = (LAURETTA_IMAGES_DIR / cleaned_ref).resolve()
     if (
         candidate_by_name.is_file()
-        and candidate_by_name.parent == LAURETTA_FLOORS_DIR.resolve()
+        and candidate_by_name.parent == LAURETTA_IMAGES_DIR.resolve()
         and candidate_by_name.suffix.lower() in ALLOWED_FLOOR_IMAGE_EXTENSIONS
     ):
         return candidate_by_name
@@ -132,7 +132,7 @@ def _resolve_floor_image(floor_ref: str) -> Path | None:
         target_code = ""
 
     matched: list[Path] = []
-    for image_path in sorted(LAURETTA_FLOORS_DIR.iterdir()):
+    for image_path in sorted(LAURETTA_IMAGES_DIR.iterdir()):
         if not image_path.is_file():
             continue
         if image_path.suffix.lower() not in ALLOWED_FLOOR_IMAGE_EXTENSIONS:
@@ -149,7 +149,7 @@ def _resolve_floor_image(floor_ref: str) -> Path | None:
 
 
 def FLASK_APP_MUTATOR(app):
-    @app.get("/api/v1/lauretta/images/floors/<path:floor_ref>")
+    @app.get("/api/v1/lauretta/images/<path:floor_ref>")
     def lauretta_floor_image(floor_ref: str):
         image_path = _resolve_floor_image(floor_ref)
         if not image_path:

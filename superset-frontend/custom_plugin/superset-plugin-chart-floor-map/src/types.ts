@@ -32,6 +32,7 @@ export interface SupersetPluginChartFloorMapStylesProps {
 interface SupersetPluginChartFloorMapCustomizeProps {
   headerText: string;
   floorSelection: string;
+  floorImage: string;
 }
 
 export type SupersetPluginChartFloorMapQueryFormData = QueryFormData &

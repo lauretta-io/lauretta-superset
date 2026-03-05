@@ -32,7 +32,7 @@ import { ZoomPanWrapper, ZoomPanWrapperRef } from './ZoomPanWrapper';
 // Floor image URL using the image filename from config.json (e.g., "TRX_floorplan_CF.jpeg")
 const getFloorImageUrl = (imageFilename?: string): string => {
   if (!imageFilename?.trim()) return '';
-  return `/api/v1/lauretta/images/floors/${encodeURIComponent(imageFilename.trim())}`;
+  return `/api/v1/lauretta/images/${encodeURIComponent(imageFilename.trim())}`;
 };
 
 import layerEntrances from './images/entrances-layers.png';

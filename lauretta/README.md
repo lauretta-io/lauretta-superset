@@ -70,7 +70,7 @@ After setup, your dashboards should be visible immediately in the Superset UI un
 lauretta-superset/
 ├── lauretta/
 │   ├── README.md                      ← This file
-│   ├── test-import-dashboard.sh       ← Manual import test script
+│   ├── images/                        ← Floor plan images (e.g., floor_CF.jpeg)
 │   └── dashboards/
 │       ├── config.json                ← Your config (git-ignored)
 │       ├── config.example.json        ← Config template
@@ -78,8 +78,8 @@ lauretta-superset/
 │       └── *.zip                      ← Your dashboard files
 ├── docker/
 │   ├── docker-init.sh                 ← Container initialization
-│   └── import-dashboards.sh           ← Dashboard import logic
-└── docker-compose-non-dev.yml                 ← Docker orchestration
+│   └── import-dashboards.py           ← Dashboard import logic
+└── docker-compose-non-dev.yml         ← Docker orchestration
 ```
 
 ---
@@ -90,20 +90,31 @@ lauretta-superset/
 
 **File**: `lauretta/dashboards/config.json`
 
-
 ```json
 {
   "dashboards": [
     {
       "path": "/lauretta/dashboards/property_demo.zip",
       "connections": {
-        "database_name": "my_database",
+        "database_display_name": "my_database",
         "host": "localhost",
         "port": 5432,
-        "password": "your_password",
         "username": "your_username",
+        "password": "your_password",
         "db": "your_database_name"
-      }
+      },
+      "floors": [
+        {
+          "id": 1,
+          "name": "FLOOR NAME",
+          "image": "floor_plan_F1.jpeg"
+        },
+        {
+          "id": 2,
+          "name": "FLOOR NAME 2",
+          "image": "floor_plan_F2.png"
+        }
+      ]
     }
   ]
 }
@@ -114,46 +125,84 @@ lauretta-superset/
 - `dashboards` - Array of dashboard configurations
   - `path` (required) - Path to the dashboard ZIP file (usually starts with `/lauretta/`)
   - `connections` (required) - Database connection object for this dashboard
-    - `database_name` (required) - **Unique name for this database connection** (used internally by Superset)
+    - `database_display_name` (required) - **Display name for this database connection** (shown in Superset UI)
     - `host` (required) - Database host
     - `port` (required) - Database port
     - `username` (required) - Database username
     - `password` (required) - Database password to inject
     - `db` (required) - Database name
+  - `floors` (optional) - Array of floor plan entries for Floor Map charts
+    - `id` (required) - **The floor's ID as stored in the database** — this is NOT the display order; it must match the actual floor ID value in your data source
+    - `name` (required) - Display name of the floor (e.g., `"Ground"`, `"Level 1"`)
+    - `image` (required) - Filename of the floor plan image placed in `lauretta/images/` (e.g., `"floor_plan_F1.jpeg"`)
+
+> ⚠️ **Important — `id` is a database ID, not a sequence number.**  
+> The `id` value must match the floor identifier in your database (e.g., the value stored in the `floor_id` column of your dataset). Setting it to `1, 2, 3...` by order will cause the wrong floor map to display if your database uses different IDs.
+
+### 2. Floor Plan Images
+
+Floor plan images are served directly from the `lauretta/images/` folder — **no rebuild required** when adding or changing images.
+
+**Steps to add / update a floor image**:
+
+1. Copy your image file into `lauretta/images/`:
+   ```bash
+   cp ~/Downloads/floor_plan_L1.jpeg lauretta/images/
+   ```
+
+2. Update `lauretta/dashboards/config.json` so the floor entry references the correct filename:
+   ```json
+   {
+     "id": 1,
+     "name": "Level 1",
+     "image": "floor_plan_L1.jpeg"
+   }
+   ```
+
+3. Restart the init container to re-import chart configuration:
+   ```bash
+   docker compose restart superset-init
+   ```
+
+Images are served at runtime from:
+```
+GET /api/v1/lauretta/images/<filename>
+```
+
+**Supported image formats**: `.jpeg`, `.jpg`, `.png`, `.gif`, `.webp`
 
 **What happens during import**:
 
 1. The script extracts your dashboard ZIP
 2. Updates the database YAML file with your connection info:
-   - `database_name` field
+   - `database_display_name` field
    - `sqlalchemy_uri` (built from host, port, username, password, db)
-3. Renames database YAML file to `{database_name}.yaml`
-4. Renames datasets folder to `{database_name}`
-5. Runs `superset set-database-uri` command to register the database
-6. Imports the dashboard
+3. Creates floor map charts — one per floor entry in `floors`
+4. Associates each chart with the correct floor image filename
+5. Imports the dashboard
 
-**IMPORTANT - About `database_name`**:
+**IMPORTANT - About `database_display_name`**:
 
-⚠️ **DO NOT change `database_name` after initial import** - this creates a NEW database connection!
+⚠️ **DO NOT change `database_display_name` after initial import** — this creates a NEW database connection!
 
-- **First import with `database_name: "test"`** → Creates database connection named `test`
-- **Changing to `database_name: "test2"`** → Creates a NEW separate database connection `test2`
+- **First import with `database_display_name: "test"`** → Creates database connection named `test`
+- **Changing to `database_display_name: "test2"`** → Creates a NEW separate connection `test2`
 
 **To simply update database credentials** (host, password, etc.):
-- ✅ Keep `database_name` the **same**
+- ✅ Keep `database_display_name` the **same**
 - ✅ Update only `host`, `port`, `username`, `password`, or `db` fields
-- ✅ Re-import the dashboard
+- ✅ Re-run the import
 
 **To use a different database**:
-- Create a new dashboard entry with a different `database_name`
+- Create a new dashboard entry with a different `database_display_name`
 - List both in the `dashboards` array
 
 **Important Security Notes**:
-- ⚠️ `config.json` is **git-ignored** - never commit database information to git
-- ✅ `config.example.json` is the template - safe to commit
+- ⚠️ `config.json` is **git-ignored** — never commit database credentials to git
+- ✅ `config.example.json` is the template — safe to commit
 - 📝 Only dashboards listed here will be imported
 - 
-### 2. Environment Variables
+### 3. Environment Variables
 
 **File**: `docker/.env`
 
@@ -188,46 +237,43 @@ DATABASE_DB=superset
   - Creates admin user
   - Sets up roles/permissions
   ↓
-4. import-dashboards.sh executes:
+4. import-dashboards.py executes:
   - Reads config.json
   - For each dashboard:
     a. Unzips dashboard file (using the path field)
     b. Locates database YAML files in databases/ folder
     c. Updates YAML with:
-       - database_name from config.json
+       - database_display_name from config.json
        - sqlalchemy_uri (connection string)
-    d. Renames YAML file to {database_name}.yaml
-    e. Renames datasets folder to {database_name}
+    d. Creates floor map charts for each entry in the floors array
+    e. Associates each floor chart with the image filename from config.json
     f. Creates modified ZIP file
-    g. Runs: superset set-database-uri --database_name "..." --uri "..."
-    h. Imports dashboard using modified ZIP
+    g. Imports dashboard using modified ZIP
   ↓
 5. Superset app starts
   ↓
 6. Dashboards ready to use!
 ```
 
-### Password & Database Connection Injection Process
+### Dashboard & Floor Map Import Process
 
-The `import-dashboards.sh` script automates database credential and configuration injection:
+The `import-dashboards.py` script automates database credential injection and floor chart creation:
 
 1. **Extracts** the dashboard ZIP file using the `path` from config.json.
 2. **Locates** all database YAML files inside the `databases/` folder.
 3. **Updates the YAML file** with:
-   - `database_name` - Set to the value from config.json
+   - `database_display_name` - Set to the value from config.json
    - `sqlalchemy_uri` - Built from `host`, `port`, `username`, `password`, and `db`
-4. **Renames the YAML file** to `{database_name}.yaml`
-5. **Renames datasets folder** to `{database_name}` (matches the database connection)
-6. **Prints folder tree** showing all changes made
-7. **Creates modified ZIP** with all updates
-8. **Registers the database** using: `superset set-database-uri --database_name "..." --uri "..."`
-9. **Imports the dashboard** into Superset using the modified ZIP file
+4. **Creates floor map charts** - one chart per entry in the `floors` array, each storing the `image` filename
+5. **Images are served at runtime** from `lauretta/images/` via `/api/v1/lauretta/images/<filename>` \u2014 no rebuild needed
+6. **Creates modified ZIP** with all updates
+7. **Imports the dashboard** into Superset using the modified ZIP file
 
 This ensures:
-- ✅ Database credentials are injected directly into dashboard files
-- ✅ Database connections are properly registered with Superset
-- ✅ No manual UI configuration required
-- ✅ Datasets folder matches the database connection name
+- \u2705 Database credentials are injected directly into dashboard files
+- \u2705 Floor plan images served at runtime from `lauretta/images/`
+- \u2705 No manual UI configuration required
+- \u2705 New floors/images only need a config update + `docker compose restart superset-init`
 
 ---
 
@@ -257,17 +303,23 @@ This ensures:
        {
          "path": "/lauretta/dashboards/my_dashboard.zip",
          "connections": {
-           "database_name": "my_database",
+           "database_display_name": "my_database",
            "host": "localhost",
            "port": 5432,
            "username": "username",
            "password": "db_password",
            "db": "database_name"
-         }
+         },
+         "floors": [
+           { "id": 1, "name": "Ground", "image": "floor_ground.jpeg" },
+           { "id": 2, "name": "Level 1", "image": "floor_l1.jpeg" }
+         ]
        }
      ]
    }
    ```
+
+   > **Note**: Place all floor image files in `lauretta/images/` before restarting.
 
 4. **Restart to import**:
    ```bash
@@ -281,10 +333,10 @@ This ensures:
 
 **If you just need to update database credentials** (host, port, password, etc.):
 
-✅ **Keep `database_name` the SAME**
+✅ **Keep `database_display_name` the SAME**
 - Edit config.json
 - Update only: `host`, `port`, `username`, `password`, or `db`
-- **DO NOT change `database_name`**
+- **DO NOT change `database_display_name`**
 - Re-run the import script
 
 Example:
@@ -294,17 +346,37 @@ Example:
     {
       "path": "/lauretta/dashboards/my_dashboard.zip",
       "connections": {
-        "database_name": "my_database",        // ← KEEP THIS SAME
-        "host": "new-host.com",                // ← Update this
-        "port": 5432,                          // ← Or this
-        "username": "new_username",            // ← Or this
-        "password": "new_password",            // ← Or this
-        "db": "new_database_name"              // ← Or this
+        "database_display_name": "my_database", // ← KEEP THIS SAME
+        "host": "new-host.com",                 // ← Update this
+        "port": 5432,                           // ← Or this
+        "username": "new_username",             // ← Or this
+        "password": "new_password",             // ← Or this
+        "db": "new_database_name"               // ← Or this
       }
     }
   ]
 }
 ```
+
+---
+### Adding or Updating a Floor Image
+
+1. **Copy the image** into `lauretta/images/`:
+   ```bash
+   cp ~/Downloads/new_floorplan.jpeg lauretta/images/
+   ```
+
+2. **Update `config.json`** to reference the filename:
+   ```json
+   { "id": 3, "name": "Level 2", "image": "new_floorplan.jpeg" }
+   ```
+
+3. **Restart** the init container:
+   ```bash
+   docker compose restart superset-init
+   ```
+
+No rebuild of the frontend is needed — images are fetched from `lauretta/images/` at runtime.
 
 Then run:
 ```bash
@@ -477,10 +549,6 @@ docker-compose -f docker-compose-non-dev.yml up -d --build
 
 ```bash
 # Fix file permissions
-chmod +x docker/import-dashboards.sh
-chmod +x lauretta/test-import-dashboard.sh
-
-# Fix config file
 chmod 600 lauretta/dashboards/config.json
 ```
 
@@ -505,15 +573,19 @@ If your dashboard uses a custom database connection:
    - Test connection
    - Save
 
-### Debugging Import Script
+### Debugging the Import Script
 
-Run the import script manually with debug output:
+Run the import script manually with verbose output:
 
 ```bash
-docker-compose -f docker-compose-non-dev.yml exec superset bash -x /app/docker/import-dashboards.sh
+docker exec -it superset_init python /app/docker/import-dashboards.py
 ```
 
-This shows each command as it executes.
+Or tail the logs while it runs:
+
+```bash
+docker compose -f docker-compose-non-dev.yml logs -f superset-init
+```
 
 ### Inspecting Dashboard ZIP
 
@@ -532,7 +604,7 @@ cat /tmp/dashboard_inspect/databases/*.yaml
 ### Custom Import Logic
 
 To modify the import behavior, edit:
-- **Import script**: `docker/import-dashboards.sh`
+- **Import script**: `docker/import-dashboards.py`
 - **Init script**: `docker/docker-init.sh`
 
 After changes:
@@ -572,11 +644,12 @@ Superset → Ready to use with working database connections
 
 | File | Purpose | Should Commit? |
 |------|---------|----------------|
-| `config.json` | Dashboard passwords | ❌ No (git-ignored) |
+| `config.json` | Dashboard passwords & floor config | ❌ No (git-ignored) |
 | `config.example.json` | Config template | ✅ Yes |
 | `docker-init.sh` | Container startup | ✅ Yes |
-| `import-dashboards.sh` | Import logic | ✅ Yes |
+| `import-dashboards.py` | Import logic | ✅ Yes |
 | `*.zip` | Dashboard files | ✅ Yes (no passwords) |
+| `lauretta/images/*.jpeg` | Floor plan images | ✅ Yes (no secrets) |
 
 ---
 
@@ -598,6 +671,6 @@ See `LICENSE.txt` for details.
 
 ---
 
-**Last Updated**: February 2026  
+**Last Updated**: March 2026  
 **Superset Version**: 4.1.0  
 **Maintained by**: Lauretta Team
