@@ -123,6 +123,14 @@ const config: ControlPanelConfig = {
               description: t('Select the floor to display'),
             },
           },
+          {
+            name: 'floor_image',
+            config: {
+              type: 'HiddenControl',
+              default: '',
+              renderTrigger: true,
+            },
+          },
         ],
         [
           {

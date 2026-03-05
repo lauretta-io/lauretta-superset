@@ -23,8 +23,10 @@
 import logging
 import os
 import sys
+from pathlib import Path
 
 from celery.schedules import crontab
+from flask import abort, send_file
 from flask_caching.backends.filesystemcache import FileSystemCache
 
 logger = logging.getLogger()
@@ -107,6 +109,52 @@ SQLLAB_CTAS_NO_LIMIT = True
 
 log_level_text = os.getenv("SUPERSET_LOG_LEVEL", "INFO")
 LOG_LEVEL = getattr(logging, log_level_text.upper(), logging.INFO)
+
+LAURETTA_FLOORS_DIR = Path("/app/lauretta/dashboards/floors")
+ALLOWED_FLOOR_IMAGE_EXTENSIONS = {".jpeg", ".jpg", ".png", ".gif", ".webp"}
+
+
+def _resolve_floor_image(floor_ref: str) -> Path | None:
+    if not LAURETTA_FLOORS_DIR.exists() or not floor_ref:
+        return None
+
+    cleaned_ref = floor_ref.strip().lstrip("/")
+    candidate_by_name = (LAURETTA_FLOORS_DIR / cleaned_ref).resolve()
+    if (
+        candidate_by_name.is_file()
+        and candidate_by_name.parent == LAURETTA_FLOORS_DIR.resolve()
+        and candidate_by_name.suffix.lower() in ALLOWED_FLOOR_IMAGE_EXTENSIONS
+    ):
+        return candidate_by_name
+
+    target_code = cleaned_ref.lower()
+    if target_code == "default":
+        target_code = ""
+
+    matched: list[Path] = []
+    for image_path in sorted(LAURETTA_FLOORS_DIR.iterdir()):
+        if not image_path.is_file():
+            continue
+        if image_path.suffix.lower() not in ALLOWED_FLOOR_IMAGE_EXTENSIONS:
+            continue
+        if not target_code:
+            matched.append(image_path)
+            continue
+        stem_parts = image_path.stem.split("_")
+        floor_code = stem_parts[-1] if len(stem_parts) > 1 else image_path.stem
+        if floor_code.lower() == target_code:
+            matched.append(image_path)
+
+    return matched[0] if matched else None
+
+
+def FLASK_APP_MUTATOR(app):
+    @app.get("/api/v1/lauretta/images/floors/<path:floor_ref>")
+    def lauretta_floor_image(floor_ref: str):
+        image_path = _resolve_floor_image(floor_ref)
+        if not image_path:
+            return abort(404, description=f"Floor image not found for '{floor_ref}'")
+        return send_file(image_path)
 
 if os.getenv("CYPRESS_CONFIG") == "true":
     # When running the service as a cypress backend, we need to import the config

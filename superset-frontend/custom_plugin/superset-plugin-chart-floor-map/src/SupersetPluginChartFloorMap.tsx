@@ -29,40 +29,11 @@ import {
 } from './StorePolyline';
 import { ZoomPanWrapper, ZoomPanWrapperRef } from './ZoomPanWrapper';
 
-// Dynamically import all floor images from the floors folder
-// This allows adding new floor images without code changes
-// Image naming convention: {FloorCode}.{ext} (e.g., CF.jpeg, CM.jpg, G.png)
-// Or with prefix: {prefix}_{FloorCode}.{ext} (e.g., TRX_floorplan_CF.jpeg)
-const floorImagesContext = require.context(
-  './images/floors',
-  false,
-  /\.(jpeg|jpg|png|gif|webp)$/i,
-);
-
-// Build floor images map from all images in the folder
-const buildFloorImagesMap = (): Record<string, string> => {
-  const images: Record<string, string> = {};
-  floorImagesContext.keys().forEach((key: string) => {
-    // Extract filename without extension: ./CF.jpeg -> CF, ./TRX_floorplan_CF.jpeg -> CF
-    const filename = key
-      .replace(/^\.\//, '')
-      .replace(/\.(jpeg|jpg|png|gif|webp)$/i, '');
-    // Extract floor code (last part after underscore, or full name if no underscore)
-    const parts = filename.split('_');
-    const floorCode = parts.length > 1 ? parts[parts.length - 1] : filename;
-    // Store with floor code as key (prioritize shorter filenames like CF.jpeg over TRX_floorplan_CF.jpeg)
-    if (
-      !images[floorCode] ||
-      filename.length <
-        Object.keys(images).find(k => images[k] === images[floorCode])?.length!
-    ) {
-      images[floorCode] = floorImagesContext(key);
-    }
-  });
-  return images;
+// Floor image URL using the image filename from config.json (e.g., "TRX_floorplan_CF.jpeg")
+const getFloorImageUrl = (imageFilename?: string): string => {
+  if (!imageFilename?.trim()) return '';
+  return `/api/v1/lauretta/images/floors/${encodeURIComponent(imageFilename.trim())}`;
 };
-
-const dynamicFloorImages = buildFloorImagesMap();
 
 import layerEntrances from './images/entrances-layers.png';
 import layerCirculation from './images/circulation-layers.png';
@@ -456,14 +427,9 @@ const ColorLegend = styled.div`
 export default function SupersetPluginChartFloorMap(
   props: SupersetPluginChartFloorMapProps,
 ) {
-  // Use dynamically loaded floor images from ./images/floors/ folder
-  // Images are loaded at build time using webpack's require.context
-  // To add new floors: just add image files to the floors folder with naming: {FloorCode}.{ext}
-  const floorImages = dynamicFloorImages;
-
   // height and width are the height and width of the DOM element as it exists in the dashboard.
   // There is also a `data` prop, which is, of course, your DATA 🎉
-  const { data, height, width, floorSelection } = props;
+  const { data, height, width, floorImage, floorSelection } = props;
   const [hoveredItemName, setHoveredItemName] = useState<string | null>(null);
   const [tooltipPos, setTooltipPos] = useState({ x: 0, y: 0 });
   const [isFullScreen, setIsFullScreen] = useState(false);
@@ -516,10 +482,8 @@ export default function SupersetPluginChartFloorMap(
     return () => observer.disconnect();
   }, [height, width]);
 
-  // Get the current floor image based on selection
-  // Falls back to the first available floor image if selected floor not found
-  const currentFloorImage =
-    floorImages[floorSelection] || Object.values(floorImages)[0];
+  // Use image filename first; fallback to floorSelection for older charts
+  const currentFloorImage = getFloorImageUrl(floorImage || floorSelection);
 
   // Helper function to map category to layer
   const getCategoryLayer = (category: string | undefined | null): string => {

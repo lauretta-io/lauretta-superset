@@ -2,8 +2,6 @@ import json, os, zipfile, yaml, subprocess, uuid, shutil, re, glob, string, rand
 
 CONFIG_PATH = "/app/lauretta/dashboards/config.json"
 STATE_PATH = "/app/lauretta/dashboards/state.json"
-FLOORS_SRC = "/app/lauretta/dashboards/images/floors"
-FLOORS_DEST = "/app/superset-frontend/custom_plugin/superset-plugin-chart-floor-map/src/images/floors"
 
 def read_state():
     """Read the current state from state.json."""
@@ -81,35 +79,6 @@ def generate_chart_id(length=20):
     """Generate a random chart ID like 'CHART-Wzo9LQ6k0cJGV-jcdmk4n'."""
     chars = string.ascii_letters + string.digits + '-_'
     return ''.join(random.choice(chars) for _ in range(length))
-
-def copy_floor_images_from_config(config_path=CONFIG_PATH):
-    """Copy only floor images referenced in config.json to superset-frontend, overwriting destination folder."""
-    if not os.path.exists(config_path):
-        print(f"⚠️ Config not found: {config_path}")
-        return
-    with open(config_path, 'r') as f:
-        config = json.load(f)
-    floors = []
-    for dash in config.get('dashboards', []):
-        floors.extend(dash.get('floors', []))
-    # Clean destination folder first
-    if os.path.exists(FLOORS_DEST):
-        for file in os.listdir(FLOORS_DEST):
-            file_path = os.path.join(FLOORS_DEST, file)
-            if os.path.isfile(file_path):
-                os.remove(file_path)
-    else:
-        os.makedirs(FLOORS_DEST, exist_ok=True)
-    # Copy only referenced images
-    for floor in floors:
-        image_path = floor.get('image', '').lstrip('/')
-        src = os.path.join('/app/lauretta/dashboards', image_path)
-        dst = os.path.join(FLOORS_DEST, os.path.basename(image_path))
-        if os.path.isfile(src):
-            shutil.copy2(src, dst)
-            print(f"📁 Copied floor image: {os.path.basename(image_path)}")
-        else:
-            print(f"⚠️ Image not found: {src}")
 
 def find_extract_dir(zip_path):
     """Find or create the extraction directory for a zip file.
@@ -397,12 +366,13 @@ def find_template_chart(extract_dir):
             return os.path.join(charts_dir, f)
     return None
 
-def create_default_chart_template(floor_name, chart_id, dataset_uuid):
+def create_default_chart_template(floor_name, chart_id, dataset_uuid, floor_image=''):
     """Create a default MAP FLOOR chart template structure when no template exists in ZIP."""
     params = {
         'viz_type': 'ext-floor-map',
         'slice_id': chart_id,
         'floor_selection': floor_name,
+        'floor_image': floor_image,
         'cols': ['name', 'category', 'points', 'total_footfall'],
         'adhoc_filters': [
             {
@@ -447,6 +417,7 @@ def create_default_chart_template(floor_name, chart_id, dataset_uuid):
             'viz_type': 'ext-floor-map',
             'slice_id': chart_id,
             'floor_selection': floor_name,
+            'floor_image': floor_image,
             'cols': ['name', 'category', 'points', 'total_footfall'],
             'adhoc_filters': params['adhoc_filters'],
             'row_limit': 5000,
@@ -602,7 +573,7 @@ def generate_floor_charts(extract_dir, floors, created_datasets, starting_chart_
         
         if use_generated_template:
             # Generate chart from scratch using template function
-            new_chart = create_default_chart_template(floor_name, chart_id, dataset['uuid'])
+            new_chart = create_default_chart_template(floor_name, chart_id, dataset['uuid'], floor.get('image', ''))
         else:
             # Create new chart based on existing template
             new_chart = template.copy()
@@ -616,6 +587,7 @@ def generate_floor_charts(extract_dir, floors, created_datasets, starting_chart_
                 if isinstance(params, str):
                     params = yaml.safe_load(params) if params else {}
                 params['floor_selection'] = floor_name
+                params['floor_image'] = floor.get('image', '')
                 params['slice_id'] = chart_id
                 new_chart['params'] = params
             
@@ -625,6 +597,7 @@ def generate_floor_charts(extract_dir, floors, created_datasets, starting_chart_
                     qc = json.loads(new_chart['query_context'])
                     if 'form_data' in qc:
                         qc['form_data']['floor_selection'] = floor_name
+                        qc['form_data']['floor_image'] = floor.get('image', '')
                         qc['form_data']['slice_id'] = chart_id
                     new_chart['query_context'] = json.dumps(qc)
                 except:
@@ -866,8 +839,6 @@ def update_via_superset_shell():
     if not os.path.exists(CONFIG_PATH): return
     with open(CONFIG_PATH, "r") as f:
         config = json.load(f)
-    # Copy floor images first
-    copy_floor_images_from_config(CONFIG_PATH)
     for dash in config.get("dashboards", []):
         zip_path = dash.get("path")
         if zip_path.startswith('/lauretta/'): zip_path = '/app' + zip_path

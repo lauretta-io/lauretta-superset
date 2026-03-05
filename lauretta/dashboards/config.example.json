@@ -14,7 +14,7 @@
         {
           "id": 1,
           "name": "FLOOR NAME",
-          "image": "/floors/example.jpeg"
+          "image": "example.jpeg"
         }
       ]
     }
