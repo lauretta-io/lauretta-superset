@@ -26,7 +26,7 @@ import sys
 from pathlib import Path
 
 from celery.schedules import crontab
-from flask import abort, send_file
+from flask import abort, send_file,jsonify
 from flask_caching.backends.filesystemcache import FileSystemCache
 
 logger = logging.getLogger()
@@ -149,12 +149,32 @@ def _resolve_floor_image(floor_ref: str) -> Path | None:
 
 
 def FLASK_APP_MUTATOR(app):
-    @app.get("/api/v1/lauretta/images/<path:floor_ref>")
-    def lauretta_floor_image(floor_ref: str):
-        image_path = _resolve_floor_image(floor_ref)
-        if not image_path:
-            return abort(404, description=f"Floor image not found for '{floor_ref}'")
-        return send_file(image_path)
+   @app.get("/api/v1/lauretta/floors")
+   def lauretta_floors_list():
+       """Return the list of floors from config.json."""
+       config_path = Path("/app/lauretta/dashboards/config.json")
+       if not config_path.exists():
+           return jsonify([])
+       import json as _json
+       with open(config_path) as f:
+           config = _json.load(f)
+       all_floors = []
+       seen = set()
+       for dash in config.get("dashboards", []):
+           for floor in dash.get("floors", []):
+               name = floor.get("name", "")
+               image = floor.get("image", "")
+               if name and name not in seen:
+                   seen.add(name)
+                   all_floors.append({"name": name, "image": image})
+       return jsonify(all_floors)
+
+   @app.get("/api/v1/lauretta/images/<path:floor_ref>")
+   def lauretta_floor_image(floor_ref: str):
+       image_path = _resolve_floor_image(floor_ref)
+       if not image_path:
+           return abort(404, description=f"Floor image not found for '{floor_ref}'")
+       return send_file(image_path)
 
 if os.getenv("CYPRESS_CONFIG") == "true":
     # When running the service as a cypress backend, we need to import the config

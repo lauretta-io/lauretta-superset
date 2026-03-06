@@ -16,11 +16,12 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { t } from '@superset-ui/core';
+import { t, validateNonEmpty } from '@superset-ui/core';
 import {
   ControlPanelConfig,
   sharedControls,
 } from '@superset-ui/chart-controls';
+import FloorSelectControl from './FloorSelectControl';
 
 const config: ControlPanelConfig = {
   /**
@@ -108,19 +109,13 @@ const config: ControlPanelConfig = {
           {
             name: 'floor_selection',
             config: {
-              type: 'SelectControl',
+              type: FloorSelectControl,
               label: t('Floor'),
-              default: 'C',
-              choices: [
-                ['C', t('C')],
-                ['M', t('M')],
-                ['G', t('G')],
-                ['L1', t('L1')],
-                ['L2', t('L2')],
-                ['PL', t('PL')],
-              ],
-              renderTrigger: true,
-              description: t('Select the floor to display'),
+              renderTrigger: false,
+              validators: [validateNonEmpty],
+              description: t(
+                'Select the floor to display',
+              ),
             },
           },
           {

@@ -17,7 +17,7 @@
  * under the License.
  */
 import React, { useEffect, createRef, useState, useRef } from 'react';
-import { styled } from '@superset-ui/core';
+import { styled, SupersetClient } from '@superset-ui/core';
 import {
   SupersetPluginChartFloorMapProps,
   SupersetPluginChartFloorMapStylesProps,
@@ -437,8 +437,18 @@ export default function SupersetPluginChartFloorMap(
   const [selectedItemName, setSelectedItemName] = useState<string | null>(null);
   const [layerFilters, setLayerFilters] = useState<string[]>(['Retail']);
   const [isFilterLoading, setIsFilterLoading] = useState(false);
+  const [floorsData, setFloorsData] = useState<
+    { name: string; image: string }[]
+  >([]);
   const rootElem = createRef<HTMLDivElement>();
   const zoomPanRef = useRef<ZoomPanWrapperRef>(null);
+
+  // Fetch floors from config.json via backend API (used to resolve image when floor_image is not set)
+  useEffect(() => {
+    SupersetClient.get({ endpoint: '/api/v1/lauretta/floors' })
+      .then(({ json }) => setFloorsData((json as any[]) || []))
+      .catch(() => {});
+  }, []);
 
   // Layer images mapping
   const layerImages: Record<string, string> = {
@@ -482,8 +492,12 @@ export default function SupersetPluginChartFloorMap(
     return () => observer.disconnect();
   }, [height, width]);
 
-  // Use image filename first; fallback to floorSelection for older charts
-  const currentFloorImage = getFloorImageUrl(floorImage || floorSelection);
+  // Resolve floor image: prefer explicit floorImage, then look up from fetched floors data
+  const resolvedImage =
+    floorImage ||
+    floorsData.find(f => f.name === floorSelection)?.image ||
+    floorSelection;
+  const currentFloorImage = getFloorImageUrl(resolvedImage);
 
   // Helper function to map category to layer
   const getCategoryLayer = (category: string | undefined | null): string => {
