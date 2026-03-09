@@ -466,24 +466,9 @@ def replace_floor_id_in_sql(sql, old_floor_id, new_floor_id):
 
 def generate_floor_datasets(extract_dir, floors, db_uuid):
     """Generate dataset YAML files for each floor."""
-    template_path = find_template_dataset(extract_dir)
-    use_generated_template = False
-    
-    if template_path:
-        with open(template_path, 'r') as f:
-            template = yaml.safe_load(f)
-        # Store template UUID so we can remove related chart references
-        template_uuid = template.get('uuid')
-        # Find the datasets directory (use the same parent as template)
-        datasets_dir = os.path.dirname(template_path)
-        # Use first floor's ID from config as template_floor_id for replacement
-        template_floor_id = floors[0]['id'] if floors else 1
-    else:
-        print("⚠️ No MAP_*.yaml template found - using generated template")
-        use_generated_template = True
-        # Find or create datasets directory
-        datasets_dir = os.path.join(extract_dir, 'datasets', 'None')
-        os.makedirs(datasets_dir, exist_ok=True)
+    # Always generate datasets from built-in template (do not depend on ZIP templates)
+    datasets_dir = os.path.join(extract_dir, 'datasets', 'None')
+    os.makedirs(datasets_dir, exist_ok=True)
     
     # Remove ALL existing MAP_*.yaml files including the template
     if os.path.exists(datasets_dir):
@@ -498,22 +483,9 @@ def generate_floor_datasets(extract_dir, floors, db_uuid):
     for floor in floors:
         floor_id = floor['id']
         floor_name = floor['name']
-        
-        if use_generated_template:
-            # Generate dataset from scratch using template function
-            new_dataset = create_default_dataset_template(floor_id, floor_name, db_uuid)
-        else:
-            # Create new dataset based on existing template
-            new_dataset = template.copy()
-            new_dataset['table_name'] = f"MAP {floor_name}"
-            new_dataset['uuid'] = generate_uuid()
-            new_dataset['database_uuid'] = db_uuid
-            
-            # Replace floor_id in SQL
-            if new_dataset.get('sql'):
-                new_dataset['sql'] = replace_floor_id_in_sql(
-                    new_dataset['sql'], template_floor_id, floor_id
-                )
+
+        # Generate dataset from scratch using built-in template
+        new_dataset = create_default_dataset_template(floor_id, floor_name, db_uuid)
         
         # Write dataset file
         filename = f"MAP_{floor_name}.yaml"
@@ -536,17 +508,7 @@ def generate_floor_datasets(extract_dir, floors, db_uuid):
 
 def generate_floor_charts(extract_dir, floors, created_datasets, starting_chart_id=100):
     """Generate chart YAML files for each floor."""
-    template_path = find_template_chart(extract_dir)
-    use_generated_template = False
-    
-    if template_path:
-        with open(template_path, 'r') as f:
-            template = yaml.safe_load(f)
-        # Store template UUID to remove from dashboard later
-        template_chart_uuid = template.get('uuid')
-    else:
-        print("⚠️ No MAP_FLOOR_*.yaml template found - using generated template")
-        use_generated_template = True
+    # Always generate charts from built-in template (do not depend on ZIP templates)
     
     charts_dir = os.path.join(extract_dir, 'charts')
     os.makedirs(charts_dir, exist_ok=True)
@@ -571,37 +533,13 @@ def generate_floor_charts(extract_dir, floors, created_datasets, starting_chart_
             print(f"⚠️ No dataset found for floor {floor_name}")
             continue
         
-        if use_generated_template:
-            # Generate chart from scratch using template function
-            new_chart = create_default_chart_template(floor_name, chart_id, dataset['uuid'], floor.get('image', ''))
-        else:
-            # Create new chart based on existing template
-            new_chart = template.copy()
-            new_chart['slice_name'] = f"MAP FLOOR {floor_name}"
-            new_chart['uuid'] = generate_uuid()
-            new_chart['dataset_uuid'] = dataset['uuid']
-            
-            # Update params
-            if new_chart.get('params'):
-                params = new_chart['params']
-                if isinstance(params, str):
-                    params = yaml.safe_load(params) if params else {}
-                params['floor_selection'] = floor_name
-                params['floor_image'] = floor.get('image', '')
-                params['slice_id'] = chart_id
-                new_chart['params'] = params
-            
-            # Update query_context if present
-            if new_chart.get('query_context'):
-                try:
-                    qc = json.loads(new_chart['query_context'])
-                    if 'form_data' in qc:
-                        qc['form_data']['floor_selection'] = floor_name
-                        qc['form_data']['floor_image'] = floor.get('image', '')
-                        qc['form_data']['slice_id'] = chart_id
-                    new_chart['query_context'] = json.dumps(qc)
-                except:
-                    pass
+        # Generate chart from scratch using built-in template function
+        new_chart = create_default_chart_template(
+            floor_name,
+            chart_id,
+            dataset['uuid'],
+            floor.get('image', ''),
+        )
         
         # Write chart file
         filename = f"MAP_FLOOR_{floor_name}_{chart_id}.yaml"
@@ -634,63 +572,84 @@ def update_dashboard_with_charts(extract_dir, created_charts):
     with open(dashboard_path, 'r') as f:
         dashboard = yaml.safe_load(f)
     
-    # Find the Map View tab row (ROW-vocCgVjRwqGFc1NIzzjC4 or similar)
     position = dashboard.get('position', {})
     
-    # Remove ALL existing MAP FLOOR charts (including the original template)
-    charts_to_remove = []
-    for key, value in list(position.items()):
-        if isinstance(value, dict) and value.get('type') == 'CHART':
-            slice_name = value.get('meta', {}).get('sliceName', '')
-            # Remove ALL MAP FLOOR charts
-            if slice_name.startswith('MAP FLOOR '):
-                charts_to_remove.append(key)
-    
-    # Collect rows that contained removed charts (to clean up empty rows later)
-    rows_with_removed_charts = set()
-    
-    for chart_key in charts_to_remove:
-        # Also remove from parent row's children
-        chart_entry = position.get(chart_key, {})
-        parents = chart_entry.get('parents', [])
-        if parents:
-            parent_row = parents[-1]
-            if parent_row in position and 'children' in position[parent_row]:
-                if chart_key in position[parent_row]['children']:
-                    position[parent_row]['children'].remove(chart_key)
-                    rows_with_removed_charts.add(parent_row)
-        del position[chart_key]
-        print(f"🧹 Removed chart entry from dashboard: {chart_key}")
-    
-    # Find the Map View tab
-    map_tab_id = None
-    for key, value in position.items():
-        if isinstance(value, dict) and value.get('type') == 'TAB':
-            meta = value.get('meta', {})
-            if meta.get('text') == 'Map View':
-                map_tab_id = key
+    # Resolve ROOT / GRID IDs from position
+    root_id = 'ROOT_ID' if 'ROOT_ID' in position else None
+    grid_id = 'GRID_ID' if 'GRID_ID' in position else None
+
+    if not root_id:
+        for key, value in position.items():
+            if isinstance(value, dict) and value.get('type') == 'ROOT':
+                root_id = key
                 break
-    
-    if not map_tab_id:
-        print("⚠️ Map View tab not found in dashboard")
+
+    if not grid_id:
+        for key, value in position.items():
+            if isinstance(value, dict) and value.get('type') == 'GRID':
+                grid_id = key
+                break
+
+    if not root_id or not grid_id:
+        print("⚠️ Could not resolve ROOT/GRID in dashboard layout")
         return
-    
-    # Remove any empty rows that were used for map charts (in Map View tab)
-    for row_id in rows_with_removed_charts:
-        if row_id in position:
-            row_entry = position[row_id]
-            # Only remove if row is empty and in Map View tab
-            if not row_entry.get('children') and map_tab_id in row_entry.get('parents', []):
-                # Remove row from tab's children
-                if map_tab_id in position and 'children' in position[map_tab_id]:
-                    if row_id in position[map_tab_id]['children']:
-                        position[map_tab_id]['children'].remove(row_id)
-                del position[row_id]
-                print(f"🧹 Removed empty row: {row_id}")
-    
-    # Determine the tabs hierarchy path to Map View tab
-    tabs_container_id = 'TABS-zWZSDwlKZqxTlaw8pvf1O'  # Main tabs container
-    base_parents = ['ROOT_ID', 'GRID_ID', tabs_container_id, map_tab_id]
+
+    # Find a top-level tabs container under GRID (or create one)
+    tabs_container_id = None
+    grid_children = position.get(grid_id, {}).get('children', [])
+
+    for child_id in grid_children:
+        child = position.get(child_id, {})
+        if isinstance(child, dict) and child.get('type') == 'TABS':
+            tabs_container_id = child_id
+            break
+
+    if not tabs_container_id:
+        for key, value in position.items():
+            if (
+                isinstance(value, dict)
+                and value.get('type') == 'TABS'
+                and value.get('parents', [])
+                and value.get('parents', [])[-1] == grid_id
+            ):
+                tabs_container_id = key
+                break
+
+    if not tabs_container_id:
+        tabs_container_id = f"TABS-{generate_chart_id()}"
+        position[tabs_container_id] = {
+            'children': [],
+            'id': tabs_container_id,
+            'meta': {},
+            'parents': [root_id, grid_id],
+            'type': 'TABS'
+        }
+        if grid_id in position:
+            if 'children' not in position[grid_id]:
+                position[grid_id]['children'] = []
+            position[grid_id]['children'].append(tabs_container_id)
+        print(f"📁 Created tabs container: {tabs_container_id}")
+
+    tabs_parents = position.get(tabs_container_id, {}).get('parents', [root_id, grid_id])
+
+    # Create a fresh Map View tab
+    map_tab_id = f"TAB-{generate_chart_id()}"
+    map_tab_parents = tabs_parents + [tabs_container_id]
+    position[map_tab_id] = {
+        'children': [],
+        'id': map_tab_id,
+        'meta': {'text': 'Map View'},
+        'parents': map_tab_parents,
+        'type': 'TAB'
+    }
+    if tabs_container_id in position:
+        if 'children' not in position[tabs_container_id]:
+            position[tabs_container_id]['children'] = []
+        position[tabs_container_id]['children'].append(map_tab_id)
+    print(f"🆕 Created Map View tab: {map_tab_id}")
+
+    # Determine the hierarchy path to Map View tab
+    base_parents = map_tab_parents + [map_tab_id]
     
     # Constants for layout
     MAX_CHARTS_PER_ROW = 3
@@ -773,17 +732,46 @@ def update_dashboard_with_charts(extract_dir, created_charts):
                 charts_in_scope = config['crossFilters'].get('chartsInScope', [])
                 config['crossFilters']['chartsInScope'] = update_charts_in_scope(charts_in_scope, new_chart_ids)
     
-    # Update native_filter_configuration chartsInScope for filters targeting Map View tab
+    # Update native_filter_configuration for specific filters to include new Map View tab
+    filter_names_to_expand = {'time_range', 'categories', 'units'}
+
     if 'native_filter_configuration' in metadata:
         for filter_config in metadata['native_filter_configuration']:
-            scope = filter_config.get('scope', {})
+            filter_name = str(filter_config.get('name', '')).strip().lower()
+            if filter_name not in filter_names_to_expand:
+                continue
+
+            # Expand scope.rootPath to include the new Map View tab
+            scope = filter_config.setdefault('scope', {})
             root_path = scope.get('rootPath', [])
-            # If filter applies to Map View tab
-            if map_tab_id in root_path or 'ROOT_ID' in root_path:
-                if 'chartsInScope' in filter_config:
-                    filter_config['chartsInScope'] = update_charts_in_scope(
-                        filter_config['chartsInScope'], new_chart_ids
-                    )
+            if not isinstance(root_path, list):
+                root_path = []
+            if map_tab_id not in root_path:
+                root_path.append(map_tab_id)
+            scope['rootPath'] = root_path
+
+            # Ensure tab is not excluded
+            excluded = scope.get('excluded', [])
+            if isinstance(excluded, list):
+                scope['excluded'] = [item for item in excluded if item != map_tab_id]
+            else:
+                scope['excluded'] = []
+
+            # Expand tabsInScope to include the new Map View tab
+            tabs_in_scope = filter_config.get('tabsInScope', [])
+            if not isinstance(tabs_in_scope, list):
+                tabs_in_scope = []
+            if map_tab_id not in tabs_in_scope:
+                tabs_in_scope.append(map_tab_id)
+            filter_config['tabsInScope'] = tabs_in_scope
+
+            # Expand chartsInScope to include new generated map charts
+            charts_in_scope = filter_config.get('chartsInScope', [])
+            if not isinstance(charts_in_scope, list):
+                charts_in_scope = []
+            filter_config['chartsInScope'] = update_charts_in_scope(
+                charts_in_scope, new_chart_ids
+            )
     
     dashboard['position'] = position
     dashboard['metadata'] = metadata
@@ -794,7 +782,35 @@ def update_dashboard_with_charts(extract_dir, created_charts):
     
     print(f"✅ Dashboard updated with {len(created_charts)} new floor map charts")
 
-def process_floor_maps(zip_path, floors, db_uuid):
+def update_database_yaml_credentials(extract_dir, conn_config, db_display_name):
+    """Rewrite databases/*.yaml inside the extracted ZIP with real credentials
+    from config.json so the Superset importer won't reject the masked password."""
+    databases_dir = os.path.join(extract_dir, 'databases')
+    if not os.path.isdir(databases_dir):
+        print("⚠️ No databases/ folder in extracted ZIP")
+        return
+
+    new_uri = (
+        f"postgresql+psycopg2://{conn_config['username']}:{conn_config['password']}"
+        f"@{conn_config['host']}:{conn_config['port']}/{conn_config['db']}"
+    )
+
+    for fname in os.listdir(databases_dir):
+        if not fname.endswith(('.yaml', '.yml')):
+            continue
+        fpath = os.path.join(databases_dir, fname)
+        with open(fpath, 'r') as f:
+            db_data = yaml.safe_load(f)
+        if not isinstance(db_data, dict):
+            continue
+        db_data['sqlalchemy_uri'] = new_uri
+        db_data['database_name'] = db_display_name
+        with open(fpath, 'w') as f:
+            yaml.dump(db_data, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+        print(f"🔐 Updated database credentials in {fname}")
+
+
+def process_floor_maps(zip_path, floors, db_uuid, conn_config=None, db_display_name=None):
     """Process floor maps: generate datasets, charts, and update dashboard.
     Returns tuple: (new_zip_path, created_datasets, created_charts)"""
     if not floors:
@@ -812,6 +828,9 @@ def process_floor_maps(zip_path, floors, db_uuid):
     created_charts = generate_floor_charts(extract_dir, floors, created_datasets)
     # Update dashboard
     update_dashboard_with_charts(extract_dir, created_charts)
+    # Inject real database credentials into the ZIP before import
+    if conn_config and db_display_name:
+        update_database_yaml_credentials(extract_dir, conn_config, db_display_name)
     # Re-zip the modified dashboard export
     new_zip_path = rezip_dashboard_export(extract_dir, zip_path)
     return new_zip_path, created_datasets, created_charts
@@ -845,6 +864,7 @@ def update_via_superset_shell():
         conn_config = dash.get("connections")
         new_name = conn_config.get("database_display_name", conn_config.get("database_name", "Database"))
         new_uri = f"postgresql+psycopg2://{conn_config['username']}:{conn_config['password']}@{conn_config['host']}:{conn_config['port']}/{conn_config['db']}"
+        print(f"\n🔍 NEW URI: {new_uri}")
         # Step 1: Trace UUID from file ZIP
         old_db_uuid = None
         with zipfile.ZipFile(zip_path, 'r') as z:
@@ -865,38 +885,48 @@ def update_via_superset_shell():
         cleanup_old_map_charts_and_datasets_from_state()
         if floors:
             print(f"🗺️ Processing {len(floors)} floor maps...")
-            new_zip_path, created_datasets, created_charts = process_floor_maps(zip_path, floors, old_db_uuid)
+            new_zip_path, created_datasets, created_charts = process_floor_maps(
+                zip_path, floors, old_db_uuid,
+                conn_config=conn_config, db_display_name=new_name
+            )
             if not new_zip_path:
                 continue
         else:
-            print("ℹ️ No floors configured, state.json will be cleared")
-        # Step 3: Update database via superset shell
-        python_code = f"""
-from superset import db
-from superset.models.core import Database
-
-database = db.session.query(Database).filter_by(uuid='{old_db_uuid}').first()
-
-if database:
-    print(f'Updating existing database: {{database.database_name}}')
-    database.database_name = '{new_name}'
-    database.sqlalchemy_uri = '{new_uri}'
-else:
-    print(f'Database with UUID {old_db_uuid} not found. Creating new one...')
-    database = Database(
-        database_name='{new_name}',
-        sqlalchemy_uri='{new_uri}',
-        uuid='{old_db_uuid}'
-    )
-    db.session.add(database)
-
-db.session.commit()
-print('✅ Database sync complete.')
-"""
+            print("ℹ️ No floors configured, patching database credentials only...")
+            extract_dir = find_extract_dir(zip_path)
+            if extract_dir:
+                update_database_yaml_credentials(extract_dir, conn_config, new_name)
+                new_zip_path = rezip_dashboard_export(extract_dir, zip_path)
+            else:
+                print("❌ Could not extract ZIP for credential patching")
+        # Step 3: Update database via Python app-context (reliable non-interactive execution)
         print(f"🔄 Updating Database UUID {old_db_uuid}...")
-        res = subprocess.run(["superset", "shell"], input=python_code, text=True, capture_output=True)
+        python_code = "\n".join([
+            "from superset.app import create_app",
+            "app = create_app()",
+            "with app.app_context():",
+            "    from superset import db",
+            "    from superset.models.core import Database",
+            f"    target_uuid = {json.dumps(old_db_uuid)}",
+            f"    target_name = {json.dumps(new_name)}",
+            f"    target_uri = {json.dumps(new_uri)}",
+            "    database = db.session.query(Database).filter_by(uuid=target_uuid).first()",
+            "    if database:",
+            "        print(f'Updating existing database: {database.database_name}')",
+            "        database.database_name = target_name",
+            "        database.sqlalchemy_uri = target_uri",
+            "    else:",
+            "        print(f'Database with UUID {target_uuid} not found. Creating new one...')",
+            "        database = Database(database_name=target_name, sqlalchemy_uri=target_uri, uuid=target_uuid)",
+            "        db.session.add(database)",
+            "    db.session.commit()",
+            "    refreshed = db.session.query(Database).filter_by(uuid=target_uuid).first()",
+            "    if refreshed:",
+            "        print(f'✅ Database sync complete: name={refreshed.database_name}, uri={refreshed.sqlalchemy_uri}')",
+        ])
+        res = subprocess.run(["python", "-c", python_code], text=True, capture_output=True)
         if res.returncode != 0:
-            print(f"❌ Error running superset shell: {res.stderr}")
+            print(f"❌ Error updating database via Python app-context: {res.stderr}")
             continue
         else:
             print(res.stdout)
