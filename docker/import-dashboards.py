@@ -733,7 +733,7 @@ def update_dashboard_with_charts(extract_dir, created_charts):
                 config['crossFilters']['chartsInScope'] = update_charts_in_scope(charts_in_scope, new_chart_ids)
     
     # Update native_filter_configuration for specific filters to include new Map View tab
-    filter_names_to_expand = {'time_range', 'categories', 'units'}
+    filter_names_to_expand = {'time_range', 'categories', 'stores'}
 
     if 'native_filter_configuration' in metadata:
         for filter_config in metadata['native_filter_configuration']:
