@@ -23,10 +23,12 @@
 import logging
 import os
 import sys
+import uuid
+import re
 from pathlib import Path
 
 from celery.schedules import crontab
-from flask import abort, send_file,jsonify
+from flask import abort, send_file, jsonify, request
 from flask_caching.backends.filesystemcache import FileSystemCache
 
 logger = logging.getLogger()
@@ -111,14 +113,36 @@ log_level_text = os.getenv("SUPERSET_LOG_LEVEL", "INFO")
 LOG_LEVEL = getattr(logging, log_level_text.upper(), logging.INFO)
 
 LAURETTA_IMAGES_DIR = Path("/app/lauretta/images")
+LAURETTA_CUSTOM_IMAGES_DIR = Path("/app/lauretta/images/customs")
 ALLOWED_FLOOR_IMAGE_EXTENSIONS = {".jpeg", ".jpg", ".png", ".gif", ".webp"}
 
 
 def _resolve_floor_image(floor_ref: str) -> Path | None:
-    if not LAURETTA_IMAGES_DIR.exists() or not floor_ref:
+    if not floor_ref:
         return None
 
     cleaned_ref = floor_ref.strip().lstrip("/")
+    if cleaned_ref.startswith("locked:"):
+        cleaned_ref = cleaned_ref[len("locked:") :].strip().lstrip("/")
+    if cleaned_ref.startswith("api/v1/lauretta/images/"):
+        cleaned_ref = cleaned_ref.split("api/v1/lauretta/images/", 1)[1]
+    cleaned_ref = cleaned_ref.split("?", 1)[0].split("#", 1)[0]
+
+    if cleaned_ref.startswith("customs/"):
+        custom_ref = cleaned_ref.split("/", 1)[1] if "/" in cleaned_ref else ""
+        custom_name = Path(custom_ref).name
+        if custom_name and LAURETTA_CUSTOM_IMAGES_DIR.exists():
+            candidate_custom = (LAURETTA_CUSTOM_IMAGES_DIR / custom_name).resolve()
+            if (
+                candidate_custom.is_file()
+                and candidate_custom.parent == LAURETTA_CUSTOM_IMAGES_DIR.resolve()
+                and candidate_custom.suffix.lower() in ALLOWED_FLOOR_IMAGE_EXTENSIONS
+            ):
+                return candidate_custom
+
+    if not LAURETTA_IMAGES_DIR.exists():
+        return None
+
     candidate_by_name = (LAURETTA_IMAGES_DIR / cleaned_ref).resolve()
     if (
         candidate_by_name.is_file()
@@ -175,6 +199,34 @@ def FLASK_APP_MUTATOR(app):
        if not image_path:
            return abort(404, description=f"Floor image not found for '{floor_ref}'")
        return send_file(image_path)
+
+   @app.post("/api/v1/lauretta/images/upload")
+   def lauretta_floor_image_upload():
+       image_file = request.files.get("file")
+       if not image_file or not image_file.filename:
+           return abort(400, description="Missing image file")
+
+       original_name = Path(image_file.filename).name
+       suffix = Path(original_name).suffix.lower()
+       if suffix not in ALLOWED_FLOOR_IMAGE_EXTENSIONS:
+           return abort(400, description="Unsupported image extension")
+
+       safe_stem = re.sub(r"[^A-Za-z0-9._-]+", "_", Path(original_name).stem).strip("._")
+       if not safe_stem:
+           safe_stem = "map_image"
+
+       LAURETTA_CUSTOM_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+       file_name = f"{safe_stem}_{uuid.uuid4().hex[:10]}{suffix}"
+       save_path = (LAURETTA_CUSTOM_IMAGES_DIR / file_name).resolve()
+       if save_path.parent != LAURETTA_CUSTOM_IMAGES_DIR.resolve():
+           return abort(400, description="Invalid image path")
+
+       image_file.save(save_path)
+
+       return jsonify({
+           "file_name": file_name,
+           "public_url": f"/api/v1/lauretta/images/customs/{file_name}",
+       })
 
 if os.getenv("CYPRESS_CONFIG") == "true":
     # When running the service as a cypress backend, we need to import the config

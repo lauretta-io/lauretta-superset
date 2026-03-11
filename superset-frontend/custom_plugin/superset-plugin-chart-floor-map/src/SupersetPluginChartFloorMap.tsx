@@ -29,10 +29,30 @@ import {
 } from './StorePolyline';
 import { ZoomPanWrapper, ZoomPanWrapperRef } from './ZoomPanWrapper';
 
+const LOCKED_PREFIX = 'locked:';
+const LAURETTA_IMAGE_API_PREFIX = '/api/v1/lauretta/images/';
+
 // Floor image URL using the image filename from config.json (e.g., "TRX_floorplan_CF.jpeg")
 const getFloorImageUrl = (imageFilename?: string): string => {
-  if (!imageFilename?.trim()) return '';
-  return `/api/v1/lauretta/images/${encodeURIComponent(imageFilename.trim())}`;
+  const rawValue = imageFilename?.trim() || '';
+  if (!rawValue) return '';
+
+  const value = rawValue.startsWith(LOCKED_PREFIX)
+    ? rawValue.slice(LOCKED_PREFIX.length).trim()
+    : rawValue;
+
+  if (!value) return '';
+  if (/^https?:\/\//i.test(value)) {
+    return value;
+  }
+  if (value.startsWith('/')) {
+    return value;
+  }
+  if (value.startsWith('api/v1/lauretta/images/')) {
+    return `/${value}`;
+  }
+
+  return `${LAURETTA_IMAGE_API_PREFIX}${encodeURIComponent(value)}`;
 };
 
 import layerEntrances from './images/entrances-layers.png';
@@ -498,6 +518,7 @@ export default function SupersetPluginChartFloorMap(
     floorsData.find(f => f.name === floorSelection)?.image ||
     floorSelection;
   const currentFloorImage = getFloorImageUrl(resolvedImage);
+  console.log('CURRENT FLOOR IMAGE: ', currentFloorImage);
 
   // Helper function to map category to layer
   const getCategoryLayer = (category: string | undefined | null): string => {

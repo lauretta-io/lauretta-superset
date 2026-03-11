@@ -107,23 +107,19 @@ const config: ControlPanelConfig = {
       controlSetRows: [
         [
           {
-            name: 'floor_selection',
-            config: {
-              type: FloorSelectControl,
-              label: t('Floor'),
-              renderTrigger: false,
-              validators: [validateNonEmpty],
-              description: t(
-                'Select the floor to display',
-              ),
-            },
-          },
-          {
             name: 'floor_image',
             config: {
-              type: 'HiddenControl',
+              type: FloorSelectControl,
+              label: t('Map image'),
+              description: t('Upload a floor map image. Imported map charts keep this as a locked public image link.'),
               default: '',
               renderTrigger: true,
+              validators: [validateNonEmpty],
+              mapStateToProps: (exploreState: Record<string, any>) => ({
+                isLocked:
+                  exploreState.form_data?.floor_image_locked === true ||
+                  (exploreState.form_data?.floor_image || '').startsWith('locked:'),
+              }),
             },
           },
         ],

@@ -110,7 +110,16 @@ def find_template_dataset(extract_dir):
 
 def create_default_dataset_template(floor_id, floor_name, db_uuid):
     """Create a default MAP dataset template structure when no template exists in ZIP."""
-    sql_template = """{% set start_date = from_dttm if from_dttm else "CURRENT_DATE - INTERVAL '1 day'" %}
+    sql_template = """{% set is_hourly = false %}
+{% set from_str = from_dttm | string if from_dttm else '' %}
+{% set to_str = to_dttm | string if to_dttm else '' %}
+{% if (from_str and '00:00:00' not in from_str) or (to_str and '00:00:00' not in to_str) %}
+    {% set is_hourly = true %}
+{% endif %}
+{% set suffix = '_hourly' if is_hourly else '_daily' %}
+{% set t_col = 'timestamp' if is_hourly else 'datestamp' %}
+
+{% set start_date = from_dttm if from_dttm else "CURRENT_DATE - INTERVAL '1 day'" %}
 {% set end_date = to_dttm if to_dttm else "CURRENT_DATE" %}
 
 SELECT 
@@ -120,23 +129,23 @@ SELECT
     res.category,
     res.points,
     res.total_footfall,
-    COALESCE(res.datestamp, CAST({{ "'" + start_date + "'" if from_dttm else start_date }} AS TIMESTAMP)) AS datestamp
+    COALESCE(res.event_time, CAST({{ "'" + start_date + "'" if from_dttm else start_date }} AS TIMESTAMP)) AS event_time
 FROM (
     -- Units
     SELECT
         z.floor_id, z.name as zone_name, u.name AS name, ug.name AS category, z.points,
         COALESCE(usd.total_footfall, 0) AS total_footfall,
-        usd.datestamp
+        usd.event_time
     FROM property.zones z
     LEFT JOIN property.unit_zone_mappings uzm ON uzm.zone_id = z.id
     LEFT JOIN property.units u ON u.id = uzm.unit_id
     LEFT JOIN property.unit_unit_group_mappings uugm ON uugm.unit_id = u.id
     LEFT JOIN property.unit_groups ug ON ug.id = uugm.unit_group_id
     LEFT JOIN (
-        SELECT unit_id, SUM(footfall) AS total_footfall, MAX(datestamp) as datestamp
-        FROM property.unit_summary_daily
-        WHERE datestamp >= {{ "'" + start_date + "'" if from_dttm else start_date }}
-          AND datestamp < {{ "'" + end_date + "'" if to_dttm else end_date }}
+        SELECT unit_id, SUM(footfall) AS total_footfall, MAX({{ t_col }}) as event_time
+        FROM property.unit_summary{{ suffix }}
+        WHERE {{ t_col }} >= {{ "'" + start_date + "'" if from_dttm else start_date }}
+          AND {{ t_col }} < {{ "'" + end_date + "'" if to_dttm else end_date }}
         GROUP BY unit_id
     ) usd ON usd.unit_id = u.id
     WHERE z.floor_id = {FLOOR_ID}
@@ -149,15 +158,15 @@ FROM (
     SELECT
         z.floor_id, z.name as zone_name, ps.name as name, 'Public' AS category, z.points,
         COALESCE(pssd.total_footfall, 0) AS total_footfall,
-        pssd.datestamp
+        pssd.event_time
     FROM property.public_spaces ps 
     LEFT JOIN property.public_space_zone_mappings pszm ON pszm.public_space_id = ps.id 
     LEFT JOIN property.zones z ON z.id = pszm.zone_id 
     LEFT JOIN (
-        SELECT public_space_id, SUM(footfall) AS total_footfall, MAX(datestamp) as datestamp
-        FROM property.public_space_summary_daily
-        WHERE datestamp >= {{ "'" + start_date + "'" if from_dttm else start_date }}
-          AND datestamp < {{ "'" + end_date + "'" if to_dttm else end_date }}
+        SELECT public_space_id, SUM(footfall) AS total_footfall, MAX({{ t_col }}) as event_time
+        FROM property.public_space_summary{{ suffix }}
+        WHERE {{ t_col }} >= {{ "'" + start_date + "'" if from_dttm else start_date }}
+          AND {{ t_col }} < {{ "'" + end_date + "'" if to_dttm else end_date }}
         GROUP BY public_space_id
     ) pssd ON pssd.public_space_id = ps.id
     WHERE ps.floor_id = {FLOOR_ID}
@@ -168,15 +177,15 @@ FROM (
     SELECT
         z.floor_id, z.name as zone_name, e.name as name, 'Entrances' AS category, z.points,
         COALESCE(esd.total_footfall, 0) AS total_footfall,
-        esd.datestamp
+        esd.event_time
     FROM property.entrances e
     LEFT JOIN property.entrance_zone_mappings ezm ON ezm.entrance_id = e.id
     LEFT JOIN property.zones z ON z.id = ezm.zone_id
     LEFT JOIN (
-        SELECT entrance_id, SUM(footfall) AS total_footfall, MAX(datestamp) as datestamp
-        FROM property.entrance_summary_daily
-        WHERE datestamp >= {{ "'" + start_date + "'" if from_dttm else start_date }}
-          AND datestamp < {{ "'" + end_date + "'" if to_dttm else end_date }}
+        SELECT entrance_id, SUM(footfall) AS total_footfall, MAX({{ t_col }}) as event_time
+        FROM property.entrance_summary{{ suffix }}
+        WHERE {{ t_col }} >= {{ "'" + start_date + "'" if from_dttm else start_date }}
+          AND {{ t_col }} < {{ "'" + end_date + "'" if to_dttm else end_date }}
         GROUP BY entrance_id
     ) esd ON esd.entrance_id = e.id
     WHERE e.floor_id = {FLOOR_ID}
@@ -187,15 +196,15 @@ FROM (
     SELECT
         z.floor_id, z.name as zone_name, e.name as name, 'Circulation' AS category, z.points,
         COALESCE(esd.total_footfall, 0) AS total_footfall,
-        esd.datestamp
+        esd.event_time
     FROM property.escalators e
     LEFT JOIN property.escalator_zone_mappings ezm ON ezm.escalator_id = e.id
     LEFT JOIN property.zones z ON z.id = ezm.zone_id
     LEFT JOIN (
-        SELECT escalator_id, SUM(footfall) AS total_footfall, MAX(datestamp) as datestamp
-        FROM property.escalator_summary_daily
-        WHERE datestamp >= {{ "'" + start_date + "'" if from_dttm else start_date }}
-          AND datestamp < {{ "'" + end_date + "'" if to_dttm else end_date }}
+        SELECT escalator_id, SUM(footfall) AS total_footfall, MAX({{ t_col }}) as event_time
+        FROM property.escalator_summary{{ suffix }}
+        WHERE {{ t_col }} >= {{ "'" + start_date + "'" if from_dttm else start_date }}
+          AND {{ t_col }} < {{ "'" + end_date + "'" if to_dttm else end_date }}
         GROUP BY escalator_id
     ) esd ON esd.escalator_id = e.id
     WHERE z.floor_id = {FLOOR_ID}
@@ -206,18 +215,19 @@ FROM (
     SELECT
         z.floor_id, z.name as zone_name, ll.name as name, 'Circulation' AS category, z.points,
         COALESCE(llsd.total_footfall, 0) AS total_footfall,
-        llsd.datestamp
+        llsd.event_time
     FROM property.lift_lobbies ll
     LEFT JOIN property.lift_lobby_zone_mappings llzm ON llzm.lift_lobby_id = ll.id
     LEFT JOIN property.zones z ON z.id = llzm.zone_id
     LEFT JOIN (
-        SELECT lift_lobby_id, SUM(footfall) AS total_footfall, MAX(datestamp) as datestamp
-        FROM property.lift_lobby_summary_daily
-        WHERE datestamp >= {{ "'" + start_date + "'" if from_dttm else start_date }}
-          AND datestamp < {{ "'" + end_date + "'" if to_dttm else end_date }}
+        SELECT lift_lobby_id, SUM(footfall) AS total_footfall, MAX({{ t_col }}) as event_time
+        FROM property.lift_lobby_summary{{ suffix }}
+        WHERE {{ t_col }} >= {{ "'" + start_date + "'" if from_dttm else start_date }}
+          AND {{ t_col }} < {{ "'" + end_date + "'" if to_dttm else end_date }}
         GROUP BY lift_lobby_id
     ) llsd ON llsd.lift_lobby_id = ll.id
     WHERE ll.floor_id = {FLOOR_ID}
+
 ) res WHERE res.name IS NOT NULL AND res.category IS NOT NULL"""
 
     # Replace floor_id placeholder
@@ -256,7 +266,7 @@ FROM (
         ],
         'columns': [
             {
-                'column_name': 'datestamp',
+                'column_name': 'event_time',
                 'verbose_name': None,
                 'is_dttm': True,
                 'is_active': True,
@@ -366,13 +376,30 @@ def find_template_chart(extract_dir):
             return os.path.join(charts_dir, f)
     return None
 
+
+def build_public_floor_image_url(floor_image):
+    """Convert floor image references to a public Lauretta image URL."""
+    image_ref = str(floor_image or '').strip()
+    if not image_ref:
+        return ''
+    if image_ref.startswith(('http://', 'https://', '/')):
+        return image_ref
+    cleaned_ref = image_ref.lstrip('/')
+    if cleaned_ref.startswith('api/v1/lauretta/images/'):
+        return f'/{cleaned_ref}'
+    return f'/api/v1/lauretta/images/{cleaned_ref}'
+
 def create_default_chart_template(floor_name, chart_id, dataset_uuid, floor_image=''):
     """Create a default MAP FLOOR chart template structure when no template exists in ZIP."""
+    public_floor_image = build_public_floor_image_url(floor_image)
+    locked_floor_image = f'locked:{public_floor_image}' if public_floor_image else ''
+
     params = {
         'viz_type': 'ext-floor-map',
         'slice_id': chart_id,
         'floor_selection': floor_name,
-        'floor_image': floor_image,
+        'floor_image': locked_floor_image,
+        'floor_image_locked': True,
         'cols': ['name', 'category', 'points', 'total_footfall'],
         'adhoc_filters': [
             {
@@ -398,7 +425,7 @@ def create_default_chart_template(floor_name, chart_id, dataset_uuid, floor_imag
         'force': False,
         'queries': [
             {
-                'filters': [{'col': 'datestamp', 'op': 'TEMPORAL_RANGE', 'val': 'Last day'}],
+                'filters': [{'col': 'event_time', 'op': 'TEMPORAL_RANGE', 'val': 'Last day'}],
                 'extras': {'having': '', 'where': ''},
                 'applied_time_extras': {},
                 'columns': [],
@@ -417,7 +444,8 @@ def create_default_chart_template(floor_name, chart_id, dataset_uuid, floor_imag
             'viz_type': 'ext-floor-map',
             'slice_id': chart_id,
             'floor_selection': floor_name,
-            'floor_image': floor_image,
+            'floor_image': locked_floor_image,
+            'floor_image_locked': True,
             'cols': ['name', 'category', 'points', 'total_footfall'],
             'adhoc_filters': params['adhoc_filters'],
             'row_limit': 5000,

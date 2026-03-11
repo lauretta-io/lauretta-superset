@@ -1,115 +1,134 @@
-/**
- * Custom control that fetches floor choices from /api/v1/lauretta/floors
- * (sourced from config.json) and updates the hidden floor_image control
- * whenever the user picks a different floor.
- */
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useMemo, useState } from 'react';
 import { SupersetClient, t } from '@superset-ui/core';
+import { ExploreAlert } from 'src/explore/components/ExploreAlert';
 
-interface Floor {
-  name: string;
-  image: string;
-}
+const LOCKED_PREFIX = 'locked:';
+
+const normalizeImageValue = (value?: string): string => {
+  const current = (value || '').trim();
+  if (!current) {
+    return '';
+  }
+  return current.startsWith(LOCKED_PREFIX)
+    ? current.slice(LOCKED_PREFIX.length)
+    : current;
+};
 
 export interface FloorSelectControlProps {
   value: string;
   onChange: (value: string) => void;
-  name: string;
   label?: string;
-  description?: string;
-  actions?: {
-    setControlValue?: (controlName: string, value: any) => void;
-  };
+  /** Injected by mapStateToProps from form_data.floor_image_locked */
+  isLocked?: boolean;
 }
 
 export default function FloorSelectControl(props: FloorSelectControlProps) {
-  const { value, onChange, actions } = props;
-  const labelText = props.label || t('Floor');
-  const [floors, setFloors] = useState<Floor[]>([]);
-  const [loading, setLoading] = useState(true);
+  const { value, onChange } = props;
+  const [uploading, setUploading] = useState(false);
+  const [error, setError] = useState('');
 
-  const setFloorImage = useCallback(
-    (floorName: string, list: Floor[]) => {
-      const floor = list.find(f => f.name === floorName);
-      if (floor && actions?.setControlValue) {
-        actions.setControlValue('floor_image', floor.image);
-      }
-    },
-    [actions],
+  const currentValue = (value || '').trim();
+  const currentUrl = useMemo(
+    () => normalizeImageValue(currentValue),
+    [currentValue],
   );
+  const isLocked =
+    props.isLocked === true || currentValue.startsWith(LOCKED_PREFIX);
 
-  useEffect(() => {
-    SupersetClient.get({ endpoint: '/api/v1/lauretta/floors' })
-      .then(({ json }) => {
-        const data = (json as Floor[]) || [];
-        setFloors(data);
-        setLoading(false);
+  const handleUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
 
-        // If current value matches a floor, sync its image
-        if (value && data.length > 0) {
-          setFloorImage(value, data);
-        }
-        // If no value yet and floors exist, select the first one
-        if (!value && data.length > 0) {
-          onChange(data[0].name);
-          setFloorImage(data[0].name, data);
-        }
-      })
-      .catch(() => {
-        setLoading(false);
+    if (!file) {
+      return;
+    }
+
+    setUploading(true);
+    setError('');
+
+    try {
+      const body = new FormData();
+      body.append('file', file);
+
+      const response = await SupersetClient.post({
+        endpoint: '/api/v1/lauretta/images/upload',
+        body,
+        headers: { Accept: 'application/json' },
       });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
-  const handleChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
-    const selected = e.target.value;
-    onChange(selected);
-    setFloorImage(selected, floors);
+      const publicUrl =
+        (response.json?.public_url as string | undefined) ||
+        (response.json?.result?.public_url as string | undefined) ||
+        '';
+
+      if (!publicUrl) {
+        throw new Error('Upload did not return a public URL');
+      }
+
+      onChange(publicUrl);
+    } catch (uploadError) {
+      setError(t('Image upload failed. Please try again.'));
+    } finally {
+      setUploading(false);
+    }
   };
 
-  const selectStyle: React.CSSProperties = {
-    width: '100%',
-    padding: '6px 12px',
-    borderRadius: 4,
-    border: '1px solid #ccc',
-    fontSize: 14,
-    backgroundColor: '#fff',
-  };
-
-  if (loading) {
+  if (isLocked) {
     return (
-      <select disabled style={selectStyle}>
-        <option>Loading floors…</option>
-      </select>
+      <div style={{ width: '100%' }}>
+        <div style={{ fontSize: 12, fontWeight: 500, marginBottom: 6 }}>
+          <ExploreAlert
+            title={t('Default configuration chart')}
+            bodyText={t(
+              `This chart is generated from a configuration file.
+               Any changes made here will not be saved and will be lost when the application restarts.`,
+            )}
+            type="warning"
+          />
+          {props.label || t('Map image')}
+        </div>
+        {currentUrl ? (
+          <a href={currentUrl} target="_blank" rel="noreferrer">
+            {t('View map image')}
+          </a>
+        ) : (
+          <span>{t('No image link configured')}</span>
+        )}
+      </div>
     );
   }
 
   return (
     <div style={{ width: '100%' }}>
-      <label
-        style={{
-          display: 'block',
-          fontSize: 12,
-          fontWeight: 500,
-          marginBottom: 4,
-          color: '#333',
-        }}
-      >
-        {labelText}
-      </label>
-      {floors.length === 0 ? (
-        <select disabled style={selectStyle}>
-          <option>No floors available</option>
-        </select>
-      ) : (
-        <select value={value || ''} onChange={handleChange} style={selectStyle}>
-          {floors.map(floor => (
-            <option key={floor.name} value={floor.name}>
-              {floor.name}
-            </option>
-          ))}
-        </select>
-      )}
+      <div style={{ fontSize: 12, fontWeight: 500, marginBottom: 6 }}>
+        {props.label || t('Map image')}
+      </div>
+
+      <input
+        type="file"
+        accept=".png,.jpg,.jpeg,.gif,.webp"
+        onChange={handleUpload}
+        disabled={uploading}
+        style={{ width: '100%' }}
+      />
+
+      {currentUrl ? (
+        <div style={{ marginTop: 6 }}>
+          <a href={currentUrl} target="_blank" rel="noreferrer">
+            {t('View current map image')}
+          </a>
+        </div>
+      ) : null}
+
+      {uploading ? (
+        <div style={{ marginTop: 6 }}>{t('Uploading image...')}</div>
+      ) : null}
+
+      {error ? (
+        <div style={{ marginTop: 6, color: '#d14343', fontSize: 12 }}>
+          {error}
+        </div>
+      ) : null}
     </div>
   );
 }
