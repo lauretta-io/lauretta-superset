@@ -122,14 +122,14 @@ export function StorePolyline({
   onClick,
 }: StorePolylineProps) {
   const fillColor = getLayerFootfallColor(
-    store.total_footfall,
+    store.total_footfall_zo,
     layer,
     maxFootfall,
   );
   const hasNoData =
-    store.total_footfall === undefined ||
-    store.total_footfall === null ||
-    store.total_footfall === 0;
+    store.total_footfall_zo === undefined ||
+    store.total_footfall_zo === null ||
+    store.total_footfall_zo === 0;
 
   // Skip rendering if points is NULL, undefined, or empty
   if (!store.points || store.points === 'null' || store.points === '') {

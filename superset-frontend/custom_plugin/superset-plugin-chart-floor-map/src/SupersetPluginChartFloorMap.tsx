@@ -539,13 +539,15 @@ export default function SupersetPluginChartFloorMap(
       if (!itemMap.has(itemName)) {
         itemMap.set(itemName, {
           name: itemName,
-          footfall: item.total_footfall || 0,
+          total_footfall_zo: item.total_footfall_zo || 0,
           category: item.category || '',
           layer: getCategoryLayer(item.category),
         });
       }
     });
-    return Array.from(itemMap.values()).sort((a, b) => b.footfall - a.footfall);
+    return Array.from(itemMap.values()).sort(
+      (a, b) => b.total_footfall_zo - a.total_footfall_zo,
+    );
   }, [data]);
 
   // Filter items based on search query and layer filter
@@ -579,7 +581,7 @@ export default function SupersetPluginChartFloorMap(
 
     data.forEach((item: any) => {
       const layer = getCategoryLayer(item.category);
-      const footfall = item.total_footfall || 0;
+      const footfall = item.total_footfall_zo || 0;
       // Only consider items that are in the current filter
       if (layerFilters.includes(layer) && footfall > maxByLayer[layer]) {
         maxByLayer[layer] = footfall;
@@ -781,7 +783,7 @@ export default function SupersetPluginChartFloorMap(
                   className={`store-item ${selectedItemName === item.name ? 'selected' : ''}`}
                   style={{
                     borderLeftColor: getLayerFootfallColor(
-                      item.footfall,
+                      item.total_footfall_zo,
                       item.layer,
                       maxFootfallByLayer[item.layer] || 1,
                     ),
@@ -795,13 +797,13 @@ export default function SupersetPluginChartFloorMap(
                       className="value"
                       style={{
                         color: getLayerFootfallColor(
-                          item.footfall,
+                          item.total_footfall_zo,
                           item.layer,
                           maxFootfallByLayer[item.layer] || 1,
                         ),
                       }}
                     >
-                      {item.footfall.toLocaleString()}
+                      {item.total_footfall_zo.toLocaleString()}
                     </span>
                   </div>
                 </div>
@@ -822,15 +824,15 @@ export default function SupersetPluginChartFloorMap(
               <div className="category-name">{displayedItem.category}</div>
             </div>
           )}
-          {displayedItem.total_footfall !== undefined &&
-            displayedItem.total_footfall !== null && (
+          {displayedItem.total_footfall_zo !== undefined &&
+            displayedItem.total_footfall_zo !== null && (
               <div className="footfall-section">
                 <div className="footfall-label">Footfall</div>
                 <div
                   className="footfall-value"
                   style={{
                     color: getLayerFootfallColor(
-                      displayedItem.total_footfall as number,
+                      displayedItem.total_footfall_zo as number,
                       getCategoryLayer(displayedItem.category as string),
                       maxFootfallByLayer[
                         getCategoryLayer(displayedItem.category as string)
@@ -838,7 +840,7 @@ export default function SupersetPluginChartFloorMap(
                     ),
                   }}
                 >
-                  {(displayedItem.total_footfall as number).toLocaleString()}
+                  {(displayedItem.total_footfall_zo as number).toLocaleString()}
                 </div>
               </div>
             )}
@@ -858,15 +860,15 @@ export default function SupersetPluginChartFloorMap(
               <div className="category-name">{selectedItemData.category}</div>
             </div>
           )}
-          {selectedItemData.total_footfall !== undefined &&
-            selectedItemData.total_footfall !== null && (
+          {selectedItemData.total_footfall_zo !== undefined &&
+            selectedItemData.total_footfall_zo !== null && (
               <div className="footfall-section">
                 <div className="footfall-label">Footfall</div>
                 <div
                   className="footfall-value"
                   style={{
                     color: getLayerFootfallColor(
-                      selectedItemData.total_footfall as number,
+                      selectedItemData.total_footfall_zo as number,
                       getCategoryLayer(selectedItemData.category as string),
                       maxFootfallByLayer[
                         getCategoryLayer(selectedItemData.category as string)
@@ -874,7 +876,9 @@ export default function SupersetPluginChartFloorMap(
                     ),
                   }}
                 >
-                  {(selectedItemData.total_footfall as number).toLocaleString()}
+                  {(
+                    selectedItemData.total_footfall_zo as number
+                  ).toLocaleString()}
                 </div>
               </div>
             )}
