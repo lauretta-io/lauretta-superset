@@ -1,25 +1,10 @@
-import React, { useMemo, useState } from 'react';
+import React, { useState } from 'react';
 import { SupersetClient, t } from '@superset-ui/core';
-import { ExploreAlert } from 'src/explore/components/ExploreAlert';
-
-const LOCKED_PREFIX = 'locked:';
-
-const normalizeImageValue = (value?: string): string => {
-  const current = (value || '').trim();
-  if (!current) {
-    return '';
-  }
-  return current.startsWith(LOCKED_PREFIX)
-    ? current.slice(LOCKED_PREFIX.length)
-    : current;
-};
 
 export interface FloorSelectControlProps {
   value: string;
   onChange: (value: string) => void;
   label?: string;
-  /** Injected by mapStateToProps from form_data.floor_image_locked */
-  isLocked?: boolean;
 }
 
 export default function FloorSelectControl(props: FloorSelectControlProps) {
@@ -27,13 +12,7 @@ export default function FloorSelectControl(props: FloorSelectControlProps) {
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState('');
 
-  const currentValue = (value || '').trim();
-  const currentUrl = useMemo(
-    () => normalizeImageValue(currentValue),
-    [currentValue],
-  );
-  const isLocked =
-    props.isLocked === true || currentValue.startsWith(LOCKED_PREFIX);
+  const currentUrl = (value || '').trim();
 
   const handleUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -72,31 +51,6 @@ export default function FloorSelectControl(props: FloorSelectControlProps) {
       setUploading(false);
     }
   };
-
-  if (isLocked) {
-    return (
-      <div style={{ width: '100%' }}>
-        <div style={{ fontSize: 12, fontWeight: 500, marginBottom: 6 }}>
-          <ExploreAlert
-            title={t('Default configuration chart')}
-            bodyText={t(
-              `This chart is generated from a configuration file.
-               Any changes made here will not be saved and will be lost when the application restarts.`,
-            )}
-            type="warning"
-          />
-          {props.label || t('Map image')}
-        </div>
-        {currentUrl ? (
-          <a href={currentUrl} target="_blank" rel="noreferrer">
-            {t('View map image')}
-          </a>
-        ) : (
-          <span>{t('No image link configured')}</span>
-        )}
-      </div>
-    );
-  }
 
   return (
     <div style={{ width: '100%' }}>

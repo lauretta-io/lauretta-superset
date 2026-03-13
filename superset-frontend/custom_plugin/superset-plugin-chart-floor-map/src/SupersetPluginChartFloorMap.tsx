@@ -29,18 +29,11 @@ import {
 } from './StorePolyline';
 import { ZoomPanWrapper, ZoomPanWrapperRef } from './ZoomPanWrapper';
 
-const LOCKED_PREFIX = 'locked:';
 const LAURETTA_IMAGE_API_PREFIX = '/api/v1/lauretta/images/';
 
 // Floor image URL using the image filename from config.json (e.g., "TRX_floorplan_CF.jpeg")
 const getFloorImageUrl = (imageFilename?: string): string => {
-  const rawValue = imageFilename?.trim() || '';
-  if (!rawValue) return '';
-
-  const value = rawValue.startsWith(LOCKED_PREFIX)
-    ? rawValue.slice(LOCKED_PREFIX.length).trim()
-    : rawValue;
-
+  const value = imageFilename?.trim() || '';
   if (!value) return '';
   if (/^https?:\/\//i.test(value)) {
     return value;

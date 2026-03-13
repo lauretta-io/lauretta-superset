@@ -1,112 +1,42 @@
 import json, os, zipfile, yaml, subprocess, uuid, shutil, re, glob, string, random
 
 CONFIG_PATH = "/app/lauretta/dashboards/config.json"
-STATE_PATH = "/app/lauretta/dashboards/state.json"
 
-def read_all_state():
-    """Read the full state dict from state.json (keyed by dashboard path)."""
-    if os.path.exists(STATE_PATH):
-        try:
-            with open(STATE_PATH, 'r') as f:
-                data = json.load(f)
-                # Migrate legacy flat state (single dashboard) to keyed format
-                if isinstance(data, dict) and 'zip_path' in data:
-                    key = data['zip_path']
-                    return {key: data}
-                return data if isinstance(data, dict) else {}
-        except Exception as e:
-            print(f"⚠️ Error reading state.json: {e}")
-    return {}
 
-def read_state(dashboard_key):
-    """Read the state for a specific dashboard (identified by its config path)."""
-    all_state = read_all_state()
-    return all_state.get(dashboard_key, {})
-
-def write_state(state, dashboard_key):
-    """Write the state for a specific dashboard, preserving other dashboards' state."""
+def check_dashboard_exists(zip_path):
+    """Check if the dashboard from the given ZIP has already been imported into Superset.
+    Reads the dashboard UUID from the zip then queries the Dashboard model.
+    Returns True if a Dashboard record with that UUID exists in the metadata DB."""
+    dashboard_uuid = None
     try:
-        all_state = read_all_state()
-        all_state[dashboard_key] = state
-        with open(STATE_PATH, 'w') as f:
-            json.dump(all_state, f, indent=2)
-        print(f"💾 State saved for dashboard '{dashboard_key}'")
+        with zipfile.ZipFile(zip_path, 'r') as z:
+            dash_files = [n for n in z.namelist() if '/dashboards/' in n and n.endswith('.yaml')]
+            if dash_files:
+                with z.open(dash_files[0]) as f:
+                    dash_data = yaml.safe_load(f)
+                    dashboard_uuid = dash_data.get('uuid')
     except Exception as e:
-        print(f"⚠️ Error writing state.json: {e}")
+        print(f"⚠️ Could not read dashboard UUID from zip: {e}")
+        return False
 
-def cleanup_old_map_charts_and_datasets_from_state(dashboard_key):
-    """Remove old MAP FLOOR charts and MAP datasets from the database using state.json.
-    Only deletes charts/datasets that were previously created for this dashboard."""
-    state = read_state(dashboard_key)
-    
-    old_charts = state.get('charts', [])
-    old_datasets = state.get('datasets', [])
-    
-    if not old_charts and not old_datasets:
-        print("ℹ️ No previous state found, nothing to clean up")
-        return
-    
-    chart_uuids = [str(c.get('uuid')) for c in old_charts if c.get('uuid')]
-    dataset_uuids = [str(d.get('uuid')) for d in old_datasets if d.get('uuid')]
-    # Legacy fallback for old state schema
-    chart_names = [c.get('slice_name') for c in old_charts if c.get('slice_name')]
-    dataset_names = [d.get('table_name') for d in old_datasets if d.get('table_name')]
-    
-    chart_uuids_str = str(chart_uuids)
-    dataset_uuids_str = str(dataset_uuids)
-    chart_names_str = str(chart_names)
-    dataset_names_str = str(dataset_names)
-    
-    python_code = f"""
-from superset import db
-from superset.models.slice import Slice
-from superset.connectors.sqla.models import SqlaTable
+    if not dashboard_uuid:
+        print("⚠️ No dashboard UUID found in zip — treating as new")
+        return False
 
-chart_uuids = {chart_uuids_str}
-dataset_uuids = {dataset_uuids_str}
-chart_names = {chart_names_str}
-dataset_names = {dataset_names_str}
-
-# Delete MAP FLOOR charts (slices) from previous state
-map_charts = dict()
-if chart_uuids:
-    for chart in db.session.query(Slice).filter(Slice.uuid.in_(chart_uuids)).all():
-        map_charts[chart.id] = chart
-if chart_names:
-    for chart in db.session.query(Slice).filter(Slice.slice_name.in_(chart_names)).all():
-        map_charts[chart.id] = chart
-
-for chart in map_charts.values():
-    print(f'🧹 Deleting chart: {{chart.slice_name}} (ID: {{chart.id}})')
-    db.session.delete(chart)
-
-# Delete MAP datasets from previous state
-map_datasets = dict()
-if dataset_uuids:
-    for dataset in db.session.query(SqlaTable).filter(SqlaTable.uuid.in_(dataset_uuids)).all():
-        map_datasets[dataset.id] = dataset
-if dataset_names:
-    for dataset in db.session.query(SqlaTable).filter(SqlaTable.table_name.in_(dataset_names)).all():
-        map_datasets[dataset.id] = dataset
-
-for dataset in map_datasets.values():
-    print(f'🧹 Deleting dataset: {{dataset.table_name}} (ID: {{dataset.id}})')
-    db.session.delete(dataset)
-
-db.session.commit()
-print(f'✅ Cleaned up {{len(map_charts)}} charts and {{len(map_datasets)}} datasets')
-"""
-    print(
-        f"🧹 Cleaning up old items from state.json: "
-        f"{len(chart_uuids)} chart uuids ({len(chart_names)} names fallback), "
-        f"{len(dataset_uuids)} dataset uuids ({len(dataset_names)} names fallback)..."
-    )
-    res = subprocess.run(["superset", "shell"], input=python_code, text=True, capture_output=True)
+    python_code = "\n".join([
+        "from superset.app import create_app",
+        "app = create_app()",
+        "with app.app_context():",
+        "    from superset import db",
+        "    from superset.models.dashboard import Dashboard",
+        f"    result = db.session.query(Dashboard).filter_by(uuid={json.dumps(dashboard_uuid)}).first()",
+        "    print('EXISTS' if result else 'NOT_FOUND')",
+    ])
+    res = subprocess.run(["python", "-c", python_code], text=True, capture_output=True)
     if res.returncode != 0:
-        print(f"⚠️ Warning during cleanup: {res.stderr}")
-    else:
-        print(res.stdout)
-
+        print(f"⚠️ Error checking dashboard existence: {res.stderr}")
+        return False
+    return 'EXISTS' in res.stdout
 
 def generate_uuid():
     """Generate a random UUID string."""
@@ -281,7 +211,7 @@ FROM (
     sql = sql_template.replace('{FLOOR_ID}', str(floor_id))
     
     return {
-        'table_name': f'MAP {floor_name}',
+        'table_name': f'MAP {floor_name} {floor_id}',
         'main_dttm_col': None,
         'description': None,
         'default_endpoint': None,
@@ -436,17 +366,15 @@ def build_public_floor_image_url(floor_image):
         return f'/{cleaned_ref}'
     return f'/api/v1/lauretta/images/{cleaned_ref}'
 
-def create_default_chart_template(floor_name, chart_id, dataset_uuid, floor_image=''):
+def create_default_chart_template(floor_name, floor_id, chart_id, dataset_uuid, floor_image=''):
     """Create a default MAP FLOOR chart template structure when no template exists in ZIP."""
     public_floor_image = build_public_floor_image_url(floor_image)
-    locked_floor_image = f'locked:{public_floor_image}' if public_floor_image else ''
 
     params = {
         'viz_type': 'ext-floor-map',
         'slice_id': chart_id,
         'floor_selection': floor_name,
-        'floor_image': locked_floor_image,
-        'floor_image_locked': True,
+        'floor_image': public_floor_image,
         'cols': ['name', 'category', 'points', 'total_footfall_zo'],
         'adhoc_filters': [
             {
@@ -490,8 +418,7 @@ def create_default_chart_template(floor_name, chart_id, dataset_uuid, floor_imag
             'viz_type': 'ext-floor-map',
             'slice_id': chart_id,
             'floor_selection': floor_name,
-            'floor_image': locked_floor_image,
-            'floor_image_locked': True,
+            'floor_image': public_floor_image,
             'cols': ['name', 'category', 'points', 'total_footfall_zo'],
             'adhoc_filters': params['adhoc_filters'],
             'row_limit': 5000,
@@ -505,7 +432,7 @@ def create_default_chart_template(floor_name, chart_id, dataset_uuid, floor_imag
     }
     
     return {
-        'slice_name': f'MAP FLOOR {floor_name}',
+        'slice_name': f'MAP FLOOR {floor_id} {floor_name}',
         'description': None,
         'certified_by': None,
         'certification_details': None,
@@ -560,8 +487,8 @@ def generate_floor_datasets(extract_dir, floors, db_uuid):
         # Generate dataset from scratch using built-in template
         new_dataset = create_default_dataset_template(floor_id, floor_name, db_uuid)
         
-        # Write dataset file
-        filename = f"MAP_{floor_name}.yaml"
+        # Write dataset file — use floor_id to keep unique even when names duplicate
+        filename = f"MAP_{floor_id}_{floor_name}.yaml"
         filepath = os.path.join(datasets_dir, filename)
         
         with open(filepath, 'w') as f:
@@ -599,23 +526,25 @@ def generate_floor_charts(extract_dir, floors, created_datasets, starting_chart_
     
     for floor in floors:
         floor_name = floor['name']
+        floor_id = floor['id']
         
-        # Find matching dataset
-        dataset = next((d for d in created_datasets if d['floor_name'] == floor_name), None)
+        # Find matching dataset by floor_id (unique even when names duplicate)
+        dataset = next((d for d in created_datasets if d['floor_id'] == floor_id), None)
         if not dataset:
-            print(f"⚠️ No dataset found for floor {floor_name}")
+            print(f"⚠️ No dataset found for floor {floor_name} (id={floor_id})")
             continue
         
         # Generate chart from scratch using built-in template function
         new_chart = create_default_chart_template(
             floor_name,
+            floor_id,
             chart_id,
             dataset['uuid'],
             floor.get('image', ''),
         )
         
-        # Write chart file
-        filename = f"MAP_FLOOR_{floor_name}_{chart_id}.yaml"
+        # Write chart file — use floor_id to keep unique even when names duplicate
+        filename = f"MAP_FLOOR_{floor_id}_{floor_name}_{chart_id}.yaml"
         filepath = os.path.join(charts_dir, filename)
         
         with open(filepath, 'w') as f:
@@ -983,17 +912,54 @@ def update_via_superset_shell():
             print(f"📦 Source DB UUID in ZIP: {source_db_uuid}")
         else:
             print(f"⚠️ Cannot find UUID in ZIP: {zip_path}; using generated target UUID")
-        # Step 2: Process floor maps (generate datasets, charts, update dashboard)
+        # Helper: update database connection via Python app-context
+        def run_db_update():
+            print(f"🔄 Updating Database UUID {target_db_uuid}...")
+            python_code = "\n".join([
+                "from superset.app import create_app",
+                "app = create_app()",
+                "with app.app_context():",
+                "    from superset import db",
+                "    from superset.models.core import Database",
+                f"    target_uuid = {json.dumps(target_db_uuid)}",
+                f"    target_name = {json.dumps(new_name)}",
+                f"    target_uri = {json.dumps(new_uri)}",
+                "    database = db.session.query(Database).filter_by(uuid=target_uuid).first()",
+                "    if database:",
+                "        print(f'Updating existing database: {database.database_name}')",
+                "        database.database_name = target_name",
+                "        database.sqlalchemy_uri = target_uri",
+                "    else:",
+                "        print(f'Database with UUID {target_uuid} not found. Creating new one...')",
+                "        database = Database(database_name=target_name, sqlalchemy_uri=target_uri, uuid=target_uuid)",
+                "        db.session.add(database)",
+                "    db.session.commit()",
+                "    refreshed = db.session.query(Database).filter_by(uuid=target_uuid).first()",
+                "    if refreshed:",
+                "        print(f'✅ Database sync complete: name={refreshed.database_name}, uri={refreshed.sqlalchemy_uri}')",
+            ])
+            res = subprocess.run(["python", "-c", python_code], text=True, capture_output=True)
+            if res.returncode != 0:
+                print(f"❌ Error updating database via Python app-context: {res.stderr}")
+                return False
+            print(res.stdout)
+            return True
+
+        # Step 2: Check if dashboard already exists in DB — if so, only update connection
         floors = dash.get("floors", [])
+
+        if check_dashboard_exists(zip_path):
+            print("✅ Dashboard already exists in database — only updating database connection.")
+            run_db_update()
+            continue
+
+        # First run (or after docker compose down -v): full setup
         new_zip_path = zip_path
         created_datasets = []
         created_charts = []
-        # Always clean up old MAP charts and datasets from previous state for this dashboard
-        dashboard_key = dash.get("path")
-        cleanup_old_map_charts_and_datasets_from_state(dashboard_key)
+
         if floors:
             print(f"🗺️ Processing {len(floors)} floor maps...")
-            # Offset chart IDs per dashboard to avoid collisions
             starting_chart_id = 100 + dash_index * 1000
             new_zip_path, created_datasets, created_charts = process_floor_maps(
                 zip_path, floors, target_db_uuid,
@@ -1011,57 +977,15 @@ def update_via_superset_shell():
                 new_zip_path = rezip_dashboard_export(extract_dir, zip_path)
             else:
                 print("❌ Could not extract ZIP for credential patching")
-        # Step 3: Update database via Python app-context (reliable non-interactive execution)
-        print(f"🔄 Updating Database UUID {target_db_uuid}...")
-        python_code = "\n".join([
-            "from superset.app import create_app",
-            "app = create_app()",
-            "with app.app_context():",
-            "    from superset import db",
-            "    from superset.models.core import Database",
-            f"    target_uuid = {json.dumps(target_db_uuid)}",
-            f"    target_name = {json.dumps(new_name)}",
-            f"    target_uri = {json.dumps(new_uri)}",
-            "    database = db.session.query(Database).filter_by(uuid=target_uuid).first()",
-            "    if database:",
-            "        print(f'Updating existing database: {database.database_name}')",
-            "        database.database_name = target_name",
-            "        database.sqlalchemy_uri = target_uri",
-            "    else:",
-            "        print(f'Database with UUID {target_uuid} not found. Creating new one...')",
-            "        database = Database(database_name=target_name, sqlalchemy_uri=target_uri, uuid=target_uuid)",
-            "        db.session.add(database)",
-            "    db.session.commit()",
-            "    refreshed = db.session.query(Database).filter_by(uuid=target_uuid).first()",
-            "    if refreshed:",
-            "        print(f'✅ Database sync complete: name={refreshed.database_name}, uri={refreshed.sqlalchemy_uri}')",
-        ])
-        res = subprocess.run(["python", "-c", python_code], text=True, capture_output=True)
-        if res.returncode != 0:
-            print(f"❌ Error updating database via Python app-context: {res.stderr}")
+
+        # Step 3: Update database connection
+        if not run_db_update():
             continue
-        else:
-            print(res.stdout)
+
         print(f"🚀 Importing Dashboard: {new_zip_path}")
         subprocess.run(["superset", "import-dashboards", "-p", new_zip_path, "-u", "admin"])
-        
-        # Save state after successful import (keyed by dashboard path)
-        state = {
-            'floors': floors,
-            'datasets': created_datasets,
-            'charts': created_charts,
-            'database': {
-                'uuid': target_db_uuid,
-                'name': new_name,
-                'host': conn_config['host'],
-                'port': conn_config['port'],
-                'db': conn_config['db']
-            },
-            'zip_path': dash.get("path")
-        }
-        write_state(state, dashboard_key)
-        
-        # Cleanup: Delete extracted dashboard_export_* folder and the new zip after import
+
+        # Cleanup extracted folders and temp zip
         base_dir = os.path.dirname(zip_path)
         for extract_dir in glob.glob(os.path.join(base_dir, 'dashboard_export_*')):
             if os.path.isdir(extract_dir):

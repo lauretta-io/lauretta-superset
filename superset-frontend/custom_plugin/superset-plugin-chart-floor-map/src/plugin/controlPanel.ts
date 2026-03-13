@@ -111,15 +111,10 @@ const config: ControlPanelConfig = {
             config: {
               type: FloorSelectControl,
               label: t('Map image'),
-              description: t('Upload a floor map image. Imported map charts keep this as a locked public image link.'),
+              description: t('Upload a floor map image.'),
               default: '',
               renderTrigger: true,
               validators: [validateNonEmpty],
-              mapStateToProps: (exploreState: Record<string, any>) => ({
-                isLocked:
-                  exploreState.form_data?.floor_image_locked === true ||
-                  (exploreState.form_data?.floor_image || '').startsWith('locked:'),
-              }),
             },
           },
         ],
