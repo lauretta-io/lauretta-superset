@@ -986,13 +986,7 @@ export default function SupersetPluginChartFloorMap(
                 <div
                   className="footfall-value"
                   style={{
-                    color: getLayerFootfallColor(
-                      displayedItem.total_footfall_zo as number,
-                      getCategoryLayer(displayedItem.category as string),
-                      maxFootfallByLayer[
-                        getCategoryLayer(displayedItem.category as string)
-                      ] || 1,
-                    ),
+                    color: 'black',
                   }}
                 >
                   {(displayedItem.total_footfall_zo as number).toLocaleString()}
