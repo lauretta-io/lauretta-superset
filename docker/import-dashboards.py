@@ -122,8 +122,8 @@ FROM (
         GROUP BY unit_id
     ) usd ON usd.unit_id = u.id
     WHERE z.floor_id = {FLOOR_ID}
-      {% if filter_values('unit_name') %} AND u.name IN ({{ "'" + filter_values('unit_name') | join("','") + "'" }}) {% endif %}
-      {% if filter_values('unit_group_name') %} AND ug.name IN ({{ "'" + filter_values('unit_group_name') | join("','") + "'" }}) {% endif %}
+    {% if filter_values('unit_name') %} AND u.name IN {{ filter_values('unit_name') | where_in }} {% endif %}
+    {% if filter_values('unit_group_name') %} AND ug.name IN {{ filter_values('unit_group_name') | where_in }} {% endif %}
 
     UNION ALL
 
