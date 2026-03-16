@@ -102,11 +102,58 @@ class CeleryConfig:
 
 CELERY_CONFIG = CeleryConfig
 
-FEATURE_FLAGS = {"ALERT_REPORTS": True,  "ALLOW_ADHOC_SUBQUERY": True,"ENABLE_TEMPLATE_PROCESSING": True}
-ALERT_REPORTS_NOTIFICATION_DRY_RUN = True
-WEBDRIVER_BASEURL = "http://superset:8088/"  # When using docker compose baseurl should be http://superset_app:8088/  # noqa: E501
-# The base URL for the email report hyperlinks.
-WEBDRIVER_BASEURL_USER_FRIENDLY = WEBDRIVER_BASEURL
+FEATURE_FLAGS = {
+    "ALERT_REPORTS": True,
+    "ALERT_REPORT_TABS": True,
+    "ALLOW_ADHOC_SUBQUERY": True,
+    "ENABLE_TEMPLATE_PROCESSING": True,
+}
+ALERT_REPORTS_NOTIFICATION_DRY_RUN = False
+SCREENSHOT_LOCATE_WAIT = 100
+SCREENSHOT_LOAD_WAIT = 600
+
+# Slack configuration
+SLACK_API_TOKEN = ""
+
+# Email configuration
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_STARTTLS = _env_bool("SMTP_STARTTLS", True)
+SMTP_SSL_SERVER_AUTH = _env_bool("SMTP_SSL_SERVER_AUTH", True)
+SMTP_SSL = _env_bool("SMTP_SSL", False)
+SMTP_USER = os.getenv("SMTP_USER", "")
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
+SMTP_MAIL_FROM = os.getenv("SMTP_MAIL_FROM", SMTP_USER)
+EMAIL_REPORTS_SUBJECT_PREFIX = os.getenv(
+    "EMAIL_REPORTS_SUBJECT_PREFIX", "[Superset] "
+)
+
+# WebDriver configuration
+# If you use Firefox, you can stick with default values
+# If you use Chrome, then add the following WEBDRIVER_TYPE and WEBDRIVER_OPTION_ARGS
+WEBDRIVER_TYPE = "chrome"
+WEBDRIVER_OPTION_ARGS = [
+    "--force-device-scale-factor=2.0",
+    "--high-dpi-support=2.0",
+    "--headless",
+    "--disable-gpu",
+    "--disable-dev-shm-usage",
+    "--no-sandbox",
+    "--disable-setuid-sandbox",
+    "--disable-extensions",
+]
+
+# This is for internal use, you can keep http
+WEBDRIVER_BASEURL = "http://superset:8088" # When running using docker compose use "http://superset_app:8088'
+# This is the link sent to the recipient. Change to your domain, e.g. https://superset.mydomain.com
+WEBDRIVER_BASEURL_USER_FRIENDLY = "http://localhost:8088"
 SQLLAB_CTAS_NO_LIMIT = True
 
 log_level_text = os.getenv("SUPERSET_LOG_LEVEL", "INFO")

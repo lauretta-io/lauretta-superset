@@ -17,6 +17,12 @@
  * under the License.
  */
 import React, { useEffect, createRef, useState, useRef } from 'react';
+import {
+  BarChartOutlined,
+  FontSizeOutlined,
+  SortAscendingOutlined,
+  SortDescendingOutlined,
+} from '@ant-design/icons';
 import { styled, SupersetClient } from '@superset-ui/core';
 import {
   SupersetPluginChartFloorMapProps,
@@ -167,10 +173,17 @@ const StoreListWidget = styled.div`
   .widget-header {
     font-size: 14px;
     font-weight: bold;
+    color: #333;
+  }
+
+  .widget-header-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
     margin-bottom: 8px;
     padding-bottom: 8px;
     border-bottom: 1px solid #e0e0e0;
-    color: #333;
   }
 
   .search-input {
@@ -190,6 +203,51 @@ const StoreListWidget = styled.div`
 
     &::placeholder {
       color: #bfbfbf;
+    }
+  }
+
+  .sort-controls {
+    display: flex;
+    gap: 4px;
+    margin-bottom: 0;
+  }
+
+  .sort-btn {
+    width: 30px;
+    height: 26px;
+    padding: 0;
+    font-size: 12px;
+    line-height: 1;
+    border: 1px solid #d9d9d9;
+    border-radius: 4px;
+    background: #fff;
+    color: #666;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+
+    .sort-icon-pair {
+      display: flex;
+      align-items: center;
+      gap: 2px;
+
+      .direction-icon {
+        font-size: 10px;
+      }
+    }
+
+    &:hover {
+      border-color: #40a9ff;
+      color: #40a9ff;
+    }
+
+    &.active {
+      background: #e6f7ff;
+      border-color: #1890ff;
+      color: #1890ff;
+      font-weight: 600;
     }
   }
 
@@ -447,12 +505,18 @@ export default function SupersetPluginChartFloorMap(
   const [tooltipPos, setTooltipPos] = useState({ x: 0, y: 0 });
   const [isFullScreen, setIsFullScreen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+  const [sortField, setSortField] = useState<'name' | 'footfall'>('footfall');
+  const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc');
   const [selectedItemName, setSelectedItemName] = useState<string | null>(null);
   const [layerFilters, setLayerFilters] = useState<string[]>(['Retail']);
   const [isFilterLoading, setIsFilterLoading] = useState(false);
   const [floorsData, setFloorsData] = useState<
     { name: string; image: string }[]
   >([]);
+  const [imageDimensions, setImageDimensions] = useState<{
+    width: number;
+    height: number;
+  } | null>(null);
   const rootElem = createRef<HTMLDivElement>();
   const zoomPanRef = useRef<ZoomPanWrapperRef>(null);
 
@@ -513,6 +577,29 @@ export default function SupersetPluginChartFloorMap(
   const currentFloorImage = getFloorImageUrl(resolvedImage);
   console.log('CURRENT FLOOR IMAGE: ', currentFloorImage);
 
+  // Load floor image to detect its natural dimensions (so viewBox matches the real image)
+  useEffect(() => {
+    if (!currentFloorImage) {
+      setImageDimensions(null);
+      return;
+    }
+    const img = new Image();
+    img.onload = () => {
+      setImageDimensions({
+        width: img.naturalWidth,
+        height: img.naturalHeight,
+      });
+    };
+    img.onerror = () => {
+      setImageDimensions(null);
+    };
+    img.src = currentFloorImage;
+  }, [currentFloorImage]);
+
+  // Derived: use real image dimensions, fallback to 5700x3800 if not yet loaded
+  const imgW = imageDimensions?.width ?? 5700;
+  const imgH = imageDimensions?.height ?? 3800;
+
   // Helper function to map category to layer
   const getCategoryLayer = (category: string | undefined | null): string => {
     if (!category) return 'Retail';
@@ -559,8 +646,23 @@ export default function SupersetPluginChartFloorMap(
       result = result.filter(item => item.name.toLowerCase().includes(query));
     }
 
+    result = [...result].sort((a, b) => {
+      if (sortField === 'name') {
+        const nameCompare = a.name.localeCompare(b.name, undefined, {
+          sensitivity: 'base',
+        });
+        return sortDirection === 'asc' ? nameCompare : -nameCompare;
+      }
+
+      const footfallA = a.total_footfall_zo || 0;
+      const footfallB = b.total_footfall_zo || 0;
+      return sortDirection === 'asc'
+        ? footfallA - footfallB
+        : footfallB - footfallA;
+    });
+
     return result;
-  }, [uniqueItems, searchQuery, layerFilters]);
+  }, [uniqueItems, searchQuery, layerFilters, sortField, sortDirection]);
 
   // Calculate max footfall per layer for dynamic color scaling
   const maxFootfallByLayer = React.useMemo(() => {
@@ -612,9 +714,19 @@ export default function SupersetPluginChartFloorMap(
     }
   };
 
+  const handleSortChange = (field: 'name' | 'footfall') => {
+    if (sortField === field) {
+      setSortDirection(prev => (prev === 'asc' ? 'desc' : 'asc'));
+      return;
+    }
+
+    setSortField(field);
+    setSortDirection(field === 'name' ? 'asc' : 'desc');
+  };
+
   const handleItemHoverEnter = (
     itemName: string,
-    event: React.MouseEvent<SVGPolylineElement>,
+    event: React.MouseEvent<SVGPolygonElement>,
   ) => {
     const rect = event.currentTarget.getBoundingClientRect();
     const parentRect = rootElem.current?.getBoundingClientRect();
@@ -687,7 +799,7 @@ export default function SupersetPluginChartFloorMap(
         <svg
           xmlns="http://www.w3.org/2000/svg"
           xmlnsXlink="http://www.w3.org/1999/xlink"
-          viewBox="0 0 5700 3800"
+          viewBox={`0 0 ${imgW} ${imgH}`}
           width="100%"
           height="100%"
           style={{ display: 'block', position: 'relative' }}
@@ -697,8 +809,8 @@ export default function SupersetPluginChartFloorMap(
           <image
             x="0"
             y="0"
-            width="5700"
-            height="3800"
+            width={imgW}
+            height={imgH}
             xlinkHref={currentFloorImage}
             imageRendering="crisp-edges"
             style={{ pointerEvents: 'none', zIndex: 1 }}
@@ -741,7 +853,57 @@ export default function SupersetPluginChartFloorMap(
       </ZoomPanWrapper>
       {isFullScreen && uniqueItems.length > 0 && (
         <StoreListWidget>
-          <div className="widget-header">Store Footfall</div>
+          <div className="widget-header-row">
+            <div className="widget-header">Store Footfall</div>
+            <div className="sort-controls">
+              <button
+                type="button"
+                className={`sort-btn ${sortField === 'name' ? 'active' : ''}`}
+                onClick={() => handleSortChange('name')}
+                title="Sort by name"
+                aria-label="Sort by name"
+              >
+                {sortField === 'name' ? (
+                  sortDirection === 'asc' ? (
+                    <span className="sort-icon-pair">
+                      <FontSizeOutlined />
+                      <SortAscendingOutlined className="direction-icon" />
+                    </span>
+                  ) : (
+                    <span className="sort-icon-pair">
+                      <FontSizeOutlined />
+                      <SortDescendingOutlined className="direction-icon" />
+                    </span>
+                  )
+                ) : (
+                  <FontSizeOutlined />
+                )}
+              </button>
+              <button
+                type="button"
+                className={`sort-btn ${sortField === 'footfall' ? 'active' : ''}`}
+                onClick={() => handleSortChange('footfall')}
+                title="Sort by footfall"
+                aria-label="Sort by footfall"
+              >
+                {sortField === 'footfall' ? (
+                  sortDirection === 'asc' ? (
+                    <span className="sort-icon-pair">
+                      <BarChartOutlined />
+                      <SortAscendingOutlined className="direction-icon" />
+                    </span>
+                  ) : (
+                    <span className="sort-icon-pair">
+                      <BarChartOutlined />
+                      <SortDescendingOutlined className="direction-icon" />
+                    </span>
+                  )
+                ) : (
+                  <BarChartOutlined />
+                )}
+              </button>
+            </div>
+          </div>
           <input
             type="text"
             className="search-input"

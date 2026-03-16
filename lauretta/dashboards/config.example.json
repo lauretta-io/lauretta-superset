@@ -1,4 +1,5 @@
 {
+  "timezone": "UTC",
   "dashboards": [
     {
       "path": "/lauretta/dashboards/property_demo.zip",

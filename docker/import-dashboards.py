@@ -211,7 +211,7 @@ FROM (
     sql = sql_template.replace('{FLOOR_ID}', str(floor_id))
     
     return {
-        'table_name': f'MAP {floor_name} {floor_id}',
+        'table_name': f'Floor Map {floor_name} {floor_id}',
         'main_dttm_col': None,
         'description': None,
         'default_endpoint': None,
@@ -432,7 +432,7 @@ def create_default_chart_template(floor_name, floor_id, chart_id, dataset_uuid, 
     }
     
     return {
-        'slice_name': f'MAP FLOOR {floor_id} {floor_name}',
+        'slice_name': f'Floor Map {floor_name} {floor_id}',
         'description': None,
         'certified_by': None,
         'certification_details': None,
@@ -784,9 +784,10 @@ def update_dashboard_with_charts(extract_dir, created_charts):
     
     print(f"✅ Dashboard updated with {len(created_charts)} new floor map charts")
 
-def update_database_yaml_credentials(extract_dir, conn_config, db_display_name, target_db_uuid):
+def update_database_yaml_credentials(extract_dir, conn_config, db_display_name, target_db_uuid, timezone=None):
     """Rewrite databases/*.yaml inside the extracted ZIP with real credentials
-    from config.json so the Superset importer won't reject the masked password."""
+    from config.json so the Superset importer won't reject the masked password.
+    If timezone is provided, injects engine_params.connect_args.options=-c timezone=<tz>."""
     databases_dir = os.path.join(extract_dir, 'databases')
     if not os.path.isdir(databases_dir):
         print("⚠️ No databases/ folder in extracted ZIP")
@@ -808,8 +809,22 @@ def update_database_yaml_credentials(extract_dir, conn_config, db_display_name, 
         db_data['sqlalchemy_uri'] = new_uri
         db_data['database_name'] = db_display_name
         db_data['uuid'] = target_db_uuid
+        if timezone:
+            extra = db_data.get('extra') or {}
+            if isinstance(extra, str):
+                import json as _json
+                extra = _json.loads(extra) if extra else {}
+            engine_params = extra.get('engine_params') or {}
+            connect_args = engine_params.get('connect_args') or {}
+            connect_args['options'] = f'-c timezone={timezone}'
+            engine_params['connect_args'] = connect_args
+            extra['engine_params'] = engine_params
+            db_data['extra'] = extra
+            print(f"🕐 Set extra.engine_params.connect_args.options=-c timezone={timezone} in {fname}")
+        yaml_str = yaml.dump(db_data, default_flow_style=False, allow_unicode=True, sort_keys=False)
+        print(f"\n📄 Database YAML [{fname}] before zip/import:\n{'─'*60}\n{yaml_str}{'─'*60}\n")
         with open(fpath, 'w') as f:
-            yaml.dump(db_data, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+            f.write(yaml_str)
         print(f"🔐 Updated database credentials in {fname}")
 
 def update_dataset_database_uuid(extract_dir, target_db_uuid):
@@ -836,7 +851,7 @@ def update_dataset_database_uuid(extract_dir, target_db_uuid):
     print(f"🔗 Updated database_uuid for {updated} dataset files")
 
 
-def process_floor_maps(zip_path, floors, db_uuid, conn_config=None, db_display_name=None, starting_chart_id=100):
+def process_floor_maps(zip_path, floors, db_uuid, conn_config=None, db_display_name=None, starting_chart_id=100, timezone=None):
     """Process floor maps: generate datasets, charts, and update dashboard.
     Returns tuple: (new_zip_path, created_datasets, created_charts)"""
     if not floors:
@@ -856,7 +871,7 @@ def process_floor_maps(zip_path, floors, db_uuid, conn_config=None, db_display_n
     update_dashboard_with_charts(extract_dir, created_charts)
     # Inject real database credentials into the ZIP before import
     if conn_config and db_display_name:
-        update_database_yaml_credentials(extract_dir, conn_config, db_display_name, db_uuid)
+        update_database_yaml_credentials(extract_dir, conn_config, db_display_name, db_uuid, timezone=timezone)
     update_dataset_database_uuid(extract_dir, db_uuid)
     # Re-zip the modified dashboard export
     new_zip_path = rezip_dashboard_export(extract_dir, zip_path)
@@ -885,6 +900,9 @@ def update_via_superset_shell():
     if not os.path.exists(CONFIG_PATH): return
     with open(CONFIG_PATH, "r") as f:
         config = json.load(f)
+    timezone = config.get("timezone")
+    if timezone:
+        print(f"🕐 Timezone from config.json: {timezone}")
     for dash_index, dash in enumerate(config.get("dashboards", [])):
         zip_path = dash.get("path")
         if zip_path.startswith('/lauretta/'): zip_path = '/app' + zip_path
@@ -915,7 +933,22 @@ def update_via_superset_shell():
         # Helper: update database connection via Python app-context
         def run_db_update():
             print(f"🔄 Updating Database UUID {target_db_uuid}...")
+            # Build the extra JSON with timezone engine_params if configured
+            extra_dict = {
+                "metadata_params": {},
+                "engine_params": {},
+                "metadata_cache_timeout": {},
+                "schemas_allowed_for_file_upload": []
+            }
+            if timezone:
+                extra_dict["engine_params"] = {
+                    "connect_args": {
+                        "options": f"-c timezone={timezone}"
+                    }
+                }
+            extra_json = json.dumps(extra_dict)
             python_code = "\n".join([
+                "import json",
                 "from superset.app import create_app",
                 "app = create_app()",
                 "with app.app_context():",
@@ -924,19 +957,29 @@ def update_via_superset_shell():
                 f"    target_uuid = {json.dumps(target_db_uuid)}",
                 f"    target_name = {json.dumps(new_name)}",
                 f"    target_uri = {json.dumps(new_uri)}",
+                f"    target_extra = {json.dumps(extra_json)}",
                 "    database = db.session.query(Database).filter_by(uuid=target_uuid).first()",
                 "    if database:",
                 "        print(f'Updating existing database: {database.database_name}')",
                 "        database.database_name = target_name",
                 "        database.sqlalchemy_uri = target_uri",
+                "        # Merge engine_params into existing extra",
+                "        try:",
+                "            existing_extra = json.loads(database.extra) if database.extra else {}",
+                "        except json.JSONDecodeError:",
+                "            existing_extra = {}",
+                "        new_extra = json.loads(target_extra)",
+                "        existing_extra['engine_params'] = new_extra.get('engine_params', {})",
+                "        database.extra = json.dumps(existing_extra)",
                 "    else:",
                 "        print(f'Database with UUID {target_uuid} not found. Creating new one...')",
-                "        database = Database(database_name=target_name, sqlalchemy_uri=target_uri, uuid=target_uuid)",
+                "        database = Database(database_name=target_name, sqlalchemy_uri=target_uri, uuid=target_uuid, extra=target_extra)",
                 "        db.session.add(database)",
                 "    db.session.commit()",
                 "    refreshed = db.session.query(Database).filter_by(uuid=target_uuid).first()",
                 "    if refreshed:",
                 "        print(f'✅ Database sync complete: name={refreshed.database_name}, uri={refreshed.sqlalchemy_uri}')",
+                "        print(f'   extra={refreshed.extra}')",
             ])
             res = subprocess.run(["python", "-c", python_code], text=True, capture_output=True)
             if res.returncode != 0:
@@ -964,7 +1007,7 @@ def update_via_superset_shell():
             new_zip_path, created_datasets, created_charts = process_floor_maps(
                 zip_path, floors, target_db_uuid,
                 conn_config=conn_config, db_display_name=new_name,
-                starting_chart_id=starting_chart_id
+                starting_chart_id=starting_chart_id, timezone=timezone
             )
             if not new_zip_path:
                 continue
@@ -972,7 +1015,7 @@ def update_via_superset_shell():
             print("ℹ️ No floors configured, patching database credentials only...")
             extract_dir = find_extract_dir(zip_path)
             if extract_dir:
-                update_database_yaml_credentials(extract_dir, conn_config, new_name, target_db_uuid)
+                update_database_yaml_credentials(extract_dir, conn_config, new_name, target_db_uuid, timezone=timezone)
                 update_dataset_database_uuid(extract_dir, target_db_uuid)
                 new_zip_path = rezip_dashboard_export(extract_dir, zip_path)
             else:

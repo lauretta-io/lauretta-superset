@@ -24,20 +24,20 @@ export interface StorePolylineProps {
   isHovered: boolean;
   layer: string;
   maxFootfall: number;
-  onHoverEnter: (e: React.MouseEvent<SVGPolylineElement>) => void;
+  onHoverEnter: (e: React.MouseEvent<SVGPolygonElement>) => void;
   onHoverLeave: () => void;
-  onClick?: (e: React.MouseEvent<SVGPolylineElement>) => void;
+  onClick?: (e: React.MouseEvent<SVGPolygonElement>) => void;
 }
 
 // Color scales for each layer (6 bins from light to dark)
 export const layerColorScales: Record<string, string[]> = {
   Retail: [
-    'rgb(252, 217, 171)', // lightest
-    'rgb(255, 198, 104)',
-    'rgb(255, 179, 0)',
-    'rgb(225, 158, 0)',
-    'rgb(196, 138, 0)',
-    'rgb(168, 118, 0)', // darkest
+    'rgb(220, 242, 195)', // lightest
+    'rgb(175, 218, 120)',
+    'rgb(130, 194, 50)',
+    'rgb(110, 164, 40)',
+    'rgb(88, 135, 30)',
+    'rgb(67, 106, 20)', // darkest
   ],
   Entrances: [
     'rgb(181, 196, 218)', // lightest
@@ -126,10 +126,6 @@ export function StorePolyline({
     layer,
     maxFootfall,
   );
-  const hasNoData =
-    store.total_footfall_zo === undefined ||
-    store.total_footfall_zo === null ||
-    store.total_footfall_zo === 0;
 
   // Skip rendering if points is NULL, undefined, or empty
   if (!store.points || store.points === 'null' || store.points === '') {
@@ -139,7 +135,7 @@ export function StorePolyline({
   return (
     <g key={index}>
       {/* Polyline */}
-      <polyline
+      <polygon
         onMouseEnter={onHoverEnter}
         onMouseLeave={onHoverLeave}
         onClick={e => {
@@ -147,16 +143,16 @@ export function StorePolyline({
           onClick?.(e);
         }}
         style={{
-          stroke: isHovered ? '#000000' : 'rgba(0, 0, 0, 0.3)',
+          stroke: isHovered ? '#000000' : 'rgba(0, 0, 0, 0.5)',
           fill: fillColor,
-          opacity: isHovered ? 0.9 : hasNoData ? 0.4 : 0.7,
           transition: 'all 0.3s ease',
           pointerEvents: 'auto',
           zIndex: isHovered ? 10 : 2,
           cursor: 'pointer',
-          strokeWidth: isHovered ? 4 : 1,
+          strokeWidth: isHovered ? 6 : 2,
           strokeLinejoin: 'round',
           strokeLinecap: 'round',
+          color: 'black',
         }}
         points={store.points}
       />
