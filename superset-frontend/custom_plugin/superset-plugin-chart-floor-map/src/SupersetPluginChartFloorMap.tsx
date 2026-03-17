@@ -75,6 +75,26 @@ const Styles = styled.div<SupersetPluginChartFloorMapStylesProps>`
   flex-direction: column;
   position: relative;
 
+  .content-layout {
+    width: 100%;
+    height: 100%;
+    min-height: 0;
+    display: flex;
+  }
+
+  .content-layout.split-view {
+    display: grid;
+    grid-template-columns: 2fr 10fr;
+  }
+
+  .map-panel {
+    position: relative;
+    min-width: 0;
+    min-height: 0;
+    display: flex;
+    flex: 1;
+  }
+
   svg {
     flex: 1;
     width: 100%;
@@ -156,16 +176,18 @@ const TooltipBox = styled.div<{ isVisible: boolean; x: number; y: number }>`
 `;
 
 const StoreListWidget = styled.div`
-  position: absolute;
-  left: 20px;
-  top: 20px;
+  position: relative;
+  left: auto;
+  top: auto;
   background: white;
-  border-radius: 8px;
+  border-radius: 0;
   padding: 12px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
-  z-index: 500;
-  max-height: calc(100% - 40px);
-  width: 250px;
+  box-shadow: none;
+  border-right: 1px solid #e0e0e0;
+  z-index: 2;
+  height: 100%;
+  max-height: 100%;
+  width: 100%;
   display: flex;
   flex-direction: column;
   overflow-x: hidden;
@@ -761,6 +783,8 @@ export default function SupersetPluginChartFloorMap(
       ? data.find((item: any) => item.name === selectedItemName)
       : null;
 
+  const showStorePanel = isFullScreen && uniqueItems.length > 0;
+
   // Calculate tooltip position for selected item
   const [selectedTooltipPos, setSelectedTooltipPos] = useState({ x: 0, y: 0 });
 
@@ -771,9 +795,9 @@ export default function SupersetPluginChartFloorMap(
       const updatePosition = () => {
         const parentRect = rootElem.current?.getBoundingClientRect();
         if (parentRect) {
-          // Position tooltip in the center of the viewport
+          // Keep selected tooltip centered in the map pane during split view.
           setSelectedTooltipPos({
-            x: parentRect.width / 2,
+            x: showStorePanel ? parentRect.width * 0.6 : parentRect.width / 2,
             y: parentRect.height / 2,
           });
         }
@@ -785,7 +809,7 @@ export default function SupersetPluginChartFloorMap(
       return () => clearTimeout(timer);
     }
     return undefined;
-  }, [selectedItemName, height, width]);
+  }, [selectedItemName, height, width, showStorePanel]);
 
   return (
     <Styles
@@ -795,278 +819,292 @@ export default function SupersetPluginChartFloorMap(
       height={height}
       width={width}
     >
-      <ZoomPanWrapper ref={zoomPanRef}>
-        <svg
-          xmlns="http://www.w3.org/2000/svg"
-          xmlnsXlink="http://www.w3.org/1999/xlink"
-          viewBox={`0 0 ${imgW} ${imgH}`}
-          width="100%"
-          height="100%"
-          style={{ display: 'block', position: 'relative' }}
-          preserveAspectRatio="xMidYMid meet"
-          onClick={handleMapClick}
-        >
-          <image
-            x="0"
-            y="0"
-            width={imgW}
-            height={imgH}
-            xlinkHref={currentFloorImage}
-            imageRendering="crisp-edges"
-            style={{ pointerEvents: 'none', zIndex: 1 }}
-          />
-          {/* Render polylines grouped by store */}
-          {data &&
-            Array.isArray(data) &&
-            data.map((item: any, index: number) => {
-              const itemName = item.name || 'Unknown';
-              const itemLayer = getCategoryLayer(item.category);
-              const isItemHovered = hoveredItemName === itemName;
-              const isItemSelected = selectedItemName === itemName;
-
-              // Filter polylines based on layer selection (multiple)
-              if (
-                layerFilters.length === 0 ||
-                !layerFilters.includes(itemLayer)
-              ) {
-                return null;
-              }
-
-              return (
-                <g
-                  key={index}
-                  id={`store-polyline-${itemName.replace(/\s+/g, '-')}`}
+      <div className={`content-layout ${showStorePanel ? 'split-view' : ''}`}>
+        {showStorePanel && (
+          <StoreListWidget>
+            <div className="widget-header-row">
+              <div className="widget-header">Store Footfall</div>
+              <div className="sort-controls">
+                <button
+                  type="button"
+                  className={`sort-btn ${sortField === 'name' ? 'active' : ''}`}
+                  onClick={() => handleSortChange('name')}
+                  title="Sort by name"
+                  aria-label="Sort by name"
                 >
-                  <StorePolyline
-                    store={item}
-                    index={index}
-                    isHovered={isItemHovered || isItemSelected}
-                    onHoverEnter={e => handleItemHoverEnter(itemName, e)}
-                    onHoverLeave={handleItemHoverLeave}
-                    layer={itemLayer}
-                    maxFootfall={maxFootfallByLayer[itemLayer] || 1}
-                  />
-                </g>
-              );
-            })}
-        </svg>
-      </ZoomPanWrapper>
-      {isFullScreen && uniqueItems.length > 0 && (
-        <StoreListWidget>
-          <div className="widget-header-row">
-            <div className="widget-header">Store Footfall</div>
-            <div className="sort-controls">
-              <button
-                type="button"
-                className={`sort-btn ${sortField === 'name' ? 'active' : ''}`}
-                onClick={() => handleSortChange('name')}
-                title="Sort by name"
-                aria-label="Sort by name"
-              >
-                {sortField === 'name' ? (
-                  sortDirection === 'asc' ? (
-                    <span className="sort-icon-pair">
-                      <FontSizeOutlined />
-                      <SortAscendingOutlined className="direction-icon" />
-                    </span>
+                  {sortField === 'name' ? (
+                    sortDirection === 'asc' ? (
+                      <span className="sort-icon-pair">
+                        <FontSizeOutlined />
+                        <SortAscendingOutlined className="direction-icon" />
+                      </span>
+                    ) : (
+                      <span className="sort-icon-pair">
+                        <FontSizeOutlined />
+                        <SortDescendingOutlined className="direction-icon" />
+                      </span>
+                    )
                   ) : (
-                    <span className="sort-icon-pair">
-                      <FontSizeOutlined />
-                      <SortDescendingOutlined className="direction-icon" />
-                    </span>
-                  )
-                ) : (
-                  <FontSizeOutlined />
-                )}
-              </button>
-              <button
-                type="button"
-                className={`sort-btn ${sortField === 'footfall' ? 'active' : ''}`}
-                onClick={() => handleSortChange('footfall')}
-                title="Sort by footfall"
-                aria-label="Sort by footfall"
-              >
-                {sortField === 'footfall' ? (
-                  sortDirection === 'asc' ? (
-                    <span className="sort-icon-pair">
-                      <BarChartOutlined />
-                      <SortAscendingOutlined className="direction-icon" />
-                    </span>
+                    <FontSizeOutlined />
+                  )}
+                </button>
+                <button
+                  type="button"
+                  className={`sort-btn ${sortField === 'footfall' ? 'active' : ''}`}
+                  onClick={() => handleSortChange('footfall')}
+                  title="Sort by footfall"
+                  aria-label="Sort by footfall"
+                >
+                  {sortField === 'footfall' ? (
+                    sortDirection === 'asc' ? (
+                      <span className="sort-icon-pair">
+                        <BarChartOutlined />
+                        <SortAscendingOutlined className="direction-icon" />
+                      </span>
+                    ) : (
+                      <span className="sort-icon-pair">
+                        <BarChartOutlined />
+                        <SortDescendingOutlined className="direction-icon" />
+                      </span>
+                    )
                   ) : (
-                    <span className="sort-icon-pair">
-                      <BarChartOutlined />
-                      <SortDescendingOutlined className="direction-icon" />
-                    </span>
-                  )
-                ) : (
-                  <BarChartOutlined />
-                )}
-              </button>
+                    <BarChartOutlined />
+                  )}
+                </button>
+              </div>
             </div>
-          </div>
-          <input
-            type="text"
-            className="search-input"
-            placeholder="Search stores..."
-            value={searchQuery}
-            onChange={e => setSearchQuery(e.target.value)}
-          />
-          <div className="layer-filter">
-            {['Retail', 'Entrances', 'Circulation', 'Public'].map(layer => (
-              <button
-                key={layer}
-                className={`layer-btn ${layerFilters.includes(layer) ? 'active' : ''}`}
-                onClick={() => handleLayerChange(layer)}
-              >
-                {layerImages[layer] && (
-                  <img src={layerImages[layer]} alt={layer} />
-                )}
-                {layer}
-              </button>
-            ))}
-          </div>
-          {isFilterLoading && (
-            <div className="loading-overlay">
-              <div className="loading-spinner"></div>
+            <input
+              type="text"
+              className="search-input"
+              placeholder="Search stores..."
+              value={searchQuery}
+              onChange={e => setSearchQuery(e.target.value)}
+            />
+            <div className="layer-filter">
+              {['Retail', 'Entrances', 'Circulation', 'Public'].map(layer => (
+                <button
+                  key={layer}
+                  className={`layer-btn ${layerFilters.includes(layer) ? 'active' : ''}`}
+                  onClick={() => handleLayerChange(layer)}
+                >
+                  {layerImages[layer] && (
+                    <img src={layerImages[layer]} alt={layer} />
+                  )}
+                  {layer}
+                </button>
+              ))}
             </div>
+            {isFilterLoading && (
+              <div className="loading-overlay">
+                <div className="loading-spinner"></div>
+              </div>
+            )}
+            <div className="store-list">
+              {filteredItems.length > 0 ? (
+                filteredItems.map((item, index) => (
+                  <div
+                    key={index}
+                    className={`store-item ${selectedItemName === item.name ? 'selected' : ''}`}
+                    style={{
+                      borderLeftColor: getLayerFootfallColor(
+                        item.total_footfall_zo,
+                        item.layer,
+                        maxFootfallByLayer[item.layer] || 1,
+                      ),
+                    }}
+                    onClick={() => handleItemClick(item.name)}
+                  >
+                    <div className="store-name">{item.name}</div>
+                    <div className="store-footfall">
+                      <span className="label">Footfall:</span>
+                      <span
+                        className="value"
+                        style={{
+                          color: getLayerFootfallColor(
+                            item.total_footfall_zo,
+                            item.layer,
+                            maxFootfallByLayer[item.layer] || 1,
+                          ),
+                        }}
+                      >
+                        {item.total_footfall_zo.toLocaleString()}
+                      </span>
+                    </div>
+                  </div>
+                ))
+              ) : (
+                <div className="no-results">No stores found</div>
+              )}
+            </div>
+          </StoreListWidget>
+        )}
+
+        <div className="map-panel">
+          <ZoomPanWrapper ref={zoomPanRef}>
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              xmlnsXlink="http://www.w3.org/1999/xlink"
+              viewBox={`0 0 ${imgW} ${imgH}`}
+              width="100%"
+              height="100%"
+              style={{ display: 'block', position: 'relative' }}
+              preserveAspectRatio="xMidYMid meet"
+              onClick={handleMapClick}
+            >
+              <image
+                x="0"
+                y="0"
+                width={imgW}
+                height={imgH}
+                xlinkHref={currentFloorImage}
+                imageRendering="crisp-edges"
+                style={{ pointerEvents: 'none', zIndex: 1 }}
+              />
+              {/* Render polylines grouped by store */}
+              {data &&
+                Array.isArray(data) &&
+                data.map((item: any, index: number) => {
+                  const itemName = item.name || 'Unknown';
+                  const itemLayer = getCategoryLayer(item.category);
+                  const isItemHovered = hoveredItemName === itemName;
+                  const isItemSelected = selectedItemName === itemName;
+
+                  // Filter polylines based on layer selection (multiple)
+                  if (
+                    layerFilters.length === 0 ||
+                    !layerFilters.includes(itemLayer)
+                  ) {
+                    return null;
+                  }
+
+                  return (
+                    <g
+                      key={index}
+                      id={`store-polyline-${itemName.replace(/\s+/g, '-')}`}
+                    >
+                      <StorePolyline
+                        store={item}
+                        index={index}
+                        isHovered={isItemHovered || isItemSelected}
+                        onHoverEnter={e => handleItemHoverEnter(itemName, e)}
+                        onHoverLeave={handleItemHoverLeave}
+                        layer={itemLayer}
+                        maxFootfall={maxFootfallByLayer[itemLayer] || 1}
+                      />
+                    </g>
+                  );
+                })}
+            </svg>
+          </ZoomPanWrapper>
+
+          {/* Show tooltip for hovered item */}
+          {displayedItem && hoveredItemName !== null && (
+            <TooltipBox isVisible={true} x={tooltipPos.x} y={tooltipPos.y}>
+              <div className="store-name">{displayedItem.name}</div>
+              {displayedItem.category && (
+                <div className="category-section">
+                  <div className="category-label">Category</div>
+                  <div className="category-name">{displayedItem.category}</div>
+                </div>
+              )}
+              {displayedItem.total_footfall_zo !== undefined &&
+                displayedItem.total_footfall_zo !== null && (
+                  <div className="footfall-section">
+                    <div className="footfall-label">Footfall</div>
+                    <div
+                      className="footfall-value"
+                      style={{
+                        color: 'black',
+                      }}
+                    >
+                      {(
+                        displayedItem.total_footfall_zo as number
+                      ).toLocaleString()}
+                    </div>
+                  </div>
+                )}
+            </TooltipBox>
           )}
-          <div className="store-list">
-            {filteredItems.length > 0 ? (
-              filteredItems.map((item, index) => (
-                <div
-                  key={index}
-                  className={`store-item ${selectedItemName === item.name ? 'selected' : ''}`}
-                  style={{
-                    borderLeftColor: getLayerFootfallColor(
-                      item.total_footfall_zo,
-                      item.layer,
-                      maxFootfallByLayer[item.layer] || 1,
-                    ),
-                  }}
-                  onClick={() => handleItemClick(item.name)}
-                >
-                  <div className="store-name">{item.name}</div>
-                  <div className="store-footfall">
-                    <span className="label">Footfall:</span>
-                    <span
-                      className="value"
+
+          {/* Show tooltip for selected item (when clicking from list) */}
+          {selectedItemData && !hoveredItemName && (
+            <TooltipBox
+              isVisible={true}
+              x={selectedTooltipPos.x}
+              y={selectedTooltipPos.y}
+            >
+              <div className="store-name">{selectedItemData.name}</div>
+              {selectedItemData.category && (
+                <div className="category-section">
+                  <div className="category-label">Category</div>
+                  <div className="category-name">
+                    {selectedItemData.category}
+                  </div>
+                </div>
+              )}
+              {selectedItemData.total_footfall_zo !== undefined &&
+                selectedItemData.total_footfall_zo !== null && (
+                  <div className="footfall-section">
+                    <div className="footfall-label">Footfall</div>
+                    <div
+                      className="footfall-value"
                       style={{
                         color: getLayerFootfallColor(
-                          item.total_footfall_zo,
-                          item.layer,
-                          maxFootfallByLayer[item.layer] || 1,
+                          selectedItemData.total_footfall_zo as number,
+                          getCategoryLayer(selectedItemData.category as string),
+                          maxFootfallByLayer[
+                            getCategoryLayer(
+                              selectedItemData.category as string,
+                            )
+                          ] || 1,
                         ),
                       }}
                     >
-                      {item.total_footfall_zo.toLocaleString()}
-                    </span>
+                      {(
+                        selectedItemData.total_footfall_zo as number
+                      ).toLocaleString()}
+                    </div>
                   </div>
-                </div>
-              ))
-            ) : (
-              <div className="no-results">No stores found</div>
-            )}
-          </div>
-        </StoreListWidget>
-      )}
-      {/* Show tooltip for hovered item */}
-      {displayedItem && hoveredItemName !== null && (
-        <TooltipBox isVisible={true} x={tooltipPos.x} y={tooltipPos.y}>
-          <div className="store-name">{displayedItem.name}</div>
-          {displayedItem.category && (
-            <div className="category-section">
-              <div className="category-label">Category</div>
-              <div className="category-name">{displayedItem.category}</div>
-            </div>
+                )}
+            </TooltipBox>
           )}
-          {displayedItem.total_footfall_zo !== undefined &&
-            displayedItem.total_footfall_zo !== null && (
-              <div className="footfall-section">
-                <div className="footfall-label">Footfall</div>
-                <div
-                  className="footfall-value"
-                  style={{
-                    color: 'black',
-                  }}
-                >
-                  {(displayedItem.total_footfall_zo as number).toLocaleString()}
-                </div>
-              </div>
-            )}
-        </TooltipBox>
-      )}
-      {/* Show tooltip for selected item (when clicking from list) */}
-      {selectedItemData && !hoveredItemName && (
-        <TooltipBox
-          isVisible={true}
-          x={selectedTooltipPos.x}
-          y={selectedTooltipPos.y}
-        >
-          <div className="store-name">{selectedItemData.name}</div>
-          {selectedItemData.category && (
-            <div className="category-section">
-              <div className="category-label">Category</div>
-              <div className="category-name">{selectedItemData.category}</div>
-            </div>
+
+          {/* Color Legend */}
+          {isFullScreen && layerFilters.length > 0 && (
+            <ColorLegend>
+              {layerFilters.map(layer => {
+                const maxVal = maxFootfallByLayer[layer] || 0;
+                const bins = getColorBins(maxVal, layer);
+                return (
+                  <div key={layer} className="layer-legend">
+                    <div className="layer-name">{layer}</div>
+                    <div className="color-bins">
+                      <div className="color-row">
+                        <div className="no-data-box"></div>
+                        {bins.map((bin, idx) => (
+                          <div
+                            key={idx}
+                            className="color-box"
+                            style={{ backgroundColor: bin.color }}
+                          ></div>
+                        ))}
+                      </div>
+                      <div className="labels-row">
+                        <span className="bin-label">0</span>
+                        {bins.map((bin, idx) => (
+                          <span key={idx} className="bin-label">
+                            {bin.label}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </ColorLegend>
           )}
-          {selectedItemData.total_footfall_zo !== undefined &&
-            selectedItemData.total_footfall_zo !== null && (
-              <div className="footfall-section">
-                <div className="footfall-label">Footfall</div>
-                <div
-                  className="footfall-value"
-                  style={{
-                    color: getLayerFootfallColor(
-                      selectedItemData.total_footfall_zo as number,
-                      getCategoryLayer(selectedItemData.category as string),
-                      maxFootfallByLayer[
-                        getCategoryLayer(selectedItemData.category as string)
-                      ] || 1,
-                    ),
-                  }}
-                >
-                  {(
-                    selectedItemData.total_footfall_zo as number
-                  ).toLocaleString()}
-                </div>
-              </div>
-            )}
-        </TooltipBox>
-      )}
-      {/* Color Legend */}
-      {isFullScreen && layerFilters.length > 0 && (
-        <ColorLegend>
-          {layerFilters.map(layer => {
-            const maxVal = maxFootfallByLayer[layer] || 0;
-            const bins = getColorBins(maxVal, layer);
-            return (
-              <div key={layer} className="layer-legend">
-                <div className="layer-name">{layer}</div>
-                <div className="color-bins">
-                  <div className="color-row">
-                    <div className="no-data-box"></div>
-                    {bins.map((bin, idx) => (
-                      <div
-                        key={idx}
-                        className="color-box"
-                        style={{ backgroundColor: bin.color }}
-                      ></div>
-                    ))}
-                  </div>
-                  <div className="labels-row">
-                    <span className="bin-label">0</span>
-                    {bins.map((bin, idx) => (
-                      <span key={idx} className="bin-label">
-                        {bin.label}
-                      </span>
-                    ))}
-                  </div>
-                </div>
-              </div>
-            );
-          })}
-        </ColorLegend>
-      )}
+        </div>
+      </div>
     </Styles>
   );
 }
