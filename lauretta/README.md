@@ -27,6 +27,7 @@ Complete guide for managing custom dashboards in Apache Superset with automatic 
 ✅ **Selective Import** - Only dashboards listed in `config.json` are imported  
 ✅ **No Example Data** - Example datasets are disabled by default  
 ✅ **Overwrite Protection** - Existing dashboards are updated safely  
+✅ **Automatic Tmp Cleanup** - Uploaded temp map images are cleaned every minute  
 ✅ **Git-Safe** - Sensitive config files are automatically ignored  
 
 ### What's Different?
@@ -137,7 +138,7 @@ lauretta-superset/
   - `floors` (optional) - Array of floor plan entries for Floor Map charts
     - `id` (required) - **The floor's ID as stored in the database** — this is NOT the display order; it must match the actual floor ID value in your data source
     - `name` (required) - Display name of the floor (e.g., `"Ground"`, `"Level 1"`)
-    - `image` (required) - Filename of the floor plan image placed in `lauretta/images/` (e.g., `"floor_plan_F1.jpeg"`)
+    - `image` (required) - Floor image reference. Usually a filename in `lauretta/images/` (e.g., `"floor_plan_F1.jpeg"`), but `/api/v1/lauretta/images/...`, absolute `/...`, or `http(s)://...` values are also supported.
 
 > ⚠️ **Important — `id` is a database ID, not a sequence number.**  
 > The `id` value must match the floor identifier in your database (e.g., the value stored in the `floor_id` column of your dataset). Setting it to `1, 2, 3...` by order will cause the wrong floor map to display if your database uses different IDs.
@@ -174,6 +175,16 @@ GET /api/v1/lauretta/images/<filename>
 
 **Supported image formats**: `.jpeg`, `.jpg`, `.png`, `.gif`, `.webp`
 
+### 3. Temporary Upload Folder Lifecycle (`lauretta/images/tmp`)
+
+`superset_config.py` provides an upload endpoint and cleanup flow for temporary floor-map images:
+
+- `POST /api/v1/lauretta/images/upload` saves image files to `/app/lauretta/images/tmp` and returns a public URL like `/api/v1/lauretta/images/tmp/<file>`.
+- When a Floor Map chart is created or updated, `floor_image` values from `/tmp/` are moved into `/app/lauretta/images/customs/` automatically.
+- When a chart is updated and image changes, old custom images are deleted automatically.
+- When a chart is deleted, the related custom image is deleted automatically.
+- Celery beat task `lauretta.cleanup_temp_images` runs in 12AM and deletes all files in `/app/lauretta/images/tmp`.
+
 **What happens during import**:
 
 1. The script extracts your dashboard ZIP
@@ -181,6 +192,8 @@ GET /api/v1/lauretta/images/<filename>
 3. Checks whether the dashboard UUID from ZIP already exists in Superset
 4. If dashboard already exists: updates only the database connection (name + URI)
 5. If dashboard is new: patches ZIP database YAML (`database_name` inside export YAML, `sqlalchemy_uri`, `uuid`), updates dataset `database_uuid`, optionally generates floor map datasets/charts, then imports using a temporary `.imported.zip`
+
+If `connections.timezone` is set, import also writes PostgreSQL session timezone into DB `extra.engine_params.connect_args.options = -c timezone=<tz>`.
 
 **IMPORTANT - About `database_display_name`**:
 
@@ -203,8 +216,8 @@ GET /api/v1/lauretta/images/<filename>
 - ⚠️ `config.json` is **git-ignored** — never commit database credentials to git
 - ✅ `config.example.json` is the template — safe to commit
 - 📝 Only dashboards listed here will be imported
-- 
-### 3. Environment Variables
+
+### 4. Environment Variables
 
 **File**: `docker/.env`
 
@@ -423,65 +436,71 @@ Use this section if you maintain infrastructure/config for scheduled alerts and 
 
 1. **Ensure these lines exist in** `docker/pythonpath_dev/superset_config.py`:
 
-  ```python
-  FEATURE_FLAGS = {
+    ```python
+    FEATURE_FLAGS = {
       "ALERT_REPORTS": True,
       "ALERT_REPORT_TABS": True,
       "ALLOW_ADHOC_SUBQUERY": True,
       "ENABLE_TEMPLATE_PROCESSING": True,
-  }
-  ALERT_REPORTS_NOTIFICATION_DRY_RUN = False
+    }
+    ALERT_REPORTS_NOTIFICATION_DRY_RUN = False
 
-  class CeleryConfig:
-      broker_url = "redis://superset_cache:6379/0"
+    class CeleryConfig:
+      broker_url = f"redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_CELERY_DB}"
       imports = (
-          "superset.sql_lab",
-          "superset.tasks.scheduler",
+        "superset.sql_lab",
+        "superset.tasks.scheduler",
+        "superset.tasks.thumbnails",
+        "superset.tasks.cache",
       )
-      result_backend = "redis://superset_cache:6379/0"
+      result_backend = f"redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_RESULTS_DB}"
       beat_schedule = {
-          "reports.scheduler": {
-              "task": "reports.scheduler",
-              "schedule": crontab(minute="*", hour="*"),
-          },
-          "reports.prune_log": {
-              "task": "reports.prune_log",
-              "schedule": crontab(minute=0, hour=0),
-          },
+        "reports.scheduler": {
+          "task": "reports.scheduler",
+          "schedule": crontab(minute="*", hour="*"),
+        },
+        "reports.prune_log": {
+          "task": "reports.prune_log",
+          "schedule": crontab(minute=10, hour=0),
+        },
+        "lauretta.cleanup_temp_images": {
+          "task": "lauretta.cleanup_temp_images",
+          "schedule": crontab(hour="0", minute="0")
+        }
       }
-  CELERY_CONFIG = CeleryConfig
 
-  def _env_bool(name: str, default: bool) -> bool:
+    CELERY_CONFIG = CeleryConfig
+
+    def _env_bool(name: str, default: bool) -> bool:
       value = os.getenv(name)
       if value is None:
-          return default
+        return default
       return value.strip().lower() in {"1", "true", "yes", "on"}
 
-  SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
-  SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
-  SMTP_STARTTLS = _env_bool("SMTP_STARTTLS", True)
-  SMTP_SSL_SERVER_AUTH = _env_bool("SMTP_SSL_SERVER_AUTH", True)
-  SMTP_SSL = _env_bool("SMTP_SSL", False)
-  SMTP_USER = os.getenv("SMTP_USER", "")
-  SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
-  SMTP_MAIL_FROM = os.getenv("SMTP_MAIL_FROM", SMTP_USER)
-  EMAIL_REPORTS_SUBJECT_PREFIX = os.getenv("EMAIL_REPORTS_SUBJECT_PREFIX", "[Superset] ")
+    SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
+    SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+    SMTP_STARTTLS = _env_bool("SMTP_STARTTLS", True)
+    SMTP_SSL_SERVER_AUTH = _env_bool("SMTP_SSL_SERVER_AUTH", True)
+    SMTP_SSL = _env_bool("SMTP_SSL", False)
+    SMTP_USER = os.getenv("SMTP_USER", "")
+    SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
+    SMTP_MAIL_FROM = os.getenv("SMTP_MAIL_FROM", SMTP_USER)
+    EMAIL_REPORTS_SUBJECT_PREFIX = os.getenv("EMAIL_REPORTS_SUBJECT_PREFIX", "[Superset] ")
 
-
-  WEBDRIVER_TYPE = "chrome"
-  WEBDRIVER_OPTION_ARGS = [
+    WEBDRIVER_TYPE = "chrome"
+    WEBDRIVER_OPTION_ARGS = [
       "--headless",
       "--disable-gpu",
       "--disable-dev-shm-usage",
       "--no-sandbox",
       "--disable-setuid-sandbox",
       "--disable-extensions",
-  ]
-  # This is for internal use, you can keep http
-  WEBDRIVER_BASEURL = "http://superset:8088" # When running using docker compose use "http://superset_app:8088'
-  # This is the link sent to the recipient. Change to your domain, e.g. https://superset.mydomain.com
-  WEBDRIVER_BASEURL_USER_FRIENDLY = "http://localhost:8088"
-  ```
+    ]
+    # This is for internal use, you can keep http
+    WEBDRIVER_BASEURL = "http://superset:8088"  # When running using docker compose use "http://superset_app:8088"
+    # This is the link sent to the recipient. Change to your domain, e.g. https://superset.mydomain.com
+    WEBDRIVER_BASEURL_USER_FRIENDLY = "http://localhost:8088"
+    ```
 
 2. **Set email variables in** `docker/.env` (example):
   ```bash

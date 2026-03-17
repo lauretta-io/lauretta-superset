@@ -125,7 +125,7 @@ const TooltipBox = styled.div<{ isVisible: boolean; x: number; y: number }>`
   position: absolute;
   left: ${({ x }) => x}px;
   top: ${({ y }) => y}px;
-  transform: translate(-50%, -130%);
+  transform: translate(-50%, -100%);
   pointer-events: none;
   z-index: 1000;
   opacity: ${({ isVisible }) => (isVisible ? 1 : 0)};
@@ -540,6 +540,7 @@ export default function SupersetPluginChartFloorMap(
     height: number;
   } | null>(null);
   const rootElem = createRef<HTMLDivElement>();
+  const mapPanelRef = useRef<HTMLDivElement>(null);
   const zoomPanRef = useRef<ZoomPanWrapperRef>(null);
 
   // Fetch floors from config.json via backend API (used to resolve image when floor_image is not set)
@@ -751,7 +752,9 @@ export default function SupersetPluginChartFloorMap(
     event: React.MouseEvent<SVGPolygonElement>,
   ) => {
     const rect = event.currentTarget.getBoundingClientRect();
-    const parentRect = rootElem.current?.getBoundingClientRect();
+    const parentRect =
+      mapPanelRef.current?.getBoundingClientRect() ||
+      rootElem.current?.getBoundingClientRect();
 
     if (parentRect) {
       setTooltipPos({
@@ -793,11 +796,12 @@ export default function SupersetPluginChartFloorMap(
     if (selectedItemName && rootElem.current) {
       // Small delay to allow zoom animation to complete
       const updatePosition = () => {
-        const parentRect = rootElem.current?.getBoundingClientRect();
+        const parentRect =
+          mapPanelRef.current?.getBoundingClientRect() ||
+          rootElem.current?.getBoundingClientRect();
         if (parentRect) {
-          // Keep selected tooltip centered in the map pane during split view.
           setSelectedTooltipPos({
-            x: showStorePanel ? parentRect.width * 0.6 : parentRect.width / 2,
+            x: parentRect.width / 2,
             y: parentRect.height / 2,
           });
         }
@@ -939,7 +943,7 @@ export default function SupersetPluginChartFloorMap(
           </StoreListWidget>
         )}
 
-        <div className="map-panel">
+        <div className="map-panel" ref={mapPanelRef}>
           <ZoomPanWrapper ref={zoomPanRef}>
             <svg
               xmlns="http://www.w3.org/2000/svg"
@@ -1049,15 +1053,7 @@ export default function SupersetPluginChartFloorMap(
                     <div
                       className="footfall-value"
                       style={{
-                        color: getLayerFootfallColor(
-                          selectedItemData.total_footfall_zo as number,
-                          getCategoryLayer(selectedItemData.category as string),
-                          maxFootfallByLayer[
-                            getCategoryLayer(
-                              selectedItemData.category as string,
-                            )
-                          ] || 1,
-                        ),
+                        color: 'black',
                       }}
                     >
                       {(

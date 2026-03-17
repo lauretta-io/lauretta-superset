@@ -80,9 +80,10 @@ def find_template_dataset(extract_dir):
                 return os.path.join(root, f)
     return None
 
-def create_default_dataset_template(floor_id, floor_name, db_uuid):
-    """Create a default MAP dataset template structure when no template exists in ZIP."""
-    sql_template = """{% set is_hourly = false %}
+def create_default_dataset_template(db_uuid):
+    """Create a single Floor Maps Dataset template (no floor_id filter in SQL)."""
+    sql_template = """
+{% set is_hourly = false %}
 {% set from_str = from_dttm | string if from_dttm else '' %}
 {% set to_str = to_dttm | string if to_dttm else '' %}
 {% if (from_str and '00:00:00' not in from_str) or (to_str and '00:00:00' not in to_str) or (from_str[:10] == to_str[:10]) %}
@@ -93,6 +94,7 @@ def create_default_dataset_template(floor_id, floor_name, db_uuid):
 
 {% set start_date = from_dttm if from_dttm else "CURRENT_DATE - INTERVAL '1 day'" %}
 {% set end_date = to_dttm if to_dttm else "CURRENT_DATE" %}
+{% set f = filter_values('floor_id') %}
 
 SELECT 
     res.floor_id,
@@ -121,7 +123,7 @@ FROM (
           {% if to_dttm %} AND {{ t_col }}::timestamp < '{{ to_str.replace("T", " ") }}'::timestamp {% endif %}
         GROUP BY unit_id
     ) usd ON usd.unit_id = u.id
-    WHERE z.floor_id = {FLOOR_ID}
+    {% if f %} WHERE z.floor_id = {{ f | first }} {% else %} WHERE z.floor_id IS NULL {% endif %}
     {% if filter_values('unit_name') %} AND u.name IN {{ filter_values('unit_name') | where_in }} {% endif %}
     {% if filter_values('unit_group_name') %} AND ug.name IN {{ filter_values('unit_group_name') | where_in }} {% endif %}
 
@@ -143,7 +145,7 @@ FROM (
           {% if to_dttm %} AND {{ t_col }}::timestamp < '{{ to_str.replace("T", " ") }}'::timestamp {% endif %}
         GROUP BY public_space_id
     ) pssd ON pssd.public_space_id = ps.id
-    WHERE ps.floor_id = {FLOOR_ID}
+    {% if f %} WHERE ps.floor_id = {{ f | first }} {% else %} WHERE ps.floor_id IS NULL {% endif %}
 
     UNION ALL
 
@@ -163,7 +165,7 @@ FROM (
           {% if to_dttm %} AND {{ t_col }}::timestamp < '{{ to_str.replace("T", " ") }}'::timestamp {% endif %}
         GROUP BY entrance_id
     ) esd ON esd.entrance_id = e.id
-    WHERE e.floor_id = {FLOOR_ID}
+    {% if f %} WHERE e.floor_id = {{ f | first }} {% else %} WHERE e.floor_id IS NULL {% endif %}
 
     UNION ALL
 
@@ -183,7 +185,7 @@ FROM (
           {% if to_dttm %} AND {{ t_col }}::timestamp < '{{ to_str.replace("T", " ") }}'::timestamp {% endif %}
         GROUP BY escalator_id
     ) esd ON esd.escalator_id = e.id
-    WHERE z.floor_id = {FLOOR_ID}
+    {% if f %} WHERE z.floor_id = {{ f | first }} {% else %} WHERE z.floor_id IS NULL {% endif %}
 
     UNION ALL
 
@@ -203,15 +205,12 @@ FROM (
           {% if to_dttm %} AND {{ t_col }}::timestamp < '{{ to_str.replace("T", " ") }}'::timestamp {% endif %}
         GROUP BY lift_lobby_id
     ) llsd ON llsd.lift_lobby_id = ll.id
-    WHERE ll.floor_id = {FLOOR_ID}
+    {% if f %} WHERE ll.floor_id = {{ f | first }} {% else %} WHERE ll.floor_id IS NULL {% endif %}
 
 ) res WHERE res.name IS NOT NULL AND res.category IS NOT NULL"""
 
-    # Replace floor_id placeholder
-    sql = sql_template.replace('{FLOOR_ID}', str(floor_id))
-    
     return {
-        'table_name': f'Floor Map {floor_name} {floor_id}',
+        'table_name': 'Floor Map Datasets',
         'main_dttm_col': None,
         'description': None,
         'default_endpoint': None,
@@ -219,7 +218,7 @@ FROM (
         'cache_timeout': None,
         'catalog': 'property',
         'schema': 'property',
-        'sql': sql,
+        'sql': sql_template,
         'params': None,
         'template_params': None,
         'filter_select_enabled': True,
@@ -367,8 +366,34 @@ def build_public_floor_image_url(floor_image):
     return f'/api/v1/lauretta/images/{cleaned_ref}'
 
 def create_default_chart_template(floor_name, floor_id, chart_id, dataset_uuid, floor_image=''):
-    """Create a default MAP FLOOR chart template structure when no template exists in ZIP."""
+    """Create a default MAP FLOOR chart template with floor_id default filter."""
     public_floor_image = build_public_floor_image_url(floor_image)
+
+    adhoc_filters = [
+        {
+            'expressionType': 'SIMPLE',
+            'subject': 'datestamp',
+            'operator': 'TEMPORAL_RANGE',
+            'comparator': 'Last day',
+            'clause': 'WHERE',
+            'sqlExpression': None,
+            'isExtra': False,
+            'isNew': False,
+            'datasourceWarning': False,
+        },
+        {
+            'expressionType': 'SIMPLE',
+            'subject': 'floor_id',
+            'operator': '==',
+            'operatorId': 'EQUALS',
+            'comparator': str(floor_id),
+            'clause': 'WHERE',
+            'sqlExpression': None,
+            'isExtra': False,
+            'isNew': False,
+            'datasourceWarning': False,
+        }
+    ]
 
     params = {
         'viz_type': 'ext-floor-map',
@@ -376,20 +401,7 @@ def create_default_chart_template(floor_name, floor_id, chart_id, dataset_uuid, 
         'floor_selection': floor_name,
         'floor_image': public_floor_image,
         'cols': ['name', 'category', 'points', 'total_footfall_zo'],
-        'adhoc_filters': [
-            {
-                'clause': 'WHERE',
-                'comparator': 'Last day',
-                'datasourceWarning': False,
-                'expressionType': 'SIMPLE',
-                'filterOptionName': f'filter_{generate_chart_id(10)}',
-                'isExtra': False,
-                'isNew': False,
-                'operator': 'TEMPORAL_RANGE',
-                'sqlExpression': None,
-                'subject': 'datestamp'
-            }
-        ],
+        'adhoc_filters': adhoc_filters,
         'row_limit': 5000,
         'extra_form_data': {}
     }
@@ -399,7 +411,10 @@ def create_default_chart_template(floor_name, floor_id, chart_id, dataset_uuid, 
         'force': False,
         'queries': [
             {
-                'filters': [{'col': 'event_time', 'op': 'TEMPORAL_RANGE', 'val': 'Last day'}],
+                'filters': [
+                    {'col': 'datestamp', 'op': 'TEMPORAL_RANGE', 'val': 'Last day'},
+                    {'col': 'floor_id', 'op': '==', 'val': str(floor_id)}
+                ],
                 'extras': {'having': '', 'where': ''},
                 'applied_time_extras': {},
                 'columns': [],
@@ -420,7 +435,7 @@ def create_default_chart_template(floor_name, floor_id, chart_id, dataset_uuid, 
             'floor_selection': floor_name,
             'floor_image': public_floor_image,
             'cols': ['name', 'category', 'points', 'total_footfall_zo'],
-            'adhoc_filters': params['adhoc_filters'],
+            'adhoc_filters': adhoc_filters,
             'row_limit': 5000,
             'extra_form_data': {},
             'force': False,
@@ -453,24 +468,12 @@ def find_dashboard_file(extract_dir):
             return os.path.join(dashboards_dir, f)
     return None
 
-def replace_floor_id_in_sql(sql, old_floor_id, new_floor_id):
-    """Replace floor_id references in SQL query."""
-    # Replace patterns like: WHERE z.floor_id = 3, WHERE ll.floor_id = 3, etc.
-    patterns = [
-        (rf'(\.floor_id\s*=\s*){old_floor_id}(\D|$)', rf'\g<1>{new_floor_id}\g<2>'),
-    ]
-    result = sql
-    for pattern, replacement in patterns:
-        result = re.sub(pattern, replacement, result)
-    return result
-
 def generate_floor_datasets(extract_dir, floors, db_uuid):
-    """Generate dataset YAML files for each floor."""
-    # Always generate datasets from built-in template (do not depend on ZIP templates)
+    """Generate a single Floor Maps Dataset (shared by all floor charts)."""
     datasets_dir = os.path.join(extract_dir, 'datasets', 'None')
     os.makedirs(datasets_dir, exist_ok=True)
     
-    # Remove ALL existing MAP_*.yaml files including the template
+    # Remove ALL existing MAP_*.yaml files including old per-floor datasets
     if os.path.exists(datasets_dir):
         for f in os.listdir(datasets_dir):
             if f.startswith('MAP_') and f.endswith('.yaml'):
@@ -478,38 +481,25 @@ def generate_floor_datasets(extract_dir, floors, db_uuid):
                 os.remove(old_file)
                 print(f"🧹 Removed dataset: {f}")
     
-    created_datasets = []
+    # Generate single dataset
+    new_dataset = create_default_dataset_template(db_uuid)
     
-    for floor in floors:
-        floor_id = floor['id']
-        floor_name = floor['name']
+    filename = "MAP_Floor_Maps_Dataset.yaml"
+    filepath = os.path.join(datasets_dir, filename)
+    
+    with open(filepath, 'w') as f:
+        yaml.dump(new_dataset, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+    
+    print(f"📊 Created single dataset: {filename} (UUID: {new_dataset['uuid'][:8]}...)")
+    
+    return {
+        'uuid': new_dataset['uuid'],
+        'table_name': new_dataset['table_name'],
+        'filename': filename
+    }
 
-        # Generate dataset from scratch using built-in template
-        new_dataset = create_default_dataset_template(floor_id, floor_name, db_uuid)
-        
-        # Write dataset file — use floor_id to keep unique even when names duplicate
-        filename = f"MAP_{floor_id}_{floor_name}.yaml"
-        filepath = os.path.join(datasets_dir, filename)
-        
-        with open(filepath, 'w') as f:
-            yaml.dump(new_dataset, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
-        
-        created_datasets.append({
-            'floor_id': floor_id,
-            'floor_name': floor_name,
-            'uuid': new_dataset['uuid'],
-            'table_name': new_dataset['table_name'],
-            'filename': filename
-        })
-        
-        print(f"📊 Created dataset: {filename} (UUID: {new_dataset['uuid'][:8]}...)")
-    
-    return created_datasets
-
-def generate_floor_charts(extract_dir, floors, created_datasets, starting_chart_id=100):
-    """Generate chart YAML files for each floor."""
-    # Always generate charts from built-in template (do not depend on ZIP templates)
-    
+def generate_floor_charts(extract_dir, floors, dataset_info, starting_chart_id=100):
+    """Generate chart YAML files for each floor, all sharing a single dataset."""
     charts_dir = os.path.join(extract_dir, 'charts')
     os.makedirs(charts_dir, exist_ok=True)
     
@@ -521,6 +511,7 @@ def generate_floor_charts(extract_dir, floors, created_datasets, starting_chart_
                 os.remove(old_file)
                 print(f"🧹 Removed chart: {f}")
     
+    dataset_uuid = dataset_info['uuid']
     created_charts = []
     chart_id = starting_chart_id
     
@@ -528,18 +519,12 @@ def generate_floor_charts(extract_dir, floors, created_datasets, starting_chart_
         floor_name = floor['name']
         floor_id = floor['id']
         
-        # Find matching dataset by floor_id (unique even when names duplicate)
-        dataset = next((d for d in created_datasets if d['floor_id'] == floor_id), None)
-        if not dataset:
-            print(f"⚠️ No dataset found for floor {floor_name} (id={floor_id})")
-            continue
-        
-        # Generate chart from scratch using built-in template function
+        # Generate chart — all charts share the single dataset UUID
         new_chart = create_default_chart_template(
             floor_name,
             floor_id,
             chart_id,
-            dataset['uuid'],
+            dataset_uuid,
             floor.get('image', ''),
         )
         
@@ -853,20 +838,20 @@ def update_dataset_database_uuid(extract_dir, target_db_uuid):
 
 def process_floor_maps(zip_path, floors, db_uuid, conn_config=None, db_display_name=None, starting_chart_id=100, timezone=None):
     """Process floor maps: generate datasets, charts, and update dashboard.
-    Returns tuple: (new_zip_path, created_datasets, created_charts)"""
+    Returns tuple: (new_zip_path, dataset_info, created_charts)"""
     if not floors:
         print("ℹ️ No floors configured, skipping floor map generation")
-        return None, [], []
+        return None, None, []
     # Find extraction directory
     extract_dir = find_extract_dir(zip_path)
     if not extract_dir:
         print("❌ Could not find or create extraction directory")
-        return None, [], []
+        return None, None, []
     print(f"📂 Processing floor maps in: {extract_dir}")
-    # Generate datasets
-    created_datasets = generate_floor_datasets(extract_dir, floors, db_uuid)
-    # Generate charts
-    created_charts = generate_floor_charts(extract_dir, floors, created_datasets, starting_chart_id=starting_chart_id)
+    # Generate single shared dataset
+    dataset_info = generate_floor_datasets(extract_dir, floors, db_uuid)
+    # Generate charts (all sharing the single dataset)
+    created_charts = generate_floor_charts(extract_dir, floors, dataset_info, starting_chart_id=starting_chart_id)
     # Update dashboard
     update_dashboard_with_charts(extract_dir, created_charts)
     # Inject real database credentials into the ZIP before import
@@ -875,7 +860,7 @@ def process_floor_maps(zip_path, floors, db_uuid, conn_config=None, db_display_n
     update_dataset_database_uuid(extract_dir, db_uuid)
     # Re-zip the modified dashboard export
     new_zip_path = rezip_dashboard_export(extract_dir, zip_path)
-    return new_zip_path, created_datasets, created_charts
+    return new_zip_path, dataset_info, created_charts
 
 def rezip_dashboard_export(extract_dir, zip_path):
     """Re-create the zip file with the modified contents, never overwrite the original."""
@@ -998,13 +983,13 @@ def update_via_superset_shell():
 
         # First run (or after docker compose down -v): full setup
         new_zip_path = zip_path
-        created_datasets = []
+        dataset_info = None
         created_charts = []
 
         if floors:
             print(f"🗺️ Processing {len(floors)} floor maps...")
             starting_chart_id = 100 + dash_index * 1000
-            new_zip_path, created_datasets, created_charts = process_floor_maps(
+            new_zip_path, dataset_info, created_charts = process_floor_maps(
                 zip_path, floors, target_db_uuid,
                 conn_config=conn_config, db_display_name=new_name,
                 starting_chart_id=starting_chart_id, timezone=timezone
