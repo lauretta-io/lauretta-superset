@@ -93,7 +93,6 @@ lauretta-superset/
 
 ```json
 {
-  "timezone": "UTC",
   "dashboards": [
     {
       "path": "/lauretta/dashboards/property_demo.zip",
@@ -103,7 +102,8 @@ lauretta-superset/
         "port": 5432,
         "username": "your_username",
         "password": "your_password",
-        "db": "your_database_name"
+        "db": "your_database_name",
+        "timezone": "UTC"
       },
       "floors": [
         {
@@ -124,7 +124,6 @@ lauretta-superset/
 
 **Structure**:
 
-- `timezone` (optional) - IANA timezone identifier applied to all database connections (e.g., `"Asia/Singapore"`, `"UTC"`, `"America/New_York"`). Sets PostgreSQL session timezone via `engine_params.connect_args.options = -c timezone=<tz>`. Defaults to `"UTC"` if omitted.
 - `dashboards` - Array of dashboard configurations
   - `path` (required) - Path to the dashboard ZIP file (usually starts with `/lauretta/`)
   - `connections` (required) - Database connection object for this dashboard
@@ -134,6 +133,7 @@ lauretta-superset/
     - `username` (required) - Database username
     - `password` (required) - Database password to inject
     - `db` (required) - Database name
+    - `timezone` (optional) - IANA timezone identifier for this dashboard connection only (e.g., `"Asia/Singapore"`, `"UTC"`, `"America/New_York"`). Sets PostgreSQL session timezone via `engine_params.connect_args.options = -c timezone=<tz>`.
   - `floors` (optional) - Array of floor plan entries for Floor Map charts
     - `id` (required) - **The floor's ID as stored in the database** — this is NOT the display order; it must match the actual floor ID value in your data source
     - `name` (required) - Display name of the floor (e.g., `"Ground"`, `"Level 1"`)
@@ -308,7 +308,6 @@ This ensures:
 
    ```json
    {
-     "timezone":"UTC",
      "dashboards": [
        {
          "path": "/lauretta/dashboards/my_dashboard.zip",
@@ -318,7 +317,8 @@ This ensures:
            "port": 5432,
            "username": "username",
            "password": "db_password",
-           "db": "database_name"
+           "db": "database_name",
+           "timezone": "UTC"
          },
          "floors": [
            { "id": 1, "name": "Ground", "image": "floor_ground.jpeg" },

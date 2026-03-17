@@ -1,5 +1,4 @@
 {
-  "timezone": "UTC",
   "dashboards": [
     {
       "path": "/lauretta/dashboards/property_demo.zip",
@@ -9,7 +8,8 @@
         "port": 5432,
         "password": "your_password",
         "username": "your_username",
-        "db": "your_database_name"
+        "db": "your_database_name",
+        "timezone": "UTC"
       },
       "floors": [
         {

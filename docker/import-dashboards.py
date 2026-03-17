@@ -900,9 +900,6 @@ def update_via_superset_shell():
     if not os.path.exists(CONFIG_PATH): return
     with open(CONFIG_PATH, "r") as f:
         config = json.load(f)
-    timezone = config.get("timezone")
-    if timezone:
-        print(f"🕐 Timezone from config.json: {timezone}")
     for dash_index, dash in enumerate(config.get("dashboards", [])):
         zip_path = dash.get("path")
         if zip_path.startswith('/lauretta/'): zip_path = '/app' + zip_path
@@ -913,6 +910,9 @@ def update_via_superset_shell():
         if not isinstance(conn_config, dict):
             print(f"⚠️ Missing or invalid connections config for dashboard: {dash.get('path')}")
             continue
+        timezone = conn_config.get("timezone")
+        if timezone:
+            print(f"🕐 Timezone from connections.timezone: {timezone}")
         new_name = conn_config.get("database_display_name", conn_config.get("database_name", "Database"))
         new_uri = f"postgresql+psycopg2://{conn_config['username']}:{conn_config['password']}@{conn_config['host']}:{conn_config['port']}/{conn_config['db']}"
         target_db_uuid = generate_database_uuid(dash.get("path"), conn_config)
