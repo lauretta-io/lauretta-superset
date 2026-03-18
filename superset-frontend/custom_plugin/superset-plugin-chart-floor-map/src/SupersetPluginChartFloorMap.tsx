@@ -791,25 +791,27 @@ export default function SupersetPluginChartFloorMap(
   // Calculate tooltip position for selected item
   const [selectedTooltipPos, setSelectedTooltipPos] = useState({ x: 0, y: 0 });
 
-  // Update selected tooltip position when item is selected
+  // Update selected tooltip position based on the actual polygon element's screen position
   useEffect(() => {
-    if (selectedItemName && rootElem.current) {
-      // Small delay to allow zoom animation to complete
+    if (selectedItemName) {
       const updatePosition = () => {
+        const itemElementId = `store-polyline-${selectedItemName.replace(/\s+/g, '-')}`;
+        const element = document.getElementById(itemElementId);
         const parentRect =
           mapPanelRef.current?.getBoundingClientRect() ||
           rootElem.current?.getBoundingClientRect();
-        if (parentRect) {
+
+        if (element && parentRect) {
+          const rect = element.getBoundingClientRect();
           setSelectedTooltipPos({
-            x: parentRect.width / 2,
-            y: parentRect.height / 2,
+            x: rect.left - parentRect.left + rect.width / 2,
+            y: rect.top - parentRect.top,
           });
         }
       };
 
-      // Run immediately and after a delay to catch zoom animation
-      updatePosition();
-      const timer = setTimeout(updatePosition, 500);
+      // Wait for the zoom animation to finish before measuring position
+      const timer = setTimeout(updatePosition, 600);
       return () => clearTimeout(timer);
     }
     return undefined;
