@@ -210,7 +210,7 @@ FROM (
 ) res WHERE res.name IS NOT NULL AND res.category IS NOT NULL"""
 
     return {
-        'table_name': 'Floor Map Datasets',
+        'table_name': 'Floor Map Summary',
         'main_dttm_col': None,
         'description': None,
         'default_endpoint': None,
