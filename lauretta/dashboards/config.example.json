@@ -1,4 +1,3 @@
-// Support 1 Dashboard with 1 Connection. Will extend to support multiple connections and dashboards in the future.
 {
   "dashboards": [
     {
@@ -9,8 +8,16 @@
         "port": 5432,
         "password": "your_password",
         "username": "your_username",
-        "db": "your_database_name"
-      }
+        "db": "your_database_name",
+        "timezone": "UTC"
+      },
+      "floors": [
+        {
+          "id": 1,
+          "name": "FLOOR NAME",
+          "image": "example.jpeg"
+        }
+      ]
     }
   ]
 }

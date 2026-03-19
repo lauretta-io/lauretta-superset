@@ -334,6 +334,42 @@ const config: ControlPanelConfig = {
             },
           },
         ],
+        [
+          {
+            name: 'data_zoom_start',
+            config: {
+              type: 'SliderControl',
+              label: t('Data Zoom Start (%)'),
+              renderTrigger: true,
+              min: 0,
+              max: 100,
+              step: 1,
+              default: 0,
+              description: t(
+                'Initial start position of the data zoom slider (0–100%)',
+              ),
+              visibility: ({ controls }: ControlPanelsContainerProps) =>
+                Boolean(controls?.zoomable?.value),
+            },
+          },
+          {
+            name: 'data_zoom_end',
+            config: {
+              type: 'SliderControl',
+              label: t('Data Zoom End (%)'),
+              renderTrigger: true,
+              min: 0,
+              max: 100,
+              step: 1,
+              default: 100,
+              description: t(
+                'Initial end position of the data zoom slider (0–100%)',
+              ),
+              visibility: ({ controls }: ControlPanelsContainerProps) =>
+                Boolean(controls?.zoomable?.value),
+            },
+          },
+        ],
         ...legendSection,
         [<ControlSubSectionHeader>{t('X Axis')}</ControlSubSectionHeader>],
         ...createAxisControl('x'),

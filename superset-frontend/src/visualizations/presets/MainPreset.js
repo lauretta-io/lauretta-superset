@@ -78,6 +78,8 @@ import {
 } from 'src/filters/components';
 import { PivotTableChartPlugin as PivotTableChartPluginV2 } from '@superset-ui/plugin-chart-pivot-table';
 import { HandlebarsChartPlugin } from '@superset-ui/plugin-chart-handlebars';
+import { SupersetPluginChartFloorMap } from 'superset-plugin-chart-floor-map';
+
 import { FilterPlugins } from 'src/constants';
 import TimeTableChartPlugin from '../TimeTable';
 
@@ -184,6 +186,9 @@ export default class MainPreset extends Preset {
             },
           ],
         }).configure({ key: VizType.Cartodiagram }),
+        new SupersetPluginChartFloorMap().configure({
+          key: 'ext-floor-map',
+        }),
         ...experimentalPlugins,
       ],
     });

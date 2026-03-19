@@ -20,11 +20,16 @@
 # development environments. Also note that superset_config_docker.py is imported
 # as a final step as a means to override "defaults" configured here
 #
+import json
 import logging
 import os
 import sys
+import uuid
+import re
+from pathlib import Path
 
 from celery.schedules import crontab
+from flask import abort, send_file, jsonify, request
 from flask_caching.backends.filesystemcache import FileSystemCache
 
 logger = logging.getLogger()
@@ -93,20 +98,360 @@ class CeleryConfig:
             "task": "reports.prune_log",
             "schedule": crontab(minute=10, hour=0),
         },
+        "lauretta.cleanup_temp_images": {
+            "task": "lauretta.cleanup_temp_images",
+            "schedule": crontab(hour="0", minute="0")
+        }
     }
 
 
 CELERY_CONFIG = CeleryConfig
 
-FEATURE_FLAGS = {"ALERT_REPORTS": True,  "ALLOW_ADHOC_SUBQUERY": True,"ENABLE_TEMPLATE_PROCESSING": True}
-ALERT_REPORTS_NOTIFICATION_DRY_RUN = True
-WEBDRIVER_BASEURL = "http://superset:8088/"  # When using docker compose baseurl should be http://superset_app:8088/  # noqa: E501
-# The base URL for the email report hyperlinks.
-WEBDRIVER_BASEURL_USER_FRIENDLY = WEBDRIVER_BASEURL
+FEATURE_FLAGS = {
+    "ALERT_REPORTS": True,
+    "ALERT_REPORT_TABS": True,
+    "ALLOW_ADHOC_SUBQUERY": True,
+    "ENABLE_TEMPLATE_PROCESSING": True,
+}
+ALERT_REPORTS_NOTIFICATION_DRY_RUN = False
+SCREENSHOT_LOCATE_WAIT = 100
+SCREENSHOT_LOAD_WAIT = 600
+
+# Slack configuration
+SLACK_API_TOKEN = ""
+
+# Email configuration
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_STARTTLS = _env_bool("SMTP_STARTTLS", True)
+SMTP_SSL_SERVER_AUTH = _env_bool("SMTP_SSL_SERVER_AUTH", True)
+SMTP_SSL = _env_bool("SMTP_SSL", False)
+SMTP_USER = os.getenv("SMTP_USER", "")
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
+SMTP_MAIL_FROM = os.getenv("SMTP_MAIL_FROM", SMTP_USER)
+EMAIL_REPORTS_SUBJECT_PREFIX = os.getenv(
+    "EMAIL_REPORTS_SUBJECT_PREFIX", "[Superset] "
+)
+
+# WebDriver configuration
+# If you use Firefox, you can stick with default values
+# If you use Chrome, then add the following WEBDRIVER_TYPE and WEBDRIVER_OPTION_ARGS
+WEBDRIVER_TYPE = "chrome"
+WEBDRIVER_OPTION_ARGS = [
+    "--force-device-scale-factor=2.0",
+    "--high-dpi-support=2.0",
+    "--headless",
+    "--disable-gpu",
+    "--disable-dev-shm-usage",
+    "--no-sandbox",
+    "--disable-setuid-sandbox",
+    "--disable-extensions",
+]
+
+# This is for internal use, you can keep http
+WEBDRIVER_BASEURL = "http://superset:8088" # When running using docker compose use "http://superset_app:8088'
+# This is the link sent to the recipient. Change to your domain, e.g. https://superset.mydomain.com
+WEBDRIVER_BASEURL_USER_FRIENDLY = "http://localhost:8088"
 SQLLAB_CTAS_NO_LIMIT = True
 
 log_level_text = os.getenv("SUPERSET_LOG_LEVEL", "INFO")
 LOG_LEVEL = getattr(logging, log_level_text.upper(), logging.INFO)
+
+LAURETTA_IMAGES_DIR = Path("/app/lauretta/images")
+LAURETTA_CUSTOM_IMAGES_DIR = Path("/app/lauretta/images/customs")
+LAURETTA_TEMP_IMAGES_DIR = Path("/app/lauretta/images/tmp")
+ALLOWED_FLOOR_IMAGE_EXTENSIONS = {".jpeg", ".jpg", ".png", ".gif", ".webp"}
+
+
+def _resolve_floor_image(floor_ref: str) -> Path | None:
+    if not floor_ref:
+        return None
+
+    cleaned_ref = floor_ref.strip().lstrip("/")
+    if cleaned_ref.startswith("locked:"):
+        cleaned_ref = cleaned_ref[len("locked:") :].strip().lstrip("/")
+    if cleaned_ref.startswith("api/v1/lauretta/images/"):
+        cleaned_ref = cleaned_ref.split("api/v1/lauretta/images/", 1)[1]
+    cleaned_ref = cleaned_ref.split("?", 1)[0].split("#", 1)[0]
+
+    if cleaned_ref.startswith("customs/"):
+        custom_ref = cleaned_ref.split("/", 1)[1] if "/" in cleaned_ref else ""
+        custom_name = Path(custom_ref).name
+        if custom_name and LAURETTA_CUSTOM_IMAGES_DIR.exists():
+            candidate_custom = (LAURETTA_CUSTOM_IMAGES_DIR / custom_name).resolve()
+            if (
+                candidate_custom.is_file()
+                and candidate_custom.parent == LAURETTA_CUSTOM_IMAGES_DIR.resolve()
+                and candidate_custom.suffix.lower() in ALLOWED_FLOOR_IMAGE_EXTENSIONS
+            ):
+                return candidate_custom
+
+    if cleaned_ref.startswith("tmp/"):
+        temp_ref = cleaned_ref.split("/", 1)[1] if "/" in cleaned_ref else ""
+        temp_name = Path(temp_ref).name
+        if temp_name and LAURETTA_TEMP_IMAGES_DIR.exists():
+            candidate_temp = (LAURETTA_TEMP_IMAGES_DIR / temp_name).resolve()
+            if (
+                candidate_temp.is_file()
+                and candidate_temp.parent == LAURETTA_TEMP_IMAGES_DIR.resolve()
+                and candidate_temp.suffix.lower() in ALLOWED_FLOOR_IMAGE_EXTENSIONS
+            ):
+                return candidate_temp
+
+    if not LAURETTA_IMAGES_DIR.exists():
+        return None
+
+    candidate_by_name = (LAURETTA_IMAGES_DIR / cleaned_ref).resolve()
+    if (
+        candidate_by_name.is_file()
+        and candidate_by_name.parent == LAURETTA_IMAGES_DIR.resolve()
+        and candidate_by_name.suffix.lower() in ALLOWED_FLOOR_IMAGE_EXTENSIONS
+    ):
+        return candidate_by_name
+
+    target_code = cleaned_ref.lower()
+    if target_code == "default":
+        target_code = ""
+
+    matched: list[Path] = []
+    for image_path in sorted(LAURETTA_IMAGES_DIR.iterdir()):
+        if not image_path.is_file():
+            continue
+        if image_path.suffix.lower() not in ALLOWED_FLOOR_IMAGE_EXTENSIONS:
+            continue
+        if not target_code:
+            matched.append(image_path)
+            continue
+        stem_parts = image_path.stem.split("_")
+        floor_code = stem_parts[-1] if len(stem_parts) > 1 else image_path.stem
+        if floor_code.lower() == target_code:
+            matched.append(image_path)
+
+    return matched[0] if matched else None
+
+
+def _cleanup_temp_images():
+    """Remove all files from temp folder."""
+
+    if not LAURETTA_TEMP_IMAGES_DIR.exists():
+        return 0
+
+    deleted_count = 0
+
+    for image_path in LAURETTA_TEMP_IMAGES_DIR.iterdir():
+        if not image_path.is_file():
+            continue
+        try:
+            image_path.unlink()
+            deleted_count += 1
+        except OSError:
+            pass
+
+    return deleted_count
+
+
+def FLASK_APP_MUTATOR(app):
+   # ── Register celery task for cleaning temp images ──
+   from superset.extensions import celery_app
+
+   @celery_app.task(name="lauretta.cleanup_temp_images")
+   def celery_cleanup_temp_images():
+       """Celery task to clean up all files from temp floor-map folder."""
+       deleted = _cleanup_temp_images()
+       return f"Deleted {deleted} temp floor-map images"
+
+   # ── Auto-delete uploaded floor-map images when a chart is deleted ──
+   def _on_slice_delete(mapper, connection, target):
+       """Called by SQLAlchemy just before a Slice row is deleted."""
+       try:
+           if target.viz_type != "ext-floor-map":
+               return
+           params = json.loads(target.params or "{}")
+           floor_image: str = params.get("floor_image", "") or ""
+           prefix = "/api/v1/lauretta/images/customs/"
+           normalized = floor_image.strip()
+           if not normalized.startswith(prefix):
+               return
+           file_name = normalized[len(prefix):].split("?")[0].split("#")[0]
+           if "/" in file_name or "\\" in file_name or not file_name:
+               return
+           candidate = (LAURETTA_CUSTOM_IMAGES_DIR / file_name).resolve()
+           if candidate.parent != LAURETTA_CUSTOM_IMAGES_DIR.resolve():
+               return
+           if candidate.is_file():
+               candidate.unlink()
+               app.logger.info("Auto-deleted floor-map image: %s", candidate)
+       except Exception as exc:  # noqa: BLE001
+           app.logger.warning("Could not auto-delete floor-map image: %s", exc)
+
+   # ── Handle floor-map image move on chart create ──
+   def _on_slice_create(mapper, connection, target):
+       """Called by SQLAlchemy just before a Slice row is inserted.
+       - Moves temp images to customs folder
+       """
+       import shutil
+
+       try:
+           if target.viz_type != "ext-floor-map":
+               return
+
+           params = json.loads(target.params or "{}")
+           floor_image: str = (params.get("floor_image", "") or "").strip()
+
+           temp_prefix = "/api/v1/lauretta/images/tmp/"
+           customs_prefix = "/api/v1/lauretta/images/customs/"
+
+           # If image is from temp/, move to customs/
+           if floor_image.startswith(temp_prefix):
+               temp_file_name = floor_image[len(temp_prefix):].split("?")[0].split("#")[0]
+               if temp_file_name and "/" not in temp_file_name and "\\" not in temp_file_name:
+                   temp_path = (LAURETTA_TEMP_IMAGES_DIR / temp_file_name).resolve()
+                   if (
+                       temp_path.is_file()
+                       and temp_path.parent == LAURETTA_TEMP_IMAGES_DIR.resolve()
+                   ):
+                       LAURETTA_CUSTOM_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+                       customs_path = (LAURETTA_CUSTOM_IMAGES_DIR / temp_file_name).resolve()
+                       if customs_path.parent == LAURETTA_CUSTOM_IMAGES_DIR.resolve():
+                           shutil.move(str(temp_path), str(customs_path))
+                           # Update params with new customs path
+                           params["floor_image"] = f"{customs_prefix}{temp_file_name}"
+                           target.params = json.dumps(params)
+                           app.logger.info("Moved floor-map image from temp to customs: %s", temp_file_name)
+
+       except Exception as exc:  # noqa: BLE001
+           app.logger.warning("Could not handle floor-map image creation: %s", exc)
+
+   # ── Handle floor-map image move on chart update ──
+   def _on_slice_update(mapper, connection, target):
+       """Called by SQLAlchemy just before a Slice row is updated.
+       - Moves temp images to customs folder
+       - Deletes old custom images when replaced
+       """
+       import shutil
+       import sqlalchemy as sqla
+
+       try:
+           if target.viz_type != "ext-floor-map":
+               return
+
+           new_params = json.loads(target.params or "{}")
+           new_floor_image: str = (new_params.get("floor_image", "") or "").strip()
+
+           # Get old floor_image from history
+           old_floor_image = ""
+           history = sqla.orm.attributes.get_history(target, "params")
+           if history.deleted:
+               old_params_str = history.deleted[0]
+               if old_params_str:
+                   old_params = json.loads(old_params_str)
+                   old_floor_image = (old_params.get("floor_image", "") or "").strip()
+
+           temp_prefix = "/api/v1/lauretta/images/tmp/"
+           customs_prefix = "/api/v1/lauretta/images/customs/"
+
+           # If new image is from temp/, move to customs/
+           if new_floor_image.startswith(temp_prefix):
+               temp_file_name = new_floor_image[len(temp_prefix):].split("?")[0].split("#")[0]
+               if temp_file_name and "/" not in temp_file_name and "\\" not in temp_file_name:
+                   temp_path = (LAURETTA_TEMP_IMAGES_DIR / temp_file_name).resolve()
+                   if (
+                       temp_path.is_file()
+                       and temp_path.parent == LAURETTA_TEMP_IMAGES_DIR.resolve()
+                   ):
+                       LAURETTA_CUSTOM_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+                       customs_path = (LAURETTA_CUSTOM_IMAGES_DIR / temp_file_name).resolve()
+                       if customs_path.parent == LAURETTA_CUSTOM_IMAGES_DIR.resolve():
+                           shutil.move(str(temp_path), str(customs_path))
+                           # Update params with new customs path
+                           new_params["floor_image"] = f"{customs_prefix}{temp_file_name}"
+                           target.params = json.dumps(new_params)
+                           new_floor_image = new_params["floor_image"]
+                           app.logger.info("Moved floor-map image from temp to customs: %s", temp_file_name)
+
+           # Delete old custom image if it was replaced
+           if old_floor_image.startswith(customs_prefix) and old_floor_image != new_floor_image:
+               old_file_name = old_floor_image[len(customs_prefix):].split("?")[0].split("#")[0]
+               if old_file_name and "/" not in old_file_name and "\\" not in old_file_name:
+                   old_path = (LAURETTA_CUSTOM_IMAGES_DIR / old_file_name).resolve()
+                   if (
+                       old_path.is_file()
+                       and old_path.parent == LAURETTA_CUSTOM_IMAGES_DIR.resolve()
+                   ):
+                       old_path.unlink()
+                       app.logger.info("Auto-deleted old floor-map image: %s", old_path)
+
+       except Exception as exc:  # noqa: BLE001
+           app.logger.warning("Could not handle floor-map image update: %s", exc)
+
+   with app.app_context():
+       import sqlalchemy as sqla
+       from superset.models.slice import Slice
+       sqla.event.listen(Slice, "before_insert", _on_slice_create)
+       sqla.event.listen(Slice, "before_delete", _on_slice_delete)
+       sqla.event.listen(Slice, "before_update", _on_slice_update)
+
+   @app.get("/api/v1/lauretta/floors")
+   def lauretta_floors_list():
+       """Return the list of floors from config.json."""
+       config_path = Path("/app/lauretta/dashboards/config.json")
+       if not config_path.exists():
+           return jsonify([])
+       import json as _json
+       with open(config_path) as f:
+           config = _json.load(f)
+       all_floors = []
+       seen = set()
+       for dash in config.get("dashboards", []):
+           for floor in dash.get("floors", []):
+               name = floor.get("name", "")
+               image = floor.get("image", "")
+               if name and name not in seen:
+                   seen.add(name)
+                   all_floors.append({"name": name, "image": image})
+       return jsonify(all_floors)
+
+   @app.get("/api/v1/lauretta/images/<path:floor_ref>")
+   def lauretta_floor_image(floor_ref: str):
+       image_path = _resolve_floor_image(floor_ref)
+       if not image_path:
+           return abort(404, description=f"Floor image not found for '{floor_ref}'")
+       return send_file(image_path) 
+
+   @app.post("/api/v1/lauretta/images/upload")
+   def lauretta_floor_image_upload():
+       image_file = request.files.get("file")
+       if not image_file or not image_file.filename:
+           return abort(400, description="Missing image file")
+
+       original_name = Path(image_file.filename).name
+       suffix = Path(original_name).suffix.lower()
+       if suffix not in ALLOWED_FLOOR_IMAGE_EXTENSIONS:
+           return abort(400, description="Unsupported image extension")
+
+       safe_stem = re.sub(r"[^A-Za-z0-9._-]+", "_", Path(original_name).stem).strip("._")
+       if not safe_stem:
+           safe_stem = "map_image"
+
+       LAURETTA_TEMP_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+       file_name = f"{safe_stem}_{uuid.uuid4().hex[:10]}{suffix}"
+       save_path = (LAURETTA_TEMP_IMAGES_DIR / file_name).resolve()
+       if save_path.parent != LAURETTA_TEMP_IMAGES_DIR.resolve():
+           return abort(400, description="Invalid image path")
+
+       image_file.save(save_path)
+
+       return jsonify({
+           "file_name": file_name,
+           "public_url": f"/api/v1/lauretta/images/tmp/{file_name}",
+       })
 
 if os.getenv("CYPRESS_CONFIG") == "true":
     # When running the service as a cypress backend, we need to import the config
