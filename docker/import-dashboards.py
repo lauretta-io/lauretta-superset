@@ -94,12 +94,12 @@ def create_default_dataset_template(db_uuid):
 
 {% set start_date = from_dttm if from_dttm else "CURRENT_DATE - INTERVAL '1 day'" %}
 {% set end_date = to_dttm if to_dttm else "CURRENT_DATE" %}
-{% set f = filter_values('floor_id') %}
 
 SELECT 
     res.floor_id,
     res.zone_name,
     res.name,
+    res.layer,
     res.category,
     res.points,
     res.total_footfall_zo,
@@ -107,7 +107,10 @@ SELECT
 FROM (
     -- Units
     SELECT
-        z.floor_id, z.name as zone_name, u.name AS name, ug.name AS category, z.points,
+        z.floor_id, z.name as zone_name, u.name AS name, 
+        'Retail' AS layer, 
+        COALESCE(ug.name, 'Uncategorized') AS category,
+        z.points,
         COALESCE(usd.total_footfall_zo, 0) AS total_footfall_zo,
         usd.event_time
     FROM property.zones z
@@ -123,7 +126,7 @@ FROM (
           {% if to_dttm %} AND {{ t_col }}::timestamp < '{{ to_str.replace("T", " ") }}'::timestamp {% endif %}
         GROUP BY unit_id
     ) usd ON usd.unit_id = u.id
-    {% if f %} WHERE z.floor_id = {{ f | first }} {% else %} WHERE z.floor_id IS NULL {% endif %}
+    WHERE 1=1
     {% if filter_values('unit_name') %} AND u.name IN {{ filter_values('unit_name') | where_in }} {% endif %}
     {% if filter_values('unit_group_name') %} AND ug.name IN {{ filter_values('unit_group_name') | where_in }} {% endif %}
 
@@ -131,7 +134,10 @@ FROM (
 
     -- Public Spaces
     SELECT
-        z.floor_id, z.name as zone_name, ps.name as name, 'Public' AS category, z.points,
+        z.floor_id, z.name as zone_name, ps.name as name, 
+        'Public' AS layer, 
+        'Public' AS category, 
+        z.points,
         COALESCE(pssd.total_footfall_zo, 0) AS total_footfall_zo,
         pssd.event_time
     FROM property.public_spaces ps 
@@ -145,13 +151,15 @@ FROM (
           {% if to_dttm %} AND {{ t_col }}::timestamp < '{{ to_str.replace("T", " ") }}'::timestamp {% endif %}
         GROUP BY public_space_id
     ) pssd ON pssd.public_space_id = ps.id
-    {% if f %} WHERE ps.floor_id = {{ f | first }} {% else %} WHERE ps.floor_id IS NULL {% endif %}
 
     UNION ALL
 
     -- Entrances
     SELECT
-        z.floor_id, z.name as zone_name, e.name as name, 'Entrances' AS category, z.points,
+        z.floor_id, z.name as zone_name, e.name as name, 
+        'Entrances' AS layer, 
+        'Entrances' AS category, 
+        z.points,
         COALESCE(esd.total_footfall_zo, 0) AS total_footfall_zo,
         esd.event_time
     FROM property.entrances e
@@ -165,13 +173,15 @@ FROM (
           {% if to_dttm %} AND {{ t_col }}::timestamp < '{{ to_str.replace("T", " ") }}'::timestamp {% endif %}
         GROUP BY entrance_id
     ) esd ON esd.entrance_id = e.id
-    {% if f %} WHERE e.floor_id = {{ f | first }} {% else %} WHERE e.floor_id IS NULL {% endif %}
 
     UNION ALL
 
     -- Escalators
     SELECT
-        z.floor_id, z.name as zone_name, e.name as name, 'Circulation' AS category, z.points,
+        z.floor_id, z.name as zone_name, e.name as name, 
+        'Circulation' AS layer, 
+        'Circulation' AS category, 
+        z.points,
         COALESCE(esd.total_footfall_zo, 0) AS total_footfall_zo,
         esd.event_time
     FROM property.escalators e
@@ -185,13 +195,15 @@ FROM (
           {% if to_dttm %} AND {{ t_col }}::timestamp < '{{ to_str.replace("T", " ") }}'::timestamp {% endif %}
         GROUP BY escalator_id
     ) esd ON esd.escalator_id = e.id
-    {% if f %} WHERE z.floor_id = {{ f | first }} {% else %} WHERE z.floor_id IS NULL {% endif %}
 
     UNION ALL
 
     -- Lift Lobbies
     SELECT
-        z.floor_id, z.name as zone_name, ll.name as name, 'Circulation' AS category, z.points,
+        z.floor_id, z.name as zone_name, ll.name as name, 
+        'Circulation' AS layer, 
+        'Circulation' AS category, 
+        z.points,
         COALESCE(llsd.total_footfall_zo, 0) AS total_footfall_zo,
         llsd.event_time
     FROM property.lift_lobbies ll
@@ -205,9 +217,10 @@ FROM (
           {% if to_dttm %} AND {{ t_col }}::timestamp < '{{ to_str.replace("T", " ") }}'::timestamp {% endif %}
         GROUP BY lift_lobby_id
     ) llsd ON llsd.lift_lobby_id = ll.id
-    {% if f %} WHERE ll.floor_id = {{ f | first }} {% else %} WHERE ll.floor_id IS NULL {% endif %}
 
-) res WHERE res.name IS NOT NULL AND res.category IS NOT NULL"""
+) res 
+WHERE res.name IS NOT NULL
+"""
 
     return {
         'table_name': 'Floor Map Summary',
@@ -312,6 +325,20 @@ FROM (
                 'extra': {}
             },
             {
+                'column_name': 'layer',
+                'verbose_name': None,
+                'is_dttm': False,
+                'is_active': True,
+                'type': 'STRING',
+                'advanced_data_type': None,
+                'groupby': True,
+                'filterable': True,
+                'expression': None,
+                'description': None,
+                'python_date_format': None,
+                'extra': {}
+            },
+            {
                 'column_name': 'name',
                 'verbose_name': None,
                 'is_dttm': False,
@@ -400,7 +427,7 @@ def create_default_chart_template(floor_name, floor_id, chart_id, dataset_uuid, 
         'slice_id': chart_id,
         'floor_selection': floor_name,
         'floor_image': public_floor_image,
-        'cols': ['name', 'category', 'points', 'total_footfall_zo'],
+        'cols': ['name', 'category', 'points', 'total_footfall_zo', 'layer'],
         'adhoc_filters': adhoc_filters,
         'row_limit': 5000,
         'extra_form_data': {}
@@ -426,7 +453,7 @@ def create_default_chart_template(floor_name, floor_id, chart_id, dataset_uuid, 
                 'url_params': {},
                 'custom_params': {},
                 'custom_form_data': {},
-                'groupby': ['name', 'category', 'points', 'total_footfall_zo']
+                'groupby': ['name', 'category', 'points', 'total_footfall_zo', 'layer']
             }
         ],
         'form_data': {
@@ -434,7 +461,7 @@ def create_default_chart_template(floor_name, floor_id, chart_id, dataset_uuid, 
             'slice_id': chart_id,
             'floor_selection': floor_name,
             'floor_image': public_floor_image,
-            'cols': ['name', 'category', 'points', 'total_footfall_zo'],
+            'cols': ['name', 'category', 'points', 'total_footfall_zo', 'layer'],
             'adhoc_filters': adhoc_filters,
             'row_limit': 5000,
             'extra_form_data': {},
