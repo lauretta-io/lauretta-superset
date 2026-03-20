@@ -29,6 +29,8 @@ export interface SupersetPluginChartFloorMapStylesProps {
   boldText: boolean;
 }
 
+export type ViewMode = 'polygon' | 'heatmap';
+
 interface SupersetPluginChartFloorMapCustomizeProps {
   headerText: string;
   floorSelection: string;

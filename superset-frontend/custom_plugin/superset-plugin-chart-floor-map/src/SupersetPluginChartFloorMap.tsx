@@ -27,6 +27,7 @@ import { styled, SupersetClient } from '@superset-ui/core';
 import {
   SupersetPluginChartFloorMapProps,
   SupersetPluginChartFloorMapStylesProps,
+  ViewMode,
 } from './types';
 import {
   StorePolyline,
@@ -34,6 +35,12 @@ import {
   getColorBins,
 } from './StorePolyline';
 import { ZoomPanWrapper, ZoomPanWrapperRef } from './ZoomPanWrapper';
+import {
+  HeatmapLayer,
+  HeatmapLegend,
+  computeCentroid,
+  computePolygonArea,
+} from './HeatmapLayer';
 
 const LAURETTA_IMAGE_API_PREFIX = '/api/v1/lauretta/images/';
 
@@ -424,6 +431,45 @@ const StoreListWidget = styled.div`
   }
 `;
 
+const ViewToggle = styled.div`
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 600;
+  display: flex;
+  background: rgba(255, 255, 255, 0.95);
+  border-radius: 20px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+  border: 1px solid #e0e0e0;
+  overflow: hidden;
+  user-select: none;
+
+  .toggle-btn {
+    padding: 6px 18px;
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    border: none;
+    background: transparent;
+    color: #595959;
+    transition: all 0.2s ease;
+    white-space: nowrap;
+    letter-spacing: 0.3px;
+
+    &:hover {
+      color: #1890ff;
+      background: rgba(24, 144, 255, 0.06);
+    }
+
+    &.active {
+      background: #1890ff;
+      color: #fff;
+      font-weight: 600;
+    }
+  }
+`;
+
 const ColorLegend = styled.div`
   position: absolute;
   bottom: 20px;
@@ -523,6 +569,8 @@ export default function SupersetPluginChartFloorMap(
   // height and width are the height and width of the DOM element as it exists in the dashboard.
   // There is also a `data` prop, which is, of course, your DATA 🎉
   const { data, height, width, floorImage, floorSelection } = props;
+  const ALL_LAYERS = ['Retail', 'Entrances', 'Circulation', 'Public'];
+  const [viewMode, setViewMode] = useState<ViewMode>('polygon');
   const [hoveredItemName, setHoveredItemName] = useState<string | null>(null);
   const [tooltipPos, setTooltipPos] = useState({ x: 0, y: 0 });
   const [isFullScreen, setIsFullScreen] = useState(false);
@@ -530,7 +578,15 @@ export default function SupersetPluginChartFloorMap(
   const [sortField, setSortField] = useState<'name' | 'footfall'>('footfall');
   const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc');
   const [selectedItemName, setSelectedItemName] = useState<string | null>(null);
-  const [layerFilters, setLayerFilters] = useState<string[]>(['Retail']);
+  // Separate filter states for each view mode
+  const [polygonLayerFilters, setPolygonLayerFilters] = useState<string[]>(['Retail']);
+  const [heatmapLayerFilters, setHeatmapLayerFilters] = useState<string[]>(ALL_LAYERS);
+
+  // Active filters depend on current view mode
+  const layerFilters = viewMode === 'heatmap' ? heatmapLayerFilters : polygonLayerFilters;
+  // Heatmap hover state
+  const [heatmapHoveredName, setHeatmapHoveredName] = useState<string | null>(null);
+  const [heatmapTooltipPos, setHeatmapTooltipPos] = useState({ x: 0, y: 0 });
   const [isFilterLoading, setIsFilterLoading] = useState(false);
   const [floorsData, setFloorsData] = useState<
     { name: string; image: string }[]
@@ -709,19 +765,94 @@ export default function SupersetPluginChartFloorMap(
     return maxByLayer;
   }, [data, layerFilters]);
 
+  // Build heatmap points from polygon centroids
+  const heatmapPoints = React.useMemo(() => {
+    if (!data || !Array.isArray(data)) return [];
+
+    const rawPts = data
+      .map((item: any) => {
+        const centroid = computeCentroid(item.points || '');
+        if (!centroid) return null;
+        const area = computePolygonArea(item.points || '');
+        return {
+          x: centroid.x,
+          y: centroid.y,
+          weight: item.total_footfall_zo || 0,
+          name: item.name || 'Unknown',
+          category: item.category || '',
+          polygonArea: area,
+          rawPoints: item.points || '',
+        };
+      })
+      .filter(Boolean) as {
+      x: number;
+      y: number;
+      weight: number;
+      name: string;
+      category: string;
+      polygonArea: number;
+      rawPoints: string;
+    }[];
+
+    if (rawPts.length === 0) return [];
+
+    // Detect the actual coordinate range from all centroids
+    const allX = rawPts.map(p => p.x);
+    const allY = rawPts.map(p => p.y);
+    const minX = Math.min(...allX);
+    const maxX = Math.max(...allX);
+    const minY = Math.min(...allY);
+    const maxY = Math.max(...allY);
+    const rangeX = maxX - minX || 1;
+    const rangeY = maxY - minY || 1;
+
+    // If points coords are already in SVG viewBox scale (e.g. 0..5700 x 0..3800),
+    // use them directly. Otherwise scale/normalize them onto the viewBox.
+    // Heuristic: if maxX > imgW * 0.1 OR maxY > imgH * 0.1 → already in pixel space.
+    const alreadyInPixelSpace = maxX > imgW * 0.1 || maxY > imgH * 0.1;
+
+    if (alreadyInPixelSpace) {
+      return rawPts;
+    }
+
+    // Points are in a different coordinate system → scale to fill the viewBox.
+    const scaleX = imgW / rangeX;
+    const scaleY = imgH / rangeY;
+    const areaScale = scaleX * scaleY; // area scales by product of linear scales
+    return rawPts.map(p => ({
+      ...p,
+      x: ((p.x - minX) / rangeX) * imgW,
+      y: ((p.y - minY) / rangeY) * imgH,
+      polygonArea: p.polygonArea * areaScale,
+    }));
+  }, [data, imgW, imgH]);
+
+  // Global max footfall for heatmap legend (across all active layers)
+  const heatmapMaxFootfall = React.useMemo(
+    () => Math.max(...heatmapPoints.map(p => p.weight), 1),
+    [heatmapPoints],
+  );
+
+  const heatmapMinFootfall = React.useMemo(
+    () =>
+      Math.min(
+        ...heatmapPoints.filter(p => p.weight > 0).map(p => p.weight),
+        0,
+      ),
+    [heatmapPoints],
+  );
+
   // Handle layer filter change with loading (toggle multiple selections)
+  // Works for both polygon and heatmap modes independently
   const handleLayerChange = (layer: string) => {
     setIsFilterLoading(true);
-    setLayerFilters(prev => {
+    const setter = viewMode === 'heatmap' ? setHeatmapLayerFilters : setPolygonLayerFilters;
+    setter((prev: string[]) => {
       if (prev.includes(layer)) {
-        // Remove layer if already selected (allow empty selection)
-        return prev.filter(l => l !== layer);
-      } else {
-        // Add layer to selection
-        return [...prev, layer];
+        return prev.filter((l: string) => l !== layer);
       }
+      return [...prev, layer];
     });
-    // Simulate processing time for visual feedback
     setTimeout(() => {
       setIsFilterLoading(false);
     }, 300);
@@ -946,6 +1077,28 @@ export default function SupersetPluginChartFloorMap(
         )}
 
         <div className="map-panel" ref={mapPanelRef}>
+          {/* View mode toggle: Polygon ↔ Heatmap */}
+          <ViewToggle>
+            <button
+              type="button"
+              className={`toggle-btn ${viewMode === 'polygon' ? 'active' : ''}`}
+              onClick={() => setViewMode('polygon')}
+            >
+              Polygon
+            </button>
+            <button
+              type="button"
+              className={`toggle-btn ${viewMode === 'heatmap' ? 'active' : ''}`}
+              onClick={() => {
+                // Reset heatmap filters to ALL when switching to heatmap
+                setHeatmapLayerFilters(ALL_LAYERS);
+                setViewMode('heatmap');
+              }}
+            >
+              Heatmap
+            </button>
+          </ViewToggle>
+
           <ZoomPanWrapper ref={zoomPanRef}>
             <svg
               xmlns="http://www.w3.org/2000/svg"
@@ -966,8 +1119,9 @@ export default function SupersetPluginChartFloorMap(
                 imageRendering="crisp-edges"
                 style={{ pointerEvents: 'none', zIndex: 1 }}
               />
-              {/* Render polylines grouped by store */}
-              {data &&
+              {/* Polygon mode */}
+              {viewMode === 'polygon' &&
+                data &&
                 Array.isArray(data) &&
                 data.map((item: any, index: number) => {
                   const itemName = item.name || 'Unknown';
@@ -1000,11 +1154,33 @@ export default function SupersetPluginChartFloorMap(
                     </g>
                   );
                 })}
+              {/* Heatmap mode */}
+              {viewMode === 'heatmap' && (
+                <HeatmapLayer
+                  points={heatmapPoints}
+                  imgW={imgW}
+                  imgH={imgH}
+                  layerFilters={heatmapLayerFilters}
+                  onHoverEnter={(name, footfall, svgX, svgY, e) => {
+                    const parentRect =
+                      mapPanelRef.current?.getBoundingClientRect();
+                    if (parentRect) {
+                      const rect = (e.target as SVGCircleElement).getBoundingClientRect();
+                      setHeatmapTooltipPos({
+                        x: rect.left - parentRect.left + rect.width / 2,
+                        y: rect.top - parentRect.top,
+                      });
+                    }
+                    setHeatmapHoveredName(name);
+                  }}
+                  onHoverLeave={() => setHeatmapHoveredName(null)}
+                />
+              )}
             </svg>
           </ZoomPanWrapper>
 
-          {/* Show tooltip for hovered item */}
-          {displayedItem && hoveredItemName !== null && (
+          {/* Show tooltip for hovered item (polygon mode only) */}
+          {viewMode === 'polygon' && displayedItem && hoveredItemName !== null && (
             <TooltipBox isVisible={true} x={tooltipPos.x} y={tooltipPos.y}>
               <div className="store-name">{displayedItem.name}</div>
               {displayedItem.category && (
@@ -1032,8 +1208,32 @@ export default function SupersetPluginChartFloorMap(
             </TooltipBox>
           )}
 
-          {/* Show tooltip for selected item (when clicking from list) */}
-          {selectedItemData && !hoveredItemName && (
+          {/* Heatmap hover tooltip */}
+          {viewMode === 'heatmap' && heatmapHoveredName && (() => {
+            const item = data && Array.isArray(data)
+              ? (data as any[]).find(d => d.name === heatmapHoveredName)
+              : null;
+            return (
+              <TooltipBox isVisible={true} x={heatmapTooltipPos.x} y={heatmapTooltipPos.y}>
+                <div className="store-name">{heatmapHoveredName}</div>
+                {item?.category && (
+                  <div className="category-section">
+                    <div className="category-label">Category</div>
+                    <div className="category-name">{item.category}</div>
+                  </div>
+                )}
+                <div className="footfall-section">
+                  <div className="footfall-label">Footfall</div>
+                  <div className="footfall-value" style={{ color: 'black' }}>
+                    {(item?.total_footfall_zo as number ?? 0).toLocaleString()}
+                  </div>
+                </div>
+              </TooltipBox>
+            );
+          })()}
+
+          {/* Show tooltip for selected item (polygon mode only) */}
+          {viewMode === 'polygon' && selectedItemData && !hoveredItemName && (
             <TooltipBox
               isVisible={true}
               x={selectedTooltipPos.x}
@@ -1067,8 +1267,16 @@ export default function SupersetPluginChartFloorMap(
             </TooltipBox>
           )}
 
-          {/* Color Legend */}
-          {isFullScreen && layerFilters.length > 0 && (
+          {/* Heatmap legend (always visible in heatmap mode) */}
+          {viewMode === 'heatmap' && (
+            <HeatmapLegend
+              minVal={heatmapMinFootfall}
+              maxVal={heatmapMaxFootfall}
+            />
+          )}
+
+          {/* Color Legend (polygon mode only) */}
+          {viewMode === 'polygon' && isFullScreen && layerFilters.length > 0 && (
             <ColorLegend>
               {layerFilters.map(layer => {
                 const maxVal = maxFootfallByLayer[layer] || 0;
