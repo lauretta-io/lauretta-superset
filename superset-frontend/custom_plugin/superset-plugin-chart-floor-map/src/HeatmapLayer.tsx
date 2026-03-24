@@ -18,6 +18,31 @@
  */
 import React, { useMemo, useRef, useCallback } from 'react';
 
+/* ═══════════════════════════════════════════════════════════════════════════
+ *  FLOOR-PLAN CONCENTRATION HEATMAP
+ *
+ *  Design:
+ *   • Walkable space  = convex hull of ALL polygons MINUS retail store interiors.
+ *     This correctly models "the corridors between stores" without needing
+ *     explicit corridor polygons.
+ *
+ *   • Heat sources    = retail polygon EDGES, weighted by each store's footfall.
+ *     A high-footfall store radiates heat outward into the adjacent corridor.
+ *     Explicit Circulation / Entrance / Public polygons also contribute heat
+ *     (sampled from their interiors) but do NOT define walkable space — they
+ *     are treated as bonus heat boosts on top of the corridor field.
+ *
+ *   • KDE bandwidth σ = SIGMA SVG units. Sized so heat from a store edge
+ *     reaches the middle of the corridor (~half corridor width) but does not
+ *     cross into the opposite store.
+ *
+ *   • Rendering: uniform dot grid on the walkable space. Each dot's color and
+ *     opacity is driven by its KDE value. Low-KDE dots are nearly invisible
+ *     (the floor-plan image shows through); high-KDE dots are vivid and opaque.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ─── Types ─────────────────────────────────────────────────────────────── */
+
 export interface HeatmapPoint {
   x: number;
   y: number;
@@ -33,47 +58,37 @@ interface HeatmapLayerProps {
   imgW: number;
   imgH: number;
   layerFilters: string[];
-  onHoverEnter?: (name: string, footfall: number, svgX: number, svgY: number, e: React.MouseEvent<SVGCircleElement>) => void;
+  onHoverEnter?: (
+    name: string,
+    footfall: number,
+    svgX: number,
+    svgY: number,
+    e: React.MouseEvent<SVGCircleElement>,
+  ) => void;
   onHoverLeave?: () => void;
 }
 
-/**
- * Parse a SVG polygon `points` string into an array of {x, y} coordinates.
- *
- * Supports two formats found in the DB:
- *   - "x1,y1 x2,y2 x3,y3 ..."  (comma-separated pairs, space between points)
- *   - "x1 y1 x2 y2 x3 y3 ..."  (space-separated flat list, alternating x/y)
- */
+interface FootfallSource {
+  x: number;
+  y: number;
+  weight: number;      // per-sample KDE weight (arc/area normalised)
+  totalWeight: number; // original store/polygon footfall (for tooltip display)
+  name: string;
+}
+
+/* ─── Polygon parsing ───────────────────────────────────────────────────── */
+
 export function parsePolygonPoints(
   pointsStr: string,
 ): { x: number; y: number }[] {
   if (!pointsStr || pointsStr === 'null' || pointsStr === '') return [];
-
-  // Normalize: replace ALL whitespace variants (tabs, newlines, CR) with single space
   const trimmed = pointsStr.replace(/[\r\n\t]+/g, ' ').trim();
-
-  // Split on any whitespace or comma sequences to get a flat token list
-  // This handles both "x,y x,y" and "x y x y" and mixed formats
   const tokens = trimmed.split(/[\s,]+/).filter(t => t.length > 0);
-
-  // Try to detect "x,y" pairs: if original had commas inside tokens before normalization
-  const hasInlineComma = pointsStr.includes(',');
-
-  if (hasInlineComma) {
-    // Original format was "x1,y1 x2,y2" — commas separate x from y within a pair
-    // After split on /[\s,]+/ we get flat numbers anyway, so just fall through
-    // to the flat-number parsing below
-  }
-
-  // All tokens are now individual numbers (flat list: x0 y0 x1 y1 ...)
   const nums: number[] = [];
   for (const token of tokens) {
     const n = parseFloat(token);
-    if (!Number.isNaN(n)) {
-      nums.push(n);
-    }
+    if (!Number.isNaN(n)) nums.push(n);
   }
-
   const pts: { x: number; y: number }[] = [];
   for (let i = 0; i + 1 < nums.length; i += 2) {
     pts.push({ x: nums[i], y: nums[i + 1] });
@@ -81,28 +96,17 @@ export function parsePolygonPoints(
   return pts;
 }
 
-/**
- * Compute the centroid (average x, average y) of a polygon from its points string.
- * Returns null if parsing fails or produces NaN coordinates.
- */
 export function computeCentroid(
   pointsStr: string,
 ): { x: number; y: number } | null {
   const pts = parsePolygonPoints(pointsStr);
   if (pts.length === 0) return null;
-  const sumX = pts.reduce((acc, p) => acc + p.x, 0);
-  const sumY = pts.reduce((acc, p) => acc + p.y, 0);
-  const cx = sumX / pts.length;
-  const cy = sumY / pts.length;
-  // Guard against NaN (malformed input)
+  const cx = pts.reduce((s, p) => s + p.x, 0) / pts.length;
+  const cy = pts.reduce((s, p) => s + p.y, 0) / pts.length;
   if (Number.isNaN(cx) || Number.isNaN(cy)) return null;
   return { x: cx, y: cy };
 }
 
-/**
- * Compute the area of a polygon using the Shoelace (Gauss) formula.
- * Returns the absolute area in SVG coordinate units².
- */
 export function computePolygonArea(pointsStr: string): number {
   const pts = parsePolygonPoints(pointsStr);
   if (pts.length < 3) return 0;
@@ -110,121 +114,238 @@ export function computePolygonArea(pointsStr: string): number {
   const n = pts.length;
   for (let i = 0; i < n; i += 1) {
     const j = (i + 1) % n;
-    area += pts[i].x * pts[j].y;
-    area -= pts[j].x * pts[i].y;
+    area += pts[i].x * pts[j].y - pts[j].x * pts[i].y;
   }
   return Math.abs(area) / 2;
 }
 
-/**
- * Convert polygon area (SVG units²) to a circle radius (SVG units)
- * so that the circle visually represents the same footprint as the polygon.
- * radius = sqrt(area / π)
- */
 export function areaToRadius(area: number): number {
-  if (area <= 0) return 0;
-  return Math.sqrt(area / Math.PI);
+  return area <= 0 ? 0 : Math.sqrt(area / Math.PI);
 }
 
-/**
- * Map a normalized value (0..1) to a classic heatmap gradient:
- * yellow-orange → orange → red → deep crimson → dark wine
- * High saturation throughout — matches the reference image palette.
- */
-function heatmapColor(t: number): string {
-  const stops = [
-    { t: 0.0,  r: 255, g: 220, b: 50  }, // warm yellow
-    { t: 0.2,  r: 255, g: 160, b: 0   }, // amber-orange
-    { t: 0.45, r: 240, g: 60,  b: 0   }, // deep orange-red
-    { t: 0.7,  r: 190, g: 10,  b: 30  }, // vivid red
-    { t: 1.0,  r: 100, g: 0,   b: 50  }, // dark wine / maroon
-  ];
+/* ─── Point-in-Polygon (ray-casting) ────────────────────────────────────── */
 
-  // Find the two stops we're between
-  let lower = stops[0];
-  let upper = stops[stops.length - 1];
-  for (let i = 0; i < stops.length - 1; i += 1) {
-    if (t >= stops[i].t && t <= stops[i + 1].t) {
-      lower = stops[i];
-      upper = stops[i + 1];
-      break;
+function pointInPolygon(
+  px: number,
+  py: number,
+  pts: { x: number; y: number }[],
+): boolean {
+  const n = pts.length;
+  let inside = false;
+  for (let i = 0, j = n - 1; i < n; j = i, i += 1) {
+    const { x: xi, y: yi } = pts[i];
+    const { x: xj, y: yj } = pts[j];
+    if (
+      yi > py !== yj > py &&
+      px < ((xj - xi) * (py - yi)) / (yj - yi) + xi
+    ) {
+      inside = !inside;
     }
   }
-
-  const range = upper.t - lower.t;
-  const localT = range === 0 ? 0 : (t - lower.t) / range;
-  const r = Math.round(lower.r + localT * (upper.r - lower.r));
-  const g = Math.round(lower.g + localT * (upper.g - lower.g));
-  const b = Math.round(lower.b + localT * (upper.b - lower.b));
-  return `rgb(${r},${g},${b})`;
+  return inside;
 }
 
-/**
- * Helper to map a category to a layer name (mirrors the logic in the main component).
- */
+/* ─── Bounding-box helper ───────────────────────────────────────────────── */
+
+interface BBox {
+  minX: number;
+  maxX: number;
+  minY: number;
+  maxY: number;
+  pts: { x: number; y: number }[];
+}
+
+function makeBBox(pts: { x: number; y: number }[]): BBox {
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  for (let i = 0; i < pts.length; i += 1) {
+    if (pts[i].x < minX) minX = pts[i].x;
+    if (pts[i].x > maxX) maxX = pts[i].x;
+    if (pts[i].y < minY) minY = pts[i].y;
+    if (pts[i].y > maxY) maxY = pts[i].y;
+  }
+  return { minX, maxX, minY, maxY, pts };
+}
+
+function computeBBoxes(polys: { x: number; y: number }[][]): BBox[] {
+  return polys.map(makeBBox);
+}
+
+function isInsideAny(px: number, py: number, bboxes: BBox[]): boolean {
+  for (let i = 0; i < bboxes.length; i += 1) {
+    const bb = bboxes[i];
+    if (px < bb.minX || px > bb.maxX || py < bb.minY || py > bb.maxY) continue;
+    if (pointInPolygon(px, py, bb.pts)) return true;
+  }
+  return false;
+}
+
+/* ─── Category → Layer ──────────────────────────────────────────────────── */
+
 function getCategoryLayer(category: string | undefined | null): string {
   if (!category) return 'Retail';
-  const cat = category.toLowerCase();
-  if (cat.includes('entrance')) return 'Entrances';
-  if (cat.includes('circulation')) return 'Circulation';
-  if (cat.includes('public')) return 'Public';
+  const cat = category.toLowerCase().trim();
+  if (
+    cat.includes('entrance') || cat.includes('gate') ||
+    cat.includes('door') || cat.includes('entry')
+  ) return 'Entrances';
+  if (
+    cat.includes('circulation') || cat.includes('corridor') ||
+    cat.includes('walkway') || cat.includes('hallway') ||
+    cat.includes('lift') || cat.includes('elevator') ||
+    cat.includes('escalator') || cat.includes('stair')
+  ) return 'Circulation';
+  if (
+    cat.includes('public') || cat.includes('common') ||
+    cat.includes('amenity') || cat.includes('toilet') ||
+    cat.includes('restroom') || cat.includes('prayer') ||
+    cat.includes('atm') || cat.includes('info')
+  ) return 'Public';
   return 'Retail';
 }
 
-/**
- * Rasterize a polygon into a grid of (col, row) cells whose centers lie inside it.
- * Uses ray-casting point-in-polygon test.
- */
-function rasterizePolygon(
-  pts: { x: number; y: number }[],
-  cellSize: number,
-  cols: number,
-  rows: number,
-): { col: number; row: number }[] {
-  if (pts.length < 3) return [];
-  const minX = Math.min(...pts.map(p => p.x));
-  const maxX = Math.max(...pts.map(p => p.x));
-  const minY = Math.min(...pts.map(p => p.y));
-  const maxY = Math.max(...pts.map(p => p.y));
-  const colStart = Math.max(0, Math.floor(minX / cellSize));
-  const colEnd   = Math.min(cols - 1, Math.floor(maxX / cellSize));
-  const rowStart = Math.max(0, Math.floor(minY / cellSize));
-  const rowEnd   = Math.min(rows - 1, Math.floor(maxY / cellSize));
+/* ─── Convex Hull (Graham scan) ─────────────────────────────────────────── */
 
-  const result: { col: number; row: number }[] = [];
-  for (let c = colStart; c <= colEnd; c += 1) {
-    for (let r = rowStart; r <= rowEnd; r += 1) {
-      const cx = (c + 0.5) * cellSize;
-      const cy = (r + 0.5) * cellSize;
-      // Ray-cast point-in-polygon
-      const n = pts.length;
-      let inside = false;
-      for (let i = 0, j = n - 1; i < n; j = i, i += 1) {
-        const { x: xi, y: yi } = pts[i];
-        const { x: xj, y: yj } = pts[j];
-        if (yi > cy !== yj > cy && cx < ((xj - xi) * (cy - yi)) / (yj - yi) + xi) {
-          inside = !inside;
-        }
-      }
-      if (inside) result.push({ col: c, row: r });
+function cross(
+  O: { x: number; y: number },
+  A: { x: number; y: number },
+  B: { x: number; y: number },
+): number {
+  return (A.x - O.x) * (B.y - O.y) - (A.y - O.y) * (B.x - O.x);
+}
+
+function convexHull(inputPts: { x: number; y: number }[]): { x: number; y: number }[] {
+  if (inputPts.length < 3) return inputPts.slice();
+  const pts = inputPts.slice().sort((a, b) => a.x - b.x || a.y - b.y);
+  const n = pts.length;
+  const hull: { x: number; y: number }[] = [];
+  for (let i = 0; i < n; i += 1) {
+    while (hull.length >= 2 && cross(hull[hull.length - 2], hull[hull.length - 1], pts[i]) <= 0)
+      hull.pop();
+    hull.push(pts[i]);
+  }
+  const lower = hull.length + 1;
+  for (let i = n - 2; i >= 0; i -= 1) {
+    while (hull.length >= lower && cross(hull[hull.length - 2], hull[hull.length - 1], pts[i]) <= 0)
+      hull.pop();
+    hull.push(pts[i]);
+  }
+  hull.pop();
+  return hull;
+}
+
+/* ─── Sample points along polygon edges ─────────────────────────────────── *
+ *
+ * Place one source every ~spacing SVG units along each edge.
+ *
+ * IMPORTANT — perimeter-length normalisation:
+ *   Naively dividing totalWeight by the number of sample points causes
+ *   a large-perimeter store to accumulate MORE KDE than a small-perimeter
+ *   store with the same footfall, because there are more samples each
+ *   contributing a Gaussian kernel that overlaps with corridor dots.
+ *
+ *   The correct approach is to weight each sample by the EDGE LENGTH it
+ *   represents (arc-length parametrisation), then scale so the total
+ *   contribution integrates to totalWeight × kernelNorm.  In the discrete
+ *   case this means each sample carries weight = (totalWeight / perimeter)
+ *   × (edge_segment_length / n_samples_on_that_edge).  Since
+ *   edge_segment_length / n_samples ≈ spacing, every sample simply gets
+ *   weight = totalWeight × spacing / perimeter.
+ *
+ *   Effect: a store with double the perimeter produces double the samples
+ *   but each at half the weight → same total KDE contribution per unit
+ *   corridor length → colour correctly reflects footfall, not store size.
+ */
+function sampleEdges(
+  pts: { x: number; y: number }[],
+  spacing: number,
+  totalWeight: number,
+  name: string,
+): FootfallSource[] {
+  const out: FootfallSource[] = [];
+
+  // First pass: collect all sample points and their arc-length contribution
+  const raw: { x: number; y: number; segLen: number }[] = [];
+  let totalPerimeter = 0;
+
+  for (let i = 0; i < pts.length; i += 1) {
+    const j = (i + 1) % pts.length;
+    const dx = pts[j].x - pts[i].x;
+    const dy = pts[j].y - pts[i].y;
+    const len = Math.sqrt(dx * dx + dy * dy);
+    if (len < 1) continue;
+    totalPerimeter += len;
+    const n = Math.max(1, Math.round(len / spacing));
+    const segLen = len / n;   // arc-length each sample represents
+    for (let k = 0; k < n; k += 1) {
+      const t = (k + 0.5) / n;
+      raw.push({ x: pts[i].x + dx * t, y: pts[i].y + dy * t, segLen });
+    }
+  }
+
+  if (raw.length === 0 || totalPerimeter === 0) return out;
+
+  // Each sample weight = totalWeight × (arc it represents) / totalPerimeter
+  // → integrates exactly to totalWeight regardless of perimeter
+  for (const r of raw) {
+    out.push({ x: r.x, y: r.y, weight: totalWeight * r.segLen / totalPerimeter, totalWeight, name });
+  }
+  return out;
+}
+
+/* ─── Sample points uniformly from polygon interior ─────────────────────── *
+ *
+ * Area-normalised weighting: each sample represents a cell of area ≈ spacing².
+ * Total weight = sum of per-sample weights = totalWeight × (sampled area / polygon area).
+ * For a dense-enough grid this converges to totalWeight.
+ *
+ * This means two polygons with identical footfall produce the same total KDE
+ * contribution regardless of their area, fixing the "small polygon = hot spike"
+ * artefact from equal-split weighting.
+ */
+function sampleInterior(
+  pts: { x: number; y: number }[],
+  spacing: number,
+): { x: number; y: number }[] {
+  const bb = makeBBox(pts);
+  const result: { x: number; y: number }[] = [];
+  for (let x = bb.minX + spacing * 0.5; x < bb.maxX; x += spacing) {
+    for (let y = bb.minY + spacing * 0.5; y < bb.maxY; y += spacing) {
+      if (pointInPolygon(x, y, pts)) result.push({ x, y });
     }
   }
   return result;
 }
 
-/**
- * SVG Heatmap layer — Walkable-area concentration style.
+/* ─── Color scale ─────────────────────────────────────────────────────────
  *
- * Strategy (matching the data model):
- *   • Circulation / Public zones ARE the walkable corridors → fill them fully,
- *     weight = footfall × Gaussian from centroid (dense center, fades at walls).
- *   • Retail / Entrance zones represent stores → they contribute a soft "spill"
- *     that bleeds outward beyond their boundary (σ larger than the polygon),
- *     simulating customers queuing/lingering near the store entrance.
- *
- * This makes corridors the hot areas and stores contribute ambient glow,
- * which is the correct mental model for a footfall flow heatmap.
+ * Classic thermal palette: Deep Blue → Cyan → Green → Yellow → Orange → Red
  */
+function heatmapColor(t: number): string {
+  const stops = [
+    { p: 0.00, r:   0, g:   0, b: 180 },
+    { p: 0.25, r:   0, g: 200, b: 255 },
+    { p: 0.50, r:   0, g: 220, b:  80 },
+    { p: 0.70, r: 255, g: 230, b:   0 },
+    { p: 0.85, r: 255, g: 100, b:   0 },
+    { p: 1.00, r: 230, g:   0, b:   0 },
+  ];
+  let lo = stops[0];
+  let hi = stops[stops.length - 1];
+  for (let i = 0; i < stops.length - 1; i += 1) {
+    if (t >= stops[i].p && t <= stops[i + 1].p) {
+      lo = stops[i]; hi = stops[i + 1];
+      break;
+    }
+  }
+  const range = hi.p - lo.p || 1;
+  const f = (t - lo.p) / range;
+  return `rgb(${Math.round(lo.r + f * (hi.r - lo.r))},${Math.round(lo.g + f * (hi.g - lo.g))},${Math.round(lo.b + f * (hi.b - lo.b))})`;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ *  MAIN COMPONENT
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
 export function HeatmapLayer({
   points,
   imgW,
@@ -233,143 +354,296 @@ export function HeatmapLayer({
   onHoverEnter,
   onHoverLeave,
 }: HeatmapLayerProps) {
-  // ── 1. Filter ──────────────────────────────────────────────────────────────
-  const filtered = useMemo(
-    () =>
-      points.filter(p => {
-        const layer = getCategoryLayer(p.category);
-        return layerFilters.includes(layer) && p.weight > 0 && !!p.rawPoints;
-      }),
-    [points, layerFilters],
-  );
 
-  // ── 2. Grid parameters ─────────────────────────────────────────────────────
-  const COLS = 120;
-  const cellSize = imgW / COLS;
-  const ROWS = Math.ceil(imgH / cellSize);
+  /* ─────────────────────────────────────────────────────────────────────
+   *  TUNING PARAMETERS
+   *
+   *  DOT_SPACING     — visual dot grid step (SVG units). 10 = fine grid.
+   *  SIGMA           — KDE bandwidth: heat decays to ~14% at distance σ.
+   *                    28 means heat from a store edge reaches ~28px into
+   *                    the corridor — sized for typical mall corridor widths.
+   *  EDGE_SPACING    — sample interval along retail store edges.
+   *  INTERIOR_SPACING— sample interval inside Circulation/Entrance/Public.
+   *  PERCENTILE_CLAMP— top (1-p)% cells clamp to max colour.  0.88 means
+   *                    the top 12% all show as red, spreading mid-range.
+   *  GAMMA           — power-curve for contrast.  1.2 keeps midtones warm.
+   * ───────────────────────────────────────────────────────────────────── */
+  const DOT_SPACING       = 10;
+  const SIGMA             = 28;
+  const EDGE_SPACING      = 12;
+  const INTERIOR_SPACING  = 16;
+  const PERCENTILE_CLAMP  = 0.88;
+  const GAMMA             = 1.2;
 
-  // ── 3. Build concentration grid ────────────────────────────────────────────
-  const gridMap = useMemo(() => {
-    const map = new Map<string, { totalW: number; name: string; footfall: number }>();
+  /* ── STAGE 1 — Classify & build heat sources ─────────────────────────
+   *
+   * BUILDING HULL: built ONLY from Retail polygon vertices.
+   *   Retail polygons tile the building interior — their convex hull is
+   *   a tight fit around the actual store area (= the building footprint).
+   *   Entrance / Circulation polygons may extend OUTSIDE the building
+   *   (e.g. entrance canopies, external corridors).  Including them in
+   *   the hull would balloon it outward, creating false walkable zones
+   *   between the building and those remote polygons.
+   *
+   * HEAT SOURCES:
+   *   Retail edges  → radiate footfall into adjacent corridors.
+   *                   Weight is proportional to each store's footfall so
+   *                   a PB2 (27 319) corridor burns much hotter than a
+   *                   low-traffic store corridor.
+   *   Non-retail    → Circulation/Entrance/Public polygons that fall
+   *                   INSIDE the hull also contribute interior heat.
+   *                   No artificial multiplier — raw footfall only — so
+   *                   the colour scale reflects true relative density.
+   */
+  const { retailBBoxes, nonRetailBBoxes, buildingHull, sources } = useMemo(() => {
+    const retailPolys:    { x: number; y: number }[][] = [];
+    const retailVertices: { x: number; y: number }[]  = [];  // hull built from these only
+    const src: FootfallSource[] = [];
 
-    filtered.forEach(p => {
-      const pts = parsePolygonPoints(p.rawPoints!);
-      if (pts.length < 3) return;
+    // We need the hull first to check whether non-retail polygons are inside.
+    // Two-pass approach: pass 1 collects retail data, pass 2 handles non-retail.
+    const nonRetail: { pts: { x: number; y: number }[]; layer: string; p: HeatmapPoint }[] = [];
+    const nonRetailPolys: { x: number; y: number }[][] = [];
+
+    for (let i = 0; i < points.length; i += 1) {
+      const p = points[i];
+      if (!p.rawPoints) continue;
+      const pts = parsePolygonPoints(p.rawPoints);
+      if (pts.length < 3) continue;
 
       const layer = getCategoryLayer(p.category);
-      const isWalkable = layer === 'Circulation' || layer === 'Public';
 
-      // Centroid
-      const cx = pts.reduce((s, v) => s + v.x, 0) / pts.length;
-      const cy = pts.reduce((s, v) => s + v.y, 0) / pts.length;
+      if (layer === 'Retail') {
+        retailPolys.push(pts);
+        for (let v = 0; v < pts.length; v += 1) retailVertices.push(pts[v]);
 
-      const area = p.polygonArea ?? 0;
-      const sqrtArea = area > 0 ? Math.sqrt(area) : cellSize * 3;
-
-      if (isWalkable) {
-        // ── Walkable zones (Circulation / Public): fill inside polygon ────────
-        // Gaussian is wide so the whole corridor lights up (not just center).
-        // σ = 60% of sqrt(area) → fairly flat distribution across the corridor.
-        const sigma = sqrtArea * 0.6;
-        const twoSigmaSq = 2 * sigma * sigma;
-        const cells = rasterizePolygon(pts, cellSize, COLS, ROWS);
-
-        cells.forEach(({ col, row }) => {
-          const px = (col + 0.5) * cellSize;
-          const py = (row + 0.5) * cellSize;
-          const distSq = (px - cx) ** 2 + (py - cy) ** 2;
-          // Wide Gaussian: even edge cells still get ~40% of max weight
-          const gaussian = Math.exp(-distSq / twoSigmaSq);
-          const contribution = p.weight * gaussian;
-          const key = `${col},${row}`;
-          const existing = map.get(key);
-          if (!existing) {
-            map.set(key, { totalW: contribution, name: p.name, footfall: p.weight });
-          } else {
-            const newTotal = existing.totalW + contribution;
-            const dominant = contribution > existing.totalW * 0.5
-              ? { name: p.name, footfall: p.weight }
-              : { name: existing.name, footfall: existing.footfall };
-            map.set(key, { totalW: newTotal, ...dominant });
-          }
-        });
+        // Edges radiate heat outward into the corridor
+        if (p.weight > 0) {
+          const edgeSrcs = sampleEdges(pts, EDGE_SPACING, p.weight, p.name);
+          for (let e = 0; e < edgeSrcs.length; e += 1) src.push(edgeSrcs[e]);
+        }
       } else {
-        // ── Store zones (Retail / Entrances): radial spill outside boundary ───
-        // Instead of filling the store interior, we emit a Gaussian blob centered
-        // on the store centroid with σ proportional to store size.
-        // We render on a sparse grid AROUND the centroid (not point-in-polygon).
-        // This places dots near store entrances / adjacent corridors.
-        const sigma = sqrtArea * 0.55;        // spill radius ≈ store size
-        const twoSigmaSq = 2 * sigma * sigma;
-        const reach = Math.ceil(sigma * 2.5 / cellSize); // grid cells to check
-        const colC  = Math.floor(cx / cellSize);
-        const rowC  = Math.floor(cy / cellSize);
+        nonRetail.push({ pts, layer, p });
+        nonRetailPolys.push(pts);
+      }
+    }
 
-        for (let dc = -reach; dc <= reach; dc += 1) {
-          for (let dr = -reach; dr <= reach; dr += 1) {
-            const col = colC + dc;
-            const row = rowC + dr;
-            if (col < 0 || col >= COLS || row < 0 || row >= ROWS) continue;
+    // Build hull from retail vertices only → tight around the building footprint
+    const hull = retailVertices.length >= 3 ? convexHull(retailVertices) : [];
 
-            const px = (col + 0.5) * cellSize;
-            const py = (row + 0.5) * cellSize;
-            const distSq = (px - cx) ** 2 + (py - cy) ** 2;
-            const gaussian = Math.exp(-distSq / twoSigmaSq);
-            if (gaussian < 0.05) continue; // skip negligible contributions
+    // Pass 2: ALL non-retail polygons contribute heat sources unconditionally.
+    // Their heat will only be visible where dot-grid cells exist (inside the hull),
+    // so external entrance polygons naturally produce no visible dots — the grid
+    // simply has no cells there to receive the KDE.  No need to filter by hull.
+    for (let i = 0; i < nonRetail.length; i += 1) {
+      const { pts, p } = nonRetail[i];
+      if (p.weight <= 0) continue;
 
-            // Check: skip cells that are deeply inside the store polygon
-            // (only keep cells outside or near the boundary)
-            const insidePolygon = (() => {
-              const n = pts.length;
-              let inside = false;
-              for (let i = 0, j = n - 1; i < n; j = i, i += 1) {
-                const { x: xi, y: yi } = pts[i];
-                const { x: xj, y: yj } = pts[j];
-                if (yi > py !== yj > py && px < ((xj - xi) * (py - yi)) / (yj - yi) + xi) {
-                  inside = !inside;
-                }
-              }
-              return inside;
-            })();
+      const cx = pts.reduce((s, q) => s + q.x, 0) / pts.length;
+      const cy = pts.reduce((s, q) => s + q.y, 0) / pts.length;
 
-            // Boundary cells and outside cells both contribute.
-            // Deep interior cells are skipped (store interior stays blank).
-            const nearBoundary = distSq > (sqrtArea * 0.3) ** 2;
-            if (insidePolygon && !nearBoundary) continue;
+      const interiorPts = sampleInterior(pts, INTERIOR_SPACING);
+      const sampledPts = interiorPts.length > 0 ? interiorPts : [{ x: cx, y: cy }];
 
-            // Stores contribute at 40% weight vs corridors to avoid overwhelming them
-            const contribution = p.weight * gaussian * 0.4;
-            const key = `${col},${row}`;
-            const existing = map.get(key);
-            if (!existing) {
-              map.set(key, { totalW: contribution, name: p.name, footfall: p.weight });
-            } else {
-              const newTotal = existing.totalW + contribution;
-              const dominant = contribution > existing.totalW * 0.7
-                ? { name: p.name, footfall: p.weight }
-                : { name: existing.name, footfall: existing.footfall };
-              map.set(key, { totalW: newTotal, ...dominant });
-            }
-          }
+      // Equal-split across sample points.
+      // Non-retail polygons (Entrance/Circulation) are isolated sources — they
+      // don't accumulate KDE from many surrounding retail edges the way corridor
+      // dots do.  To make their colour proportional to their footfall on the
+      // same scale as busy corridors, we multiply by a boost factor so that an
+      // Entrance with footfall F shows the same heat intensity as a corridor
+      // that borders a retail store with footfall F.
+      //
+      // BOOST = estimated number of retail edge samples that a typical store
+      // contributes near a corridor dot:
+      //   perimeter ~240px, EDGE_SPACING 12 → ~20 samples within 1 corridor.
+      //   Each sample contributes w/20 per unit.  To match, non-retail needs
+      //   the same aggregate, so we scale up by ≈ 20.
+      const NON_RETAIL_BOOST = 20;
+      const wPer = (p.weight / sampledPts.length) * NON_RETAIL_BOOST;
+
+      for (let j = 0; j < sampledPts.length; j += 1)
+        src.push({ x: sampledPts[j].x, y: sampledPts[j].y, weight: wPer, totalWeight: p.weight, name: p.name });
+    }
+
+    return { retailBBoxes: computeBBoxes(retailPolys), nonRetailBBoxes: computeBBoxes(nonRetailPolys), buildingHull: hull, sources: src };
+  }, [points]);
+
+  /* ── STAGE 2 — Walkable dot grid ─────────────────────────────────────
+   *
+   * A cell is walkable iff:
+   *   (a) inside the building convex hull (retail-derived), OR
+   *       inside any non-retail polygon (Entrance/Circulation/Public),
+   *   AND NOT inside any retail store polygon.
+   *
+   * Rule (a) uses OR: this means Entrance/Circulation polygons that sit
+   * slightly outside the retail hull (e.g. entrance vestibules, gate areas)
+   * still get dot-grid coverage and are correctly painted.
+   * External empty space beyond any known polygon is never painted.
+   */
+  const MAX_DOT_CELLS = 80_000;
+
+  const { dotGrid, cellSize } = useMemo(() => {
+    if (buildingHull.length < 3 && nonRetailBBoxes.length === 0) return { dotGrid: [], cellSize: DOT_SPACING };
+
+    // Bounding box that covers both the hull and all non-retail polygons
+    const hullBB = buildingHull.length >= 3 ? makeBBox(buildingHull) : null;
+    let gMinX = hullBB?.minX ?? Infinity;
+    let gMinY = hullBB?.minY ?? Infinity;
+    let gMaxX = hullBB?.maxX ?? -Infinity;
+    let gMaxY = hullBB?.maxY ?? -Infinity;
+    for (const bb of nonRetailBBoxes) {
+      if (bb.minX < gMinX) gMinX = bb.minX;
+      if (bb.minY < gMinY) gMinY = bb.minY;
+      if (bb.maxX > gMaxX) gMaxX = bb.maxX;
+      if (bb.maxY > gMaxY) gMaxY = bb.maxY;
+    }
+
+    let cs = DOT_SPACING;
+    const estW = gMaxX - gMinX;
+    const estH = gMaxY - gMinY;
+    if ((estW / cs) * (estH / cs) > 5_000_000) {
+      cs = Math.ceil(Math.sqrt((estW * estH) / 1_000_000));
+      if (cs < DOT_SPACING) cs = DOT_SPACING;
+    }
+
+    const cols = Math.ceil(estW / cs);
+    const rows = Math.ceil(estH / cs);
+    const grid: { col: number; row: number; px: number; py: number }[] = [];
+
+    for (let col = 0; col < cols; col += 1) {
+      const px = gMinX + (col + 0.5) * cs;
+      for (let row = 0; row < rows; row += 1) {
+        const py = gMinY + (row + 0.5) * cs;
+
+        // Accept if inside the retail hull OR inside a non-retail polygon
+        const inHull = buildingHull.length >= 3 && pointInPolygon(px, py, buildingHull);
+        const inNonRetail = isInsideAny(px, py, nonRetailBBoxes);
+        if (!inHull && !inNonRetail) continue;
+
+        // Exclude store interiors regardless
+        if (isInsideAny(px, py, retailBBoxes)) continue;
+
+        grid.push({ col, row, px, py });
+      }
+    }
+
+    if (grid.length > MAX_DOT_CELLS) {
+      const step = Math.ceil(grid.length / MAX_DOT_CELLS);
+      return { dotGrid: grid.filter((_, idx) => idx % step === 0), cellSize: cs };
+    }
+    return { dotGrid: grid, cellSize: cs };
+  }, [buildingHull, retailBBoxes, nonRetailBBoxes]);
+
+  /* ── STAGE 3 — KDE ────────────────────────────────────────────────────
+   *
+   * KDE(p) = Σ_i  w_i · exp( −‖p − s_i‖² / 2σ² )
+   */
+  const { kdeGrid, maxKDE } = useMemo(() => {
+    if (sources.length === 0 || dotGrid.length === 0)
+      return { kdeGrid: [] as any[], maxKDE: 1 };
+
+    const twoSigmaSq = 2 * SIGMA * SIGMA;
+    const cutoff = 3 * SIGMA;
+    const cutoffSq = cutoff * cutoff;
+
+    const srcBB = sources.map(s => ({
+      s,
+      minX: s.x - cutoff, maxX: s.x + cutoff,
+      minY: s.y - cutoff, maxY: s.y + cutoff,
+    }));
+
+    let globalMax = 0;
+    const result: {
+      col: number; row: number; px: number; py: number;
+      kde: number; nearestName: string; nearestFootfall: number;
+    }[] = [];
+
+    for (let i = 0; i < dotGrid.length; i += 1) {
+      const { col, row, px, py } = dotGrid[i];
+      let kdeVal = 0;
+      let dominantName = '', dominantFootfall = 0, dominantContrib = -1;
+
+      for (let j = 0; j < srcBB.length; j += 1) {
+        const { s, minX, maxX, minY, maxY } = srcBB[j];
+        if (px < minX || px > maxX || py < minY || py > maxY) continue;
+        const dx = px - s.x, dy = py - s.y;
+        const dSq = dx * dx + dy * dy;
+        if (dSq > cutoffSq) continue;
+        const contrib = s.weight * Math.exp(-dSq / twoSigmaSq);
+        kdeVal += contrib;
+        // Track the source whose weighted contribution is highest
+        // (= the store/entrance that most "owns" this dot's colour)
+        if (contrib > dominantContrib) {
+          dominantContrib = contrib;
+          dominantName = s.name;
+          dominantFootfall = s.totalWeight;
         }
       }
-    });
-    return map;
-  }, [filtered, cellSize, COLS, ROWS]);
 
-  // ── 4. Build render list ───────────────────────────────────────────────────
-  const cells = useMemo(() => {
-    const list: { col: number; row: number; w: number; name: string; footfall: number }[] = [];
-    gridMap.forEach((val, key) => {
-      const [c, r] = key.split(',').map(Number);
-      list.push({ col: c, row: r, w: val.totalW, name: val.name, footfall: val.footfall });
-    });
-    return list.sort((a, b) => a.w - b.w);
-  }, [gridMap]);
+      if (kdeVal > 0) {
+        if (kdeVal > globalMax) globalMax = kdeVal;
+        result.push({ col, row, px, py, kde: kdeVal, nearestName: dominantName, nearestFootfall: dominantFootfall });
+      }
+    }
 
-  const maxW = useMemo(() => Math.max(...cells.map(c => c.w), 1), [cells]);
+    return { kdeGrid: result, maxKDE: globalMax || 1 };
+  }, [dotGrid, sources]);
 
-  // ── 5. Debounce hover-leave ────────────────────────────────────────────────
+  /* ── STAGE 4 — Normalise ──────────────────────────────────────────────
+   *
+   * 1. Log-compress  logNorm = ln(1+KDE) / ln(1+maxKDE)
+   * 2. Percentile clamp at PERCENTILE_CLAMP
+   * 3. Power curve with GAMMA
+   */
+  const sortedCells = useMemo(() => {
+    if (kdeGrid.length === 0) return [];
+    const logMax = Math.log1p(maxKDE);
+
+    const withLog = kdeGrid.map(c => ({
+      ...c,
+      logNorm: logMax > 0 ? Math.log1p(c.kde) / logMax : 0,
+    }));
+
+    const vals = withLog.map(c => c.logNorm).sort((a, b) => a - b);
+    const clampIdx = Math.floor(vals.length * PERCENTILE_CLAMP);
+    const clampVal = Math.max(vals[clampIdx] ?? 1, 0.01);
+
+    return withLog
+      .map(c => {
+        const norm = Math.pow(Math.min(c.logNorm / clampVal, 1.0), GAMMA);
+        return { ...c, norm };
+      })
+      .sort((a, b) => a.norm - b.norm);
+  }, [kdeGrid, maxKDE]);
+
+  /* ── STAGE 5 — Render ─────────────────────────────────────────────────
+   *
+   * Goal: dots connect visually in high-traffic corridors while the
+   * background floor plan remains legible everywhere.
+   *
+   * Radius:
+   *   minR = 0.32×cs — cold dots are visible but don't overlap neighbours
+   *   maxR = 0.58×cs — hot dots slightly overlap → form a continuous band
+   *   At DOT_SPACING=10: minR=3.2px, maxR=5.8px (gap closes at ~norm 0.75)
+   *
+   * Opacity: background map lines (store outlines, labels) are always
+   * visible through the heatmap at every heat level.
+   *   norm=0.00 → 0.04 (barely visible — background fully clear)
+   *   norm=0.25 → 0.12 (light tint — store outlines easily readable)
+   *   norm=0.50 → 0.24 (medium tint — floor plan lines still crisp)
+   *   norm=0.75 → 0.35 (warm colour — labels still legible beneath)
+   *   norm=1.00 → 0.44 (peak — vivid colour, background lines visible)
+   *
+   * Formula: 0.04 + norm^0.75 × 0.40
+   *   Lower base (0.04) keeps cold dots nearly invisible.
+   *   Higher exponent (0.75) slows the rise so midrange stays translucent.
+   *   Max opacity capped at 0.44 — background lines always show through.
+   *
+   * Painting order: cold first, hot on top — so hot dots aren't occluded.
+   */
+  const maxR = cellSize * 0.58;
+  const minR = cellSize * 0.32;
+
   const leaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const handleEnter = useCallback(
@@ -384,35 +658,33 @@ export function HeatmapLayer({
     leaveTimer.current = setTimeout(() => { onHoverLeave?.(); leaveTimer.current = null; }, 80);
   }, [onHoverLeave]);
 
-  const dotRadius = cellSize * 0.44;
-  const strokeW   = Math.max(cellSize * 0.05, 0.4);
-
   return (
     <g className="heatmap-layer">
-      {cells.map(cell => {
-        const norm  = cell.w / maxW;
-        const color = heatmapColor(norm);
-        const cx    = (cell.col + 0.5) * cellSize;
-        const cy    = (cell.row + 0.5) * cellSize;
-        const fillOpacity   = 0.55 + 0.45 * norm;
-        const strokeOpacity = 0.15 + 0.25 * norm;
+      {sortedCells.map(cell => {
+        const color = heatmapColor(cell.norm);
+        const radius = minR + (maxR - minR) * cell.norm;
+        // Faint hint at cold end, bold at hot end, never fully opaque
+        const fillOpacity = 0.08 + Math.pow(cell.norm, 0.65) * 0.55;
 
         return (
           <circle
-            key={`${cell.col}-${cell.row}`}
-            cx={cx}
-            cy={cy}
-            r={dotRadius}
+            key={`h-${cell.col}-${cell.row}`}
+            cx={cell.px}
+            cy={cell.py}
+            r={radius}
             fill={color}
             fillOpacity={fillOpacity}
-            stroke="#000"
-            strokeWidth={strokeW}
-            strokeOpacity={strokeOpacity}
+            stroke="none"
+            strokeWidth={0}
             style={{
               pointerEvents: onHoverEnter ? 'auto' : 'none',
               cursor: onHoverEnter ? 'pointer' : 'default',
             }}
-            onMouseEnter={onHoverEnter ? e => handleEnter(cell.name, cell.footfall, cx, cy, e) : undefined}
+            onMouseEnter={
+              onHoverEnter
+                ? e => handleEnter(cell.nearestName, cell.nearestFootfall, cell.px, cell.py, e)
+                : undefined
+            }
             onMouseLeave={onHoverLeave ? handleLeave : undefined}
           />
         );
@@ -421,10 +693,10 @@ export function HeatmapLayer({
   );
 }
 
-/**
- * Heatmap legend bar (horizontal gradient strip with min/max labels).
- * Displayed at top-right, similar to the reference image.
- */
+/* ═══════════════════════════════════════════════════════════════════════════
+ *  HEATMAP LEGEND
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
 export function HeatmapLegend({
   minVal,
   maxVal,
@@ -434,11 +706,12 @@ export function HeatmapLegend({
 }) {
   const gradientId = 'heatmap-legend-gradient';
   const stops = [
-    { offset: '0%',   color: 'rgb(255,220,50)'  }, // warm yellow
-    { offset: '20%',  color: 'rgb(255,160,0)'   }, // amber-orange
-    { offset: '45%',  color: 'rgb(240,60,0)'    }, // deep orange-red
-    { offset: '70%',  color: 'rgb(190,10,30)'   }, // vivid red
-    { offset: '100%', color: 'rgb(100,0,50)'    }, // dark wine
+    { offset: '0%',   color: 'rgb(0,0,180)'   },
+    { offset: '25%',  color: 'rgb(0,200,255)'  },
+    { offset: '50%',  color: 'rgb(0,220,80)'   },
+    { offset: '70%',  color: 'rgb(255,230,0)'  },
+    { offset: '85%',  color: 'rgb(255,100,0)'  },
+    { offset: '100%', color: 'rgb(230,0,0)'    },
   ];
 
   return (
@@ -447,51 +720,49 @@ export function HeatmapLegend({
         position: 'absolute',
         top: 14,
         right: 14,
-        background: 'rgba(255,255,255,0.92)',
-        borderRadius: 6,
-        padding: '8px 12px',
-        boxShadow: '0 2px 8px rgba(0,0,0,0.15)',
+        background: 'rgba(255,255,255,0.97)',
+        borderRadius: 10,
+        padding: '12px 16px 10px',
+        boxShadow: '0 2px 12px rgba(0,0,0,0.15)',
         zIndex: 500,
         display: 'flex',
         flexDirection: 'column',
-        alignItems: 'flex-end',
-        gap: 4,
-        minWidth: 130,
-        border: '1px solid #ddd',
+        alignItems: 'stretch',
+        gap: 6,
+        minWidth: 170,
+        border: '1px solid #e0e0e0',
       }}
     >
-      <svg width={120} height={14}>
+      <div style={{ fontSize: 12, fontWeight: 700, color: '#222', textAlign: 'center', letterSpacing: 0.3 }}>
+        Foot Traffic Concentration
+      </div>
+
+      <svg width={150} height={16}>
         <defs>
           <linearGradient id={gradientId} x1="0%" y1="0%" x2="100%" y2="0%">
             {stops.map(s => (
-              <stop
-                key={s.offset}
-                offset={s.offset}
-                stopColor={s.color}
-              />
+              <stop key={s.offset} offset={s.offset} stopColor={s.color} />
             ))}
           </linearGradient>
         </defs>
-        <rect
-          x={0}
-          y={0}
-          width={120}
-          height={14}
-          fill={`url(#${gradientId})`}
-          rx={3}
-        />
+        <rect x={0} y={0} width={150} height={16} fill={`url(#${gradientId})`} rx={4} />
       </svg>
-      <div
-        style={{
-          display: 'flex',
-          justifyContent: 'space-between',
-          width: '100%',
-          fontSize: 10,
-          color: '#555',
-        }}
-      >
-        <span>{minVal.toLocaleString()}</span>
-        <span>{maxVal.toLocaleString()}</span>
+
+      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, color: '#555', fontWeight: 500 }}>
+        <span>Low ({minVal.toLocaleString()})</span>
+        <span>High ({maxVal.toLocaleString()})</span>
+      </div>
+
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, paddingTop: 5, borderTop: '1px solid #eee' }}>
+        <svg width={108} height={22}>
+          <circle cx={8}   cy={11} r={3.5} fill="rgb(0,0,180)"   opacity={0.15} />
+          <circle cx={26}  cy={11} r={4}   fill="rgb(0,200,255)" opacity={0.35} />
+          <circle cx={46}  cy={11} r={4.5} fill="rgb(0,220,80)"  opacity={0.52} />
+          <circle cx={66}  cy={11} r={5}   fill="rgb(255,230,0)" opacity={0.68} />
+          <circle cx={85}  cy={11} r={5.5} fill="rgb(255,100,0)" opacity={0.80} />
+          <circle cx={103} cy={11} r={6}   fill="rgb(230,0,0)"   opacity={0.90} />
+        </svg>
+        <span style={{ fontSize: 9, color: '#777', fontWeight: 500 }}>density →</span>
       </div>
     </div>
   );

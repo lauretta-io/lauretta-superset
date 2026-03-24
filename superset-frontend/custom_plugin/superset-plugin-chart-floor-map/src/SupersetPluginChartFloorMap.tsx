@@ -765,26 +765,30 @@ export default function SupersetPluginChartFloorMap(
     return maxByLayer;
   }, [data, layerFilters]);
 
-  // Build heatmap points from polygon centroids
+  // Build heatmap points from ALL data rows.
+  // The new HeatmapLayer needs complete polygon data for negative-space walkable
+  // area detection. Items with rawPoints are included even when centroid is null
+  // (their polygons are used as obstacles in Point-in-Polygon testing).
   const heatmapPoints = React.useMemo(() => {
     if (!data || !Array.isArray(data)) return [];
 
     const rawPts = data
       .map((item: any) => {
-        const centroid = computeCentroid(item.points || '');
-        if (!centroid) return null;
-        const area = computePolygonArea(item.points || '');
+        const pointsStr = item.points || '';
+        const centroid = computeCentroid(pointsStr);
+        const area = computePolygonArea(pointsStr);
         return {
-          x: centroid.x,
-          y: centroid.y,
+          x: centroid?.x ?? 0,
+          y: centroid?.y ?? 0,
           weight: item.total_footfall_zo || 0,
           name: item.name || 'Unknown',
           category: item.category || '',
           polygonArea: area,
-          rawPoints: item.points || '',
+          rawPoints: pointsStr,
         };
       })
-      .filter(Boolean) as {
+      // Keep all items that have polygon data (needed for obstacle detection)
+      .filter(p => p.rawPoints && p.rawPoints !== 'null' && p.rawPoints !== '') as {
       x: number;
       y: number;
       weight: number;
