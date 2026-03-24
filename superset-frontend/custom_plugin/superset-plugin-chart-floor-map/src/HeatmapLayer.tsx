@@ -16,7 +16,7 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import React, { useMemo, useRef, useCallback } from 'react';
+import React, { useMemo } from 'react';
 
 /* ═══════════════════════════════════════════════════════════════════════════
  *  FLOOR-PLAN CONCENTRATION HEATMAP
@@ -71,7 +71,7 @@ interface HeatmapLayerProps {
 interface FootfallSource {
   x: number;
   y: number;
-  weight: number;      // per-sample KDE weight (arc/area normalised)
+  weight: number; // per-sample KDE weight (arc/area normalised)
   totalWeight: number; // original store/polygon footfall (for tooltip display)
   name: string;
 }
@@ -135,10 +135,7 @@ function pointInPolygon(
   for (let i = 0, j = n - 1; i < n; j = i, i += 1) {
     const { x: xi, y: yi } = pts[i];
     const { x: xj, y: yj } = pts[j];
-    if (
-      yi > py !== yj > py &&
-      px < ((xj - xi) * (py - yi)) / (yj - yi) + xi
-    ) {
+    if (yi > py !== yj > py && px < ((xj - xi) * (py - yi)) / (yj - yi) + xi) {
       inside = !inside;
     }
   }
@@ -156,7 +153,10 @@ interface BBox {
 }
 
 function makeBBox(pts: { x: number; y: number }[]): BBox {
-  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  let minX = Infinity,
+    maxX = -Infinity,
+    minY = Infinity,
+    maxY = -Infinity;
   for (let i = 0; i < pts.length; i += 1) {
     if (pts[i].x < minX) minX = pts[i].x;
     if (pts[i].x > maxX) maxX = pts[i].x;
@@ -185,21 +185,34 @@ function getCategoryLayer(category: string | undefined | null): string {
   if (!category) return 'Retail';
   const cat = category.toLowerCase().trim();
   if (
-    cat.includes('entrance') || cat.includes('gate') ||
-    cat.includes('door') || cat.includes('entry')
-  ) return 'Entrances';
+    cat.includes('entrance') ||
+    cat.includes('gate') ||
+    cat.includes('door') ||
+    cat.includes('entry')
+  )
+    return 'Entrances';
   if (
-    cat.includes('circulation') || cat.includes('corridor') ||
-    cat.includes('walkway') || cat.includes('hallway') ||
-    cat.includes('lift') || cat.includes('elevator') ||
-    cat.includes('escalator') || cat.includes('stair')
-  ) return 'Circulation';
+    cat.includes('circulation') ||
+    cat.includes('corridor') ||
+    cat.includes('walkway') ||
+    cat.includes('hallway') ||
+    cat.includes('lift') ||
+    cat.includes('elevator') ||
+    cat.includes('escalator') ||
+    cat.includes('stair')
+  )
+    return 'Circulation';
   if (
-    cat.includes('public') || cat.includes('common') ||
-    cat.includes('amenity') || cat.includes('toilet') ||
-    cat.includes('restroom') || cat.includes('prayer') ||
-    cat.includes('atm') || cat.includes('info')
-  ) return 'Public';
+    cat.includes('public') ||
+    cat.includes('common') ||
+    cat.includes('amenity') ||
+    cat.includes('toilet') ||
+    cat.includes('restroom') ||
+    cat.includes('prayer') ||
+    cat.includes('atm') ||
+    cat.includes('info')
+  )
+    return 'Public';
   return 'Retail';
 }
 
@@ -213,19 +226,27 @@ function cross(
   return (A.x - O.x) * (B.y - O.y) - (A.y - O.y) * (B.x - O.x);
 }
 
-function convexHull(inputPts: { x: number; y: number }[]): { x: number; y: number }[] {
+function convexHull(
+  inputPts: { x: number; y: number }[],
+): { x: number; y: number }[] {
   if (inputPts.length < 3) return inputPts.slice();
   const pts = inputPts.slice().sort((a, b) => a.x - b.x || a.y - b.y);
   const n = pts.length;
   const hull: { x: number; y: number }[] = [];
   for (let i = 0; i < n; i += 1) {
-    while (hull.length >= 2 && cross(hull[hull.length - 2], hull[hull.length - 1], pts[i]) <= 0)
+    while (
+      hull.length >= 2 &&
+      cross(hull[hull.length - 2], hull[hull.length - 1], pts[i]) <= 0
+    )
       hull.pop();
     hull.push(pts[i]);
   }
   const lower = hull.length + 1;
   for (let i = n - 2; i >= 0; i -= 1) {
-    while (hull.length >= lower && cross(hull[hull.length - 2], hull[hull.length - 1], pts[i]) <= 0)
+    while (
+      hull.length >= lower &&
+      cross(hull[hull.length - 2], hull[hull.length - 1], pts[i]) <= 0
+    )
       hull.pop();
     hull.push(pts[i]);
   }
@@ -259,18 +280,19 @@ function sampleInterior(
  */
 function heatmapColor(t: number): string {
   const stops = [
-    { p: 0.00, r:   0, g:   0, b: 180 },
-    { p: 0.25, r:   0, g: 200, b: 255 },
-    { p: 0.50, r:   0, g: 220, b:  80 },
-    { p: 0.70, r: 255, g: 230, b:   0 },
-    { p: 0.85, r: 255, g: 100, b:   0 },
-    { p: 1.00, r: 230, g:   0, b:   0 },
+    { p: 0.0, r: 0, g: 0, b: 180 },
+    { p: 0.25, r: 0, g: 200, b: 255 },
+    { p: 0.5, r: 0, g: 220, b: 80 },
+    { p: 0.7, r: 255, g: 230, b: 0 },
+    { p: 0.85, r: 255, g: 100, b: 0 },
+    { p: 1.0, r: 230, g: 0, b: 0 },
   ];
   let lo = stops[0];
   let hi = stops[stops.length - 1];
   for (let i = 0; i < stops.length - 1; i += 1) {
     if (t >= stops[i].p && t <= stops[i + 1].p) {
-      lo = stops[i]; hi = stops[i + 1];
+      lo = stops[i];
+      hi = stops[i + 1];
       break;
     }
   }
@@ -291,22 +313,35 @@ export function HeatmapLayer({
   onHoverEnter,
   onHoverLeave,
 }: HeatmapLayerProps) {
-
   /* ─────────────────────────────────────────────────────────────────────
    *  TUNING PARAMETERS
    *
-   *  DOT_SPACING      — visual dot grid step (SVG units). 10 = fine grid.
+   *  DOT_SPACING      — visual dot grid step (SVG units). Adaptive based on
+   *                     map dimensions. Larger maps still increase spacing,
+   *                     but with a cap so density does not become too sparse.
+   *                     Target ~24000 dots with safety cap.
    *  SIGMA            — KDE bandwidth: heat decays to ~14% at distance σ.
    *  INTERIOR_SPACING — sample interval inside ALL polygons (Retail +
    *                     Entrance/Circulation/Public).
    *  PERCENTILE_CLAMP — top (1-p)% cells clamp to max colour.
    *  GAMMA            — power-curve for contrast.  1.2 keeps midtones warm.
    * ───────────────────────────────────────────────────────────────────── */
-  const DOT_SPACING       = 10;
-  const SIGMA             = 28;
-  const INTERIOR_SPACING  = 16;
-  const PERCENTILE_CLAMP  = 0.88;
-  const GAMMA             = 1.2;
+
+  // Adaptive DOT_SPACING:
+  // - More target cells than before, so large maps keep better continuity.
+  // - Capped max spacing to avoid sparse/separated blobs on huge images.
+  const minDotSpacing = 7;
+  const maxDotSpacing = 26;
+  const targetDotCount = 24000;
+  const adaptiveDotSpacing = Math.min(
+    maxDotSpacing,
+    Math.max(minDotSpacing, Math.sqrt((imgW * imgH) / targetDotCount)),
+  );
+
+  const SIGMA = 28;
+  const INTERIOR_SPACING = 16;
+  const PERCENTILE_CLAMP = 0.88;
+  const GAMMA = 1.2;
 
   /* ── STAGE 1 — Classify & build heat sources ─────────────────────────
    *
@@ -318,48 +353,61 @@ export function HeatmapLayer({
    * BUILDING HULL: still built from Retail vertices only, used to define
    * the dot-grid coverage area (corridor + store interiors).
    */
-  const { retailBBoxes, nonRetailBBoxes, buildingHull, sources } = useMemo(() => {
-    const retailPolys:    { x: number; y: number }[][] = [];
-    const retailVertices: { x: number; y: number }[]  = [];  // hull built from these only
-    const src: FootfallSource[] = [];
+  const { retailBBoxes, nonRetailBBoxes, buildingHull, sources } =
+    useMemo(() => {
+      const retailPolys: { x: number; y: number }[][] = [];
+      const retailVertices: { x: number; y: number }[] = []; // hull built from these only
+      const src: FootfallSource[] = [];
 
-    const nonRetailPolys: { x: number; y: number }[][] = [];
+      const nonRetailPolys: { x: number; y: number }[][] = [];
 
-    for (let i = 0; i < points.length; i += 1) {
-      const p = points[i];
-      if (!p.rawPoints) continue;
-      const pts = parsePolygonPoints(p.rawPoints);
-      if (pts.length < 3) continue;
+      for (let i = 0; i < points.length; i += 1) {
+        const p = points[i];
+        if (!p.rawPoints) continue;
+        const pts = parsePolygonPoints(p.rawPoints);
+        if (pts.length < 3) continue;
 
-      const layer = getCategoryLayer(p.category);
+        const layer = getCategoryLayer(p.category);
 
-      if (layer === 'Retail') {
-        retailPolys.push(pts);
-        for (let v = 0; v < pts.length; v += 1) retailVertices.push(pts[v]);
-      } else {
-        nonRetailPolys.push(pts);
+        if (layer === 'Retail') {
+          retailPolys.push(pts);
+          for (let v = 0; v < pts.length; v += 1) retailVertices.push(pts[v]);
+        } else {
+          nonRetailPolys.push(pts);
+        }
+
+        // ALL polygons (Retail + Entrance/Circulation/Public) contribute heat
+        // from their interiors, weighted by footfall.  Interior sampling gives
+        // each polygon a heat field proportional to its footfall — high-footfall
+        // stores show as warm/hot blobs, low-footfall stores stay cool.
+        if (p.weight > 0) {
+          const cx = pts.reduce((s, q) => s + q.x, 0) / pts.length;
+          const cy = pts.reduce((s, q) => s + q.y, 0) / pts.length;
+          const interiorPts = sampleInterior(pts, INTERIOR_SPACING);
+          const sampledPts =
+            interiorPts.length > 0 ? interiorPts : [{ x: cx, y: cy }];
+          const wPer = p.weight / sampledPts.length;
+          for (let j = 0; j < sampledPts.length; j += 1)
+            src.push({
+              x: sampledPts[j].x,
+              y: sampledPts[j].y,
+              weight: wPer,
+              totalWeight: p.weight,
+              name: p.name,
+            });
+        }
       }
 
-      // ALL polygons (Retail + Entrance/Circulation/Public) contribute heat
-      // from their interiors, weighted by footfall.  Interior sampling gives
-      // each polygon a heat field proportional to its footfall — high-footfall
-      // stores show as warm/hot blobs, low-footfall stores stay cool.
-      if (p.weight > 0) {
-        const cx = pts.reduce((s, q) => s + q.x, 0) / pts.length;
-        const cy = pts.reduce((s, q) => s + q.y, 0) / pts.length;
-        const interiorPts = sampleInterior(pts, INTERIOR_SPACING);
-        const sampledPts = interiorPts.length > 0 ? interiorPts : [{ x: cx, y: cy }];
-        const wPer = p.weight / sampledPts.length;
-        for (let j = 0; j < sampledPts.length; j += 1)
-          src.push({ x: sampledPts[j].x, y: sampledPts[j].y, weight: wPer, totalWeight: p.weight, name: p.name });
-      }
-    }
+      // Build hull from retail vertices only → tight around the building footprint
+      const hull = retailVertices.length >= 3 ? convexHull(retailVertices) : [];
 
-    // Build hull from retail vertices only → tight around the building footprint
-    const hull = retailVertices.length >= 3 ? convexHull(retailVertices) : [];
-
-    return { retailBBoxes: computeBBoxes(retailPolys), nonRetailBBoxes: computeBBoxes(nonRetailPolys), buildingHull: hull, sources: src };
-  }, [points]);
+      return {
+        retailBBoxes: computeBBoxes(retailPolys),
+        nonRetailBBoxes: computeBBoxes(nonRetailPolys),
+        buildingHull: hull,
+        sources: src,
+      };
+    }, [points]);
 
   /* ── STAGE 2 — Walkable dot grid ─────────────────────────────────────
    *
@@ -376,7 +424,8 @@ export function HeatmapLayer({
   const MAX_DOT_CELLS = 80_000;
 
   const { dotGrid, cellSize } = useMemo(() => {
-    if (buildingHull.length < 3 && nonRetailBBoxes.length === 0) return { dotGrid: [], cellSize: DOT_SPACING };
+    if (buildingHull.length < 3 && nonRetailBBoxes.length === 0)
+      return { dotGrid: [], cellSize: adaptiveDotSpacing };
 
     // Bounding box that covers both the hull and all non-retail polygons
     const hullBB = buildingHull.length >= 3 ? makeBBox(buildingHull) : null;
@@ -391,12 +440,15 @@ export function HeatmapLayer({
       if (bb.maxY > gMaxY) gMaxY = bb.maxY;
     }
 
-    let cs = DOT_SPACING;
+    // Use adaptive spacing right from the start, then adjust upward if still too many dots
+    let cs = adaptiveDotSpacing;
     const estW = gMaxX - gMinX;
     const estH = gMaxY - gMinY;
-    if ((estW / cs) * (estH / cs) > 5_000_000) {
-      cs = Math.ceil(Math.sqrt((estW * estH) / 1_000_000));
-      if (cs < DOT_SPACING) cs = DOT_SPACING;
+
+    // If even with adaptive spacing we'd get too many cells, increase spacing further
+    const estCellCount = (estW / cs) * (estH / cs);
+    if (estCellCount > MAX_DOT_CELLS * 1.2) {
+      cs = Math.ceil(Math.sqrt((estW * estH) / (MAX_DOT_CELLS * 0.9)));
     }
 
     const cols = Math.ceil(estW / cs);
@@ -409,7 +461,8 @@ export function HeatmapLayer({
         const py = gMinY + (row + 0.5) * cs;
 
         // Accept if inside the retail hull OR inside a non-retail polygon
-        const inHull = buildingHull.length >= 3 && pointInPolygon(px, py, buildingHull);
+        const inHull =
+          buildingHull.length >= 3 && pointInPolygon(px, py, buildingHull);
         const inNonRetail = isInsideAny(px, py, nonRetailBBoxes);
         if (!inHull && !inNonRetail) continue;
 
@@ -419,10 +472,13 @@ export function HeatmapLayer({
 
     if (grid.length > MAX_DOT_CELLS) {
       const step = Math.ceil(grid.length / MAX_DOT_CELLS);
-      return { dotGrid: grid.filter((_, idx) => idx % step === 0), cellSize: cs };
+      return {
+        dotGrid: grid.filter((_, idx) => idx % step === 0),
+        cellSize: cs,
+      };
     }
     return { dotGrid: grid, cellSize: cs };
-  }, [buildingHull, retailBBoxes, nonRetailBBoxes]);
+  }, [buildingHull, retailBBoxes, nonRetailBBoxes, adaptiveDotSpacing]);
 
   /* ── STAGE 3 — KDE ────────────────────────────────────────────────────
    *
@@ -438,25 +494,35 @@ export function HeatmapLayer({
 
     const srcBB = sources.map(s => ({
       s,
-      minX: s.x - cutoff, maxX: s.x + cutoff,
-      minY: s.y - cutoff, maxY: s.y + cutoff,
+      minX: s.x - cutoff,
+      maxX: s.x + cutoff,
+      minY: s.y - cutoff,
+      maxY: s.y + cutoff,
     }));
 
     let globalMax = 0;
     const result: {
-      col: number; row: number; px: number; py: number;
-      kde: number; nearestName: string; nearestFootfall: number;
+      col: number;
+      row: number;
+      px: number;
+      py: number;
+      kde: number;
+      nearestName: string;
+      nearestFootfall: number;
     }[] = [];
 
     for (let i = 0; i < dotGrid.length; i += 1) {
       const { col, row, px, py } = dotGrid[i];
       let kdeVal = 0;
-      let dominantName = '', dominantFootfall = 0, dominantContrib = -1;
+      let dominantName = '',
+        dominantFootfall = 0,
+        dominantContrib = -1;
 
       for (let j = 0; j < srcBB.length; j += 1) {
         const { s, minX, maxX, minY, maxY } = srcBB[j];
         if (px < minX || px > maxX || py < minY || py > maxY) continue;
-        const dx = px - s.x, dy = py - s.y;
+        const dx = px - s.x,
+          dy = py - s.y;
         const dSq = dx * dx + dy * dy;
         if (dSq > cutoffSq) continue;
         const contrib = s.weight * Math.exp(-dSq / twoSigmaSq);
@@ -472,7 +538,15 @@ export function HeatmapLayer({
 
       if (kdeVal > 0) {
         if (kdeVal > globalMax) globalMax = kdeVal;
-        result.push({ col, row, px, py, kde: kdeVal, nearestName: dominantName, nearestFootfall: dominantFootfall });
+        result.push({
+          col,
+          row,
+          px,
+          py,
+          kde: kdeVal,
+          nearestName: dominantName,
+          nearestFootfall: dominantFootfall,
+        });
       }
     }
 
@@ -512,41 +586,29 @@ export function HeatmapLayer({
    * background floor plan remains legible everywhere.
    *
    * Radius:
-   *   minR = 0.32×cs — cold dots are visible but don't overlap neighbours
-   *   maxR = 0.58×cs — hot dots slightly overlap → form a continuous band
-   *   At DOT_SPACING=10: minR=3.2px, maxR=5.8px (gap closes at ~norm 0.75)
+   *   minR = 0.28×cs — slightly smaller cold dots reduce visual crowding
+   *   maxR = 0.52×cs — hot dots still connect, with less over-expansion
+   *   cellSize (cs) is adaptive based on map size. Larger maps → larger dots.
+   *   Example: For 500×500 map, cs≈7 (minR=2.0px, maxR=3.6px);
+   *            For 5700×3800 map, cs≈26 (minR=7.3px, maxR=13.5px)
    *
    * Opacity: background map lines (store outlines, labels) are always
    * visible through the heatmap at every heat level.
-   *   norm=0.00 → 0.04 (barely visible — background fully clear)
-   *   norm=0.25 → 0.12 (light tint — store outlines easily readable)
-   *   norm=0.50 → 0.24 (medium tint — floor plan lines still crisp)
-   *   norm=0.75 → 0.35 (warm colour — labels still legible beneath)
-   *   norm=1.00 → 0.44 (peak — vivid colour, background lines visible)
+   *   norm=0.00 → 0.08 (barely visible — background fully clear)
+   *   norm=0.25 → ~0.30 (light tint — store outlines easily readable)
+   *   norm=0.50 → ~0.39 (medium tint — floor plan lines still legible)
+   *   norm=0.75 → ~0.45 (warm colour — labels visible beneath)
+   *   norm=1.00 → 0.63 (peak — vivid colour, good background contrast)
    *
-   * Formula: 0.04 + norm^0.75 × 0.40
-   *   Lower base (0.04) keeps cold dots nearly invisible.
-   *   Higher exponent (0.75) slows the rise so midrange stays translucent.
-   *   Max opacity capped at 0.44 — background lines always show through.
+   * Formula: 0.08 + norm^0.65 × 0.55
+   *   Lower base (0.08) keeps cold dots visible but subtle.
+   *   Exponent (0.65) creates smooth rise for good contrast.
+   *   Max opacity at 0.63 — strong visual impact while maintaining readability.
    *
    * Painting order: cold first, hot on top — so hot dots aren't occluded.
    */
-  const maxR = cellSize * 0.58;
-  const minR = cellSize * 0.32;
-
-  const leaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const handleEnter = useCallback(
-    (name: string, footfall: number, cx: number, cy: number, e: React.MouseEvent<SVGCircleElement>) => {
-      if (leaveTimer.current) { clearTimeout(leaveTimer.current); leaveTimer.current = null; }
-      onHoverEnter?.(name, footfall, cx, cy, e);
-    },
-    [onHoverEnter],
-  );
-
-  const handleLeave = useCallback(() => {
-    leaveTimer.current = setTimeout(() => { onHoverLeave?.(); leaveTimer.current = null; }, 80);
-  }, [onHoverLeave]);
+  const maxR = cellSize * 0.52;
+  const minR = cellSize * 0.28;
 
   return (
     <g className="heatmap-layer">
@@ -566,16 +628,6 @@ export function HeatmapLayer({
             fillOpacity={fillOpacity}
             stroke="none"
             strokeWidth={0}
-            style={{
-              pointerEvents: onHoverEnter ? 'auto' : 'none',
-              cursor: onHoverEnter ? 'pointer' : 'default',
-            }}
-            onMouseEnter={
-              onHoverEnter
-                ? e => handleEnter(cell.nearestName, cell.nearestFootfall, cell.px, cell.py, e)
-                : undefined
-            }
-            onMouseLeave={onHoverLeave ? handleLeave : undefined}
           />
         );
       })}
@@ -596,12 +648,12 @@ export function HeatmapLegend({
 }) {
   const gradientId = 'heatmap-legend-gradient';
   const stops = [
-    { offset: '0%',   color: 'rgb(0,0,180)'   },
-    { offset: '25%',  color: 'rgb(0,200,255)'  },
-    { offset: '50%',  color: 'rgb(0,220,80)'   },
-    { offset: '70%',  color: 'rgb(255,230,0)'  },
-    { offset: '85%',  color: 'rgb(255,100,0)'  },
-    { offset: '100%', color: 'rgb(230,0,0)'    },
+    { offset: '0%', color: 'rgb(0,0,180)' },
+    { offset: '25%', color: 'rgb(0,200,255)' },
+    { offset: '50%', color: 'rgb(0,220,80)' },
+    { offset: '70%', color: 'rgb(255,230,0)' },
+    { offset: '85%', color: 'rgb(255,100,0)' },
+    { offset: '100%', color: 'rgb(230,0,0)' },
   ];
 
   return (
@@ -623,7 +675,15 @@ export function HeatmapLegend({
         border: '1px solid #e0e0e0',
       }}
     >
-      <div style={{ fontSize: 12, fontWeight: 700, color: '#222', textAlign: 'center', letterSpacing: 0.3 }}>
+      <div
+        style={{
+          fontSize: 12,
+          fontWeight: 700,
+          color: '#222',
+          textAlign: 'center',
+          letterSpacing: 0.3,
+        }}
+      >
         Foot Traffic Concentration
       </div>
 
@@ -635,24 +695,50 @@ export function HeatmapLegend({
             ))}
           </linearGradient>
         </defs>
-        <rect x={0} y={0} width={150} height={16} fill={`url(#${gradientId})`} rx={4} />
+        <rect
+          x={0}
+          y={0}
+          width={150}
+          height={16}
+          fill={`url(#${gradientId})`}
+          rx={4}
+        />
       </svg>
 
-      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, color: '#555', fontWeight: 500 }}>
+      <div
+        style={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          fontSize: 10,
+          color: '#555',
+          fontWeight: 500,
+        }}
+      >
         <span>Low ({minVal.toLocaleString()})</span>
         <span>High ({maxVal.toLocaleString()})</span>
       </div>
 
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, paddingTop: 5, borderTop: '1px solid #eee' }}>
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          gap: 6,
+          paddingTop: 5,
+          borderTop: '1px solid #eee',
+        }}
+      >
         <svg width={108} height={22}>
-          <circle cx={8}   cy={11} r={3.5} fill="rgb(0,0,180)"   opacity={0.15} />
-          <circle cx={26}  cy={11} r={4}   fill="rgb(0,200,255)" opacity={0.35} />
-          <circle cx={46}  cy={11} r={4.5} fill="rgb(0,220,80)"  opacity={0.52} />
-          <circle cx={66}  cy={11} r={5}   fill="rgb(255,230,0)" opacity={0.68} />
-          <circle cx={85}  cy={11} r={5.5} fill="rgb(255,100,0)" opacity={0.80} />
-          <circle cx={103} cy={11} r={6}   fill="rgb(230,0,0)"   opacity={0.90} />
+          <circle cx={8} cy={11} r={3.5} fill="rgb(0,0,180)" opacity={0.15} />
+          <circle cx={26} cy={11} r={4} fill="rgb(0,200,255)" opacity={0.35} />
+          <circle cx={46} cy={11} r={4.5} fill="rgb(0,220,80)" opacity={0.52} />
+          <circle cx={66} cy={11} r={5} fill="rgb(255,230,0)" opacity={0.68} />
+          <circle cx={85} cy={11} r={5.5} fill="rgb(255,100,0)" opacity={0.8} />
+          <circle cx={103} cy={11} r={6} fill="rgb(230,0,0)" opacity={0.9} />
         </svg>
-        <span style={{ fontSize: 9, color: '#777', fontWeight: 500 }}>density →</span>
+        <span style={{ fontSize: 9, color: '#777', fontWeight: 500 }}>
+          density →
+        </span>
       </div>
     </div>
   );

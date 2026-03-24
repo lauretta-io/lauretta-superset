@@ -579,13 +579,19 @@ export default function SupersetPluginChartFloorMap(
   const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc');
   const [selectedItemName, setSelectedItemName] = useState<string | null>(null);
   // Separate filter states for each view mode
-  const [polygonLayerFilters, setPolygonLayerFilters] = useState<string[]>(['Retail']);
-  const [heatmapLayerFilters, setHeatmapLayerFilters] = useState<string[]>(ALL_LAYERS);
+  const [polygonLayerFilters, setPolygonLayerFilters] = useState<string[]>([
+    'Retail',
+  ]);
+  const [heatmapLayerFilters, setHeatmapLayerFilters] =
+    useState<string[]>(ALL_LAYERS);
 
   // Active filters depend on current view mode
-  const layerFilters = viewMode === 'heatmap' ? heatmapLayerFilters : polygonLayerFilters;
+  const layerFilters =
+    viewMode === 'heatmap' ? heatmapLayerFilters : polygonLayerFilters;
   // Heatmap hover state
-  const [heatmapHoveredName, setHeatmapHoveredName] = useState<string | null>(null);
+  const [heatmapHoveredName, setHeatmapHoveredName] = useState<string | null>(
+    null,
+  );
   const [heatmapTooltipPos, setHeatmapTooltipPos] = useState({ x: 0, y: 0 });
   const [isFilterLoading, setIsFilterLoading] = useState(false);
   const [floorsData, setFloorsData] = useState<
@@ -778,7 +784,9 @@ export default function SupersetPluginChartFloorMap(
         };
       })
       // Keep all items that have polygon data (needed for obstacle detection)
-      .filter(p => p.rawPoints && p.rawPoints !== 'null' && p.rawPoints !== '') as {
+      .filter(
+        p => p.rawPoints && p.rawPoints !== 'null' && p.rawPoints !== '',
+      ) as {
       x: number;
       y: number;
       weight: number;
@@ -840,7 +848,8 @@ export default function SupersetPluginChartFloorMap(
   // Works for both polygon and heatmap modes independently
   const handleLayerChange = (layer: string) => {
     setIsFilterLoading(true);
-    const setter = viewMode === 'heatmap' ? setHeatmapLayerFilters : setPolygonLayerFilters;
+    const setter =
+      viewMode === 'heatmap' ? setHeatmapLayerFilters : setPolygonLayerFilters;
     setter((prev: string[]) => {
       if (prev.includes(layer)) {
         return prev.filter((l: string) => l !== layer);
@@ -911,7 +920,9 @@ export default function SupersetPluginChartFloorMap(
       ? data.find((item: any) => item.name === selectedItemName)
       : null;
 
-  const showStorePanel = isFullScreen && uniqueItems.length > 0;
+  // Show store panel only in fullscreen, when there are items, and NOT in heatmap mode
+  const showStorePanel =
+    isFullScreen && uniqueItems.length > 0 && viewMode !== 'heatmap';
 
   // Calculate tooltip position for selected item
   const [selectedTooltipPos, setSelectedTooltipPos] = useState({ x: 0, y: 0 });
@@ -1071,7 +1082,6 @@ export default function SupersetPluginChartFloorMap(
         )}
 
         <div className="map-panel" ref={mapPanelRef}>
-          {/* View mode toggle: Polygon ↔ Heatmap */}
           <ViewToggle>
             <button
               type="button"
@@ -1159,7 +1169,9 @@ export default function SupersetPluginChartFloorMap(
                     const parentRect =
                       mapPanelRef.current?.getBoundingClientRect();
                     if (parentRect) {
-                      const rect = (e.target as SVGCircleElement).getBoundingClientRect();
+                      const rect = (
+                        e.target as SVGCircleElement
+                      ).getBoundingClientRect();
                       setHeatmapTooltipPos({
                         x: rect.left - parentRect.left + rect.width / 2,
                         y: rect.top - parentRect.top,
@@ -1174,57 +1186,37 @@ export default function SupersetPluginChartFloorMap(
           </ZoomPanWrapper>
 
           {/* Show tooltip for hovered item (polygon mode only) */}
-          {viewMode === 'polygon' && displayedItem && hoveredItemName !== null && (
-            <TooltipBox isVisible={true} x={tooltipPos.x} y={tooltipPos.y}>
-              <div className="store-name">{displayedItem.name}</div>
-              {displayedItem.category && (
-                <div className="category-section">
-                  <div className="category-label">Category</div>
-                  <div className="category-name">{displayedItem.category}</div>
-                </div>
-              )}
-              {displayedItem.total_footfall_zo !== undefined &&
-                displayedItem.total_footfall_zo !== null && (
-                  <div className="footfall-section">
-                    <div className="footfall-label">Footfall</div>
-                    <div
-                      className="footfall-value"
-                      style={{
-                        color: 'black',
-                      }}
-                    >
-                      {(
-                        displayedItem.total_footfall_zo as number
-                      ).toLocaleString()}
+          {viewMode === 'polygon' &&
+            displayedItem &&
+            hoveredItemName !== null && (
+              <TooltipBox isVisible={true} x={tooltipPos.x} y={tooltipPos.y}>
+                <div className="store-name">{displayedItem.name}</div>
+                {displayedItem.category && (
+                  <div className="category-section">
+                    <div className="category-label">Category</div>
+                    <div className="category-name">
+                      {displayedItem.category}
                     </div>
                   </div>
                 )}
-            </TooltipBox>
-          )}
-
-          {/* Heatmap hover tooltip */}
-          {viewMode === 'heatmap' && heatmapHoveredName && (() => {
-            const item = data && Array.isArray(data)
-              ? (data as any[]).find(d => d.name === heatmapHoveredName)
-              : null;
-            return (
-              <TooltipBox isVisible={true} x={heatmapTooltipPos.x} y={heatmapTooltipPos.y}>
-                <div className="store-name">{heatmapHoveredName}</div>
-                {item?.category && (
-                  <div className="category-section">
-                    <div className="category-label">Category</div>
-                    <div className="category-name">{item.category}</div>
-                  </div>
-                )}
-                <div className="footfall-section">
-                  <div className="footfall-label">Footfall</div>
-                  <div className="footfall-value" style={{ color: 'black' }}>
-                    {(item?.total_footfall_zo as number ?? 0).toLocaleString()}
-                  </div>
-                </div>
+                {displayedItem.total_footfall_zo !== undefined &&
+                  displayedItem.total_footfall_zo !== null && (
+                    <div className="footfall-section">
+                      <div className="footfall-label">Footfall</div>
+                      <div
+                        className="footfall-value"
+                        style={{
+                          color: 'black',
+                        }}
+                      >
+                        {(
+                          displayedItem.total_footfall_zo as number
+                        ).toLocaleString()}
+                      </div>
+                    </div>
+                  )}
               </TooltipBox>
-            );
-          })()}
+            )}
 
           {/* Show tooltip for selected item (polygon mode only) */}
           {viewMode === 'polygon' && selectedItemData && !hoveredItemName && (
@@ -1261,8 +1253,8 @@ export default function SupersetPluginChartFloorMap(
             </TooltipBox>
           )}
 
-          {/* Heatmap legend (always visible in heatmap mode) */}
-          {viewMode === 'heatmap' && (
+          {/* Heatmap legend (fullscreen + heatmap mode only) */}
+          {viewMode === 'heatmap' && isFullScreen && (
             <HeatmapLegend
               minVal={heatmapMinFootfall}
               maxVal={heatmapMaxFootfall}
@@ -1270,39 +1262,41 @@ export default function SupersetPluginChartFloorMap(
           )}
 
           {/* Color Legend (polygon mode only) */}
-          {viewMode === 'polygon' && isFullScreen && layerFilters.length > 0 && (
-            <ColorLegend>
-              {layerFilters.map(layer => {
-                const maxVal = maxFootfallByLayer[layer] || 0;
-                const bins = getColorBins(maxVal, layer);
-                return (
-                  <div key={layer} className="layer-legend">
-                    <div className="layer-name">{layer}</div>
-                    <div className="color-bins">
-                      <div className="color-row">
-                        <div className="no-data-box"></div>
-                        {bins.map((bin, idx) => (
-                          <div
-                            key={idx}
-                            className="color-box"
-                            style={{ backgroundColor: bin.color }}
-                          ></div>
-                        ))}
-                      </div>
-                      <div className="labels-row">
-                        <span className="bin-label">0</span>
-                        {bins.map((bin, idx) => (
-                          <span key={idx} className="bin-label">
-                            {bin.label}
-                          </span>
-                        ))}
+          {viewMode === 'polygon' &&
+            isFullScreen &&
+            layerFilters.length > 0 && (
+              <ColorLegend>
+                {layerFilters.map(layer => {
+                  const maxVal = maxFootfallByLayer[layer] || 0;
+                  const bins = getColorBins(maxVal, layer);
+                  return (
+                    <div key={layer} className="layer-legend">
+                      <div className="layer-name">{layer}</div>
+                      <div className="color-bins">
+                        <div className="color-row">
+                          <div className="no-data-box"></div>
+                          {bins.map((bin, idx) => (
+                            <div
+                              key={idx}
+                              className="color-box"
+                              style={{ backgroundColor: bin.color }}
+                            ></div>
+                          ))}
+                        </div>
+                        <div className="labels-row">
+                          <span className="bin-label">0</span>
+                          {bins.map((bin, idx) => (
+                            <span key={idx} className="bin-label">
+                              {bin.label}
+                            </span>
+                          ))}
+                        </div>
                       </div>
                     </div>
-                  </div>
-                );
-              })}
-            </ColorLegend>
-          )}
+                  );
+                })}
+              </ColorLegend>
+            )}
         </div>
       </div>
     </Styles>
