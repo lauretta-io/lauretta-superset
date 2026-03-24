@@ -623,16 +623,6 @@ export default function SupersetPluginChartFloorMap(
   const imgW = imageDimensions?.width ?? 5700;
   const imgH = imageDimensions?.height ?? 3800;
 
-  // Helper function to map category to layer
-  const getCategoryLayer = (category: string | undefined | null): string => {
-    if (!category) return 'Retail';
-    const cat = category.toLowerCase();
-    if (cat.includes('entrance')) return 'Entrances';
-    if (cat.includes('circulation')) return 'Circulation';
-    if (cat.includes('public')) return 'Public';
-    return 'Retail';
-  };
-
   // Get unique items with their total footfall for the list widget
   const uniqueItems = React.useMemo(() => {
     if (!data || !Array.isArray(data)) return [];
@@ -644,7 +634,7 @@ export default function SupersetPluginChartFloorMap(
           name: itemName,
           total_footfall_zo: item.total_footfall_zo || 0,
           category: item.category || '',
-          layer: getCategoryLayer(item.category),
+          layer: item.layer || 'Unknown',
         });
       }
     });
@@ -698,7 +688,7 @@ export default function SupersetPluginChartFloorMap(
     };
 
     data.forEach((item: any) => {
-      const layer = getCategoryLayer(item.category);
+      const layer = item.layer || 'Unknown';
       const footfall = item.total_footfall_zo || 0;
       // Only consider items that are in the current filter
       if (layerFilters.includes(layer) && footfall > maxByLayer[layer]) {
@@ -971,7 +961,7 @@ export default function SupersetPluginChartFloorMap(
                 Array.isArray(data) &&
                 data.map((item: any, index: number) => {
                   const itemName = item.name || 'Unknown';
-                  const itemLayer = getCategoryLayer(item.category);
+                  const itemLayer = item.layer || 'Unknown';
                   const isItemHovered = hoveredItemName === itemName;
                   const isItemSelected = selectedItemName === itemName;
 
