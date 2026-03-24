@@ -634,7 +634,7 @@ export default function SupersetPluginChartFloorMap(
           name: itemName,
           total_footfall_zo: item.total_footfall_zo || 0,
           category: item.category || '',
-          layer: item.layer || 'Retail',
+          layer: item.layer || 'Unknown',
         });
       }
     });
@@ -688,7 +688,7 @@ export default function SupersetPluginChartFloorMap(
     };
 
     data.forEach((item: any) => {
-      const layer = item.layer || 'Retail';
+      const layer = item.layer || 'Unknown';
       const footfall = item.total_footfall_zo || 0;
       // Only consider items that are in the current filter
       if (layerFilters.includes(layer) && footfall > maxByLayer[layer]) {
@@ -961,7 +961,7 @@ export default function SupersetPluginChartFloorMap(
                 Array.isArray(data) &&
                 data.map((item: any, index: number) => {
                   const itemName = item.name || 'Unknown';
-                  const itemLayer = item.layer || 'Retail';
+                  const itemLayer = item.layer || 'Unknown';
                   const isItemHovered = hoveredItemName === itemName;
                   const isItemSelected = selectedItemName === itemName;
 
