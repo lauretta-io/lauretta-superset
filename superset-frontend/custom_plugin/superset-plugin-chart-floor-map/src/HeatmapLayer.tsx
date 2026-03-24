@@ -233,74 +233,11 @@ function convexHull(inputPts: { x: number; y: number }[]): { x: number; y: numbe
   return hull;
 }
 
-/* ─── Sample points along polygon edges ─────────────────────────────────── *
- *
- * Place one source every ~spacing SVG units along each edge.
- *
- * IMPORTANT — perimeter-length normalisation:
- *   Naively dividing totalWeight by the number of sample points causes
- *   a large-perimeter store to accumulate MORE KDE than a small-perimeter
- *   store with the same footfall, because there are more samples each
- *   contributing a Gaussian kernel that overlaps with corridor dots.
- *
- *   The correct approach is to weight each sample by the EDGE LENGTH it
- *   represents (arc-length parametrisation), then scale so the total
- *   contribution integrates to totalWeight × kernelNorm.  In the discrete
- *   case this means each sample carries weight = (totalWeight / perimeter)
- *   × (edge_segment_length / n_samples_on_that_edge).  Since
- *   edge_segment_length / n_samples ≈ spacing, every sample simply gets
- *   weight = totalWeight × spacing / perimeter.
- *
- *   Effect: a store with double the perimeter produces double the samples
- *   but each at half the weight → same total KDE contribution per unit
- *   corridor length → colour correctly reflects footfall, not store size.
- */
-function sampleEdges(
-  pts: { x: number; y: number }[],
-  spacing: number,
-  totalWeight: number,
-  name: string,
-): FootfallSource[] {
-  const out: FootfallSource[] = [];
-
-  // First pass: collect all sample points and their arc-length contribution
-  const raw: { x: number; y: number; segLen: number }[] = [];
-  let totalPerimeter = 0;
-
-  for (let i = 0; i < pts.length; i += 1) {
-    const j = (i + 1) % pts.length;
-    const dx = pts[j].x - pts[i].x;
-    const dy = pts[j].y - pts[i].y;
-    const len = Math.sqrt(dx * dx + dy * dy);
-    if (len < 1) continue;
-    totalPerimeter += len;
-    const n = Math.max(1, Math.round(len / spacing));
-    const segLen = len / n;   // arc-length each sample represents
-    for (let k = 0; k < n; k += 1) {
-      const t = (k + 0.5) / n;
-      raw.push({ x: pts[i].x + dx * t, y: pts[i].y + dy * t, segLen });
-    }
-  }
-
-  if (raw.length === 0 || totalPerimeter === 0) return out;
-
-  // Each sample weight = totalWeight × (arc it represents) / totalPerimeter
-  // → integrates exactly to totalWeight regardless of perimeter
-  for (const r of raw) {
-    out.push({ x: r.x, y: r.y, weight: totalWeight * r.segLen / totalPerimeter, totalWeight, name });
-  }
-  return out;
-}
-
 /* ─── Sample points uniformly from polygon interior ─────────────────────── *
  *
- * Area-normalised weighting: each sample represents a cell of area ≈ spacing².
- * Total weight = sum of per-sample weights = totalWeight × (sampled area / polygon area).
- * For a dense-enough grid this converges to totalWeight.
- *
- * This means two polygons with identical footfall produce the same total KDE
- * contribution regardless of their area, fixing the "small polygon = hot spike"
- * artefact from equal-split weighting.
+ * Used for ALL polygon types (Retail + Entrance/Circulation/Public).
+ * Equal-split weighting: wPer = totalWeight / nSamples, so the total KDE
+ * energy per polygon equals its footfall regardless of polygon size.
  */
 function sampleInterior(
   pts: { x: number; y: number }[],
@@ -358,51 +295,34 @@ export function HeatmapLayer({
   /* ─────────────────────────────────────────────────────────────────────
    *  TUNING PARAMETERS
    *
-   *  DOT_SPACING     — visual dot grid step (SVG units). 10 = fine grid.
-   *  SIGMA           — KDE bandwidth: heat decays to ~14% at distance σ.
-   *                    28 means heat from a store edge reaches ~28px into
-   *                    the corridor — sized for typical mall corridor widths.
-   *  EDGE_SPACING    — sample interval along retail store edges.
-   *  INTERIOR_SPACING— sample interval inside Circulation/Entrance/Public.
-   *  PERCENTILE_CLAMP— top (1-p)% cells clamp to max colour.  0.88 means
-   *                    the top 12% all show as red, spreading mid-range.
-   *  GAMMA           — power-curve for contrast.  1.2 keeps midtones warm.
+   *  DOT_SPACING      — visual dot grid step (SVG units). 10 = fine grid.
+   *  SIGMA            — KDE bandwidth: heat decays to ~14% at distance σ.
+   *  INTERIOR_SPACING — sample interval inside ALL polygons (Retail +
+   *                     Entrance/Circulation/Public).
+   *  PERCENTILE_CLAMP — top (1-p)% cells clamp to max colour.
+   *  GAMMA            — power-curve for contrast.  1.2 keeps midtones warm.
    * ───────────────────────────────────────────────────────────────────── */
   const DOT_SPACING       = 10;
   const SIGMA             = 28;
-  const EDGE_SPACING      = 12;
   const INTERIOR_SPACING  = 16;
   const PERCENTILE_CLAMP  = 0.88;
   const GAMMA             = 1.2;
 
   /* ── STAGE 1 — Classify & build heat sources ─────────────────────────
    *
-   * BUILDING HULL: built ONLY from Retail polygon vertices.
-   *   Retail polygons tile the building interior — their convex hull is
-   *   a tight fit around the actual store area (= the building footprint).
-   *   Entrance / Circulation polygons may extend OUTSIDE the building
-   *   (e.g. entrance canopies, external corridors).  Including them in
-   *   the hull would balloon it outward, creating false walkable zones
-   *   between the building and those remote polygons.
+   * ALL polygons (Retail + Entrance/Circulation/Public) contribute heat
+   * from their interiors, sampled on a uniform grid at INTERIOR_SPACING.
+   * Each sample carries weight = totalFootfall / nSamples, so the total
+   * KDE energy per polygon equals its footfall regardless of size.
    *
-   * HEAT SOURCES:
-   *   Retail edges  → radiate footfall into adjacent corridors.
-   *                   Weight is proportional to each store's footfall so
-   *                   a PB2 (27 319) corridor burns much hotter than a
-   *                   low-traffic store corridor.
-   *   Non-retail    → Circulation/Entrance/Public polygons that fall
-   *                   INSIDE the hull also contribute interior heat.
-   *                   No artificial multiplier — raw footfall only — so
-   *                   the colour scale reflects true relative density.
+   * BUILDING HULL: still built from Retail vertices only, used to define
+   * the dot-grid coverage area (corridor + store interiors).
    */
   const { retailBBoxes, nonRetailBBoxes, buildingHull, sources } = useMemo(() => {
     const retailPolys:    { x: number; y: number }[][] = [];
     const retailVertices: { x: number; y: number }[]  = [];  // hull built from these only
     const src: FootfallSource[] = [];
 
-    // We need the hull first to check whether non-retail polygons are inside.
-    // Two-pass approach: pass 1 collects retail data, pass 2 handles non-retail.
-    const nonRetail: { pts: { x: number; y: number }[]; layer: string; p: HeatmapPoint }[] = [];
     const nonRetailPolys: { x: number; y: number }[][] = [];
 
     for (let i = 0; i < points.length; i += 1) {
@@ -416,54 +336,27 @@ export function HeatmapLayer({
       if (layer === 'Retail') {
         retailPolys.push(pts);
         for (let v = 0; v < pts.length; v += 1) retailVertices.push(pts[v]);
-
-        // Edges radiate heat outward into the corridor
-        if (p.weight > 0) {
-          const edgeSrcs = sampleEdges(pts, EDGE_SPACING, p.weight, p.name);
-          for (let e = 0; e < edgeSrcs.length; e += 1) src.push(edgeSrcs[e]);
-        }
       } else {
-        nonRetail.push({ pts, layer, p });
         nonRetailPolys.push(pts);
+      }
+
+      // ALL polygons (Retail + Entrance/Circulation/Public) contribute heat
+      // from their interiors, weighted by footfall.  Interior sampling gives
+      // each polygon a heat field proportional to its footfall — high-footfall
+      // stores show as warm/hot blobs, low-footfall stores stay cool.
+      if (p.weight > 0) {
+        const cx = pts.reduce((s, q) => s + q.x, 0) / pts.length;
+        const cy = pts.reduce((s, q) => s + q.y, 0) / pts.length;
+        const interiorPts = sampleInterior(pts, INTERIOR_SPACING);
+        const sampledPts = interiorPts.length > 0 ? interiorPts : [{ x: cx, y: cy }];
+        const wPer = p.weight / sampledPts.length;
+        for (let j = 0; j < sampledPts.length; j += 1)
+          src.push({ x: sampledPts[j].x, y: sampledPts[j].y, weight: wPer, totalWeight: p.weight, name: p.name });
       }
     }
 
     // Build hull from retail vertices only → tight around the building footprint
     const hull = retailVertices.length >= 3 ? convexHull(retailVertices) : [];
-
-    // Pass 2: ALL non-retail polygons contribute heat sources unconditionally.
-    // Their heat will only be visible where dot-grid cells exist (inside the hull),
-    // so external entrance polygons naturally produce no visible dots — the grid
-    // simply has no cells there to receive the KDE.  No need to filter by hull.
-    for (let i = 0; i < nonRetail.length; i += 1) {
-      const { pts, p } = nonRetail[i];
-      if (p.weight <= 0) continue;
-
-      const cx = pts.reduce((s, q) => s + q.x, 0) / pts.length;
-      const cy = pts.reduce((s, q) => s + q.y, 0) / pts.length;
-
-      const interiorPts = sampleInterior(pts, INTERIOR_SPACING);
-      const sampledPts = interiorPts.length > 0 ? interiorPts : [{ x: cx, y: cy }];
-
-      // Equal-split across sample points.
-      // Non-retail polygons (Entrance/Circulation) are isolated sources — they
-      // don't accumulate KDE from many surrounding retail edges the way corridor
-      // dots do.  To make their colour proportional to their footfall on the
-      // same scale as busy corridors, we multiply by a boost factor so that an
-      // Entrance with footfall F shows the same heat intensity as a corridor
-      // that borders a retail store with footfall F.
-      //
-      // BOOST = estimated number of retail edge samples that a typical store
-      // contributes near a corridor dot:
-      //   perimeter ~240px, EDGE_SPACING 12 → ~20 samples within 1 corridor.
-      //   Each sample contributes w/20 per unit.  To match, non-retail needs
-      //   the same aggregate, so we scale up by ≈ 20.
-      const NON_RETAIL_BOOST = 20;
-      const wPer = (p.weight / sampledPts.length) * NON_RETAIL_BOOST;
-
-      for (let j = 0; j < sampledPts.length; j += 1)
-        src.push({ x: sampledPts[j].x, y: sampledPts[j].y, weight: wPer, totalWeight: p.weight, name: p.name });
-    }
 
     return { retailBBoxes: computeBBoxes(retailPolys), nonRetailBBoxes: computeBBoxes(nonRetailPolys), buildingHull: hull, sources: src };
   }, [points]);
@@ -519,9 +412,6 @@ export function HeatmapLayer({
         const inHull = buildingHull.length >= 3 && pointInPolygon(px, py, buildingHull);
         const inNonRetail = isInsideAny(px, py, nonRetailBBoxes);
         if (!inHull && !inNonRetail) continue;
-
-        // Exclude store interiors regardless
-        if (isInsideAny(px, py, retailBBoxes)) continue;
 
         grid.push({ col, row, px, py });
       }
