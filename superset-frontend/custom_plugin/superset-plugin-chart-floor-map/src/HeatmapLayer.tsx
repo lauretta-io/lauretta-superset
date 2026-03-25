@@ -216,7 +216,7 @@ function getCategoryLayer(category: string | undefined | null): string {
   return 'Retail';
 }
 
-/* ─── Convex Hull (Graham scan) ─────────────────────────────────────────── */
+/* ─── Hull helpers (convex + refined detailed hull) ─────────────────────── */
 
 function cross(
   O: { x: number; y: number },
@@ -252,6 +252,102 @@ function convexHull(
   }
   hull.pop();
   return hull;
+}
+
+function distance(a: { x: number; y: number }, b: { x: number; y: number }) {
+  const dx = a.x - b.x;
+  const dy = a.y - b.y;
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
+function pointToSegmentDistance(
+  p: { x: number; y: number },
+  a: { x: number; y: number },
+  b: { x: number; y: number },
+): { dist: number; t: number } {
+  const abx = b.x - a.x;
+  const aby = b.y - a.y;
+  const apx = p.x - a.x;
+  const apy = p.y - a.y;
+  const abSq = abx * abx + aby * aby || 1;
+  const tRaw = (apx * abx + apy * aby) / abSq;
+  const t = Math.max(0, Math.min(1, tRaw));
+  const qx = a.x + t * abx;
+  const qy = a.y + t * aby;
+  const dx = p.x - qx;
+  const dy = p.y - qy;
+  return { dist: Math.sqrt(dx * dx + dy * dy), t };
+}
+
+function buildDetailedHull(
+  inputPts: { x: number; y: number }[],
+): { x: number; y: number }[] {
+  if (inputPts.length < 4) return convexHull(inputPts);
+
+  const unique = Array.from(
+    new Map(inputPts.map(p => [`${p.x}:${p.y}`, p])).values(),
+  );
+  if (unique.length < 4) return convexHull(unique);
+
+  const baseHull = convexHull(unique);
+  if (baseHull.length < 4) return baseHull;
+
+  const hullKeys = new Set(baseHull.map(p => `${p.x}:${p.y}`));
+  const pool = unique.filter(p => !hullKeys.has(`${p.x}:${p.y}`));
+  if (pool.length === 0) return baseHull;
+
+  // Refine long edges by inserting nearby interior vertices.
+  // This avoids connecting far extremities with a single straight segment.
+  const refined = baseHull.slice();
+  const edgeLens = refined.map((p, i) =>
+    distance(p, refined[(i + 1) % refined.length]),
+  );
+  const avgEdge =
+    edgeLens.reduce((s, d) => s + d, 0) / Math.max(edgeLens.length, 1);
+  // Detail tuning: lower max edge length and allow more insertions so the
+  // hull follows the store boundary more closely instead of long jumps.
+  const maxEdgeLen = avgEdge * 1.35;
+  const maxInsertions = Math.min(pool.length, 12_000);
+
+  let inserted = 0;
+  let changed = true;
+
+  while (changed && inserted < maxInsertions) {
+    changed = false;
+
+    for (let i = 0; i < refined.length && inserted < maxInsertions; i += 1) {
+      const a = refined[i];
+      const b = refined[(i + 1) % refined.length];
+      const edgeLen = distance(a, b);
+      if (edgeLen <= maxEdgeLen) continue;
+
+      let bestIdx = -1;
+      let bestScore = Infinity;
+
+      for (let j = 0; j < pool.length; j += 1) {
+        const p = pool[j];
+        const { dist, t } = pointToSegmentDistance(p, a, b);
+        if (t <= 0.07 || t >= 0.93) continue;
+        if (dist > edgeLen * 0.6) continue;
+
+        // Prefer candidates close to this edge and not too close to vertices.
+        const score = dist + 0.1 * Math.abs(0.5 - t) * edgeLen;
+        if (score < bestScore) {
+          bestScore = score;
+          bestIdx = j;
+        }
+      }
+
+      if (bestIdx >= 0) {
+        refined.splice(i + 1, 0, pool[bestIdx]);
+        pool.splice(bestIdx, 1);
+        inserted += 1;
+        changed = true;
+      }
+    }
+  }
+
+  return refined.length >= 3 ? refined : baseHull;
 }
 
 /* ─── Sample points uniformly from polygon interior ─────────────────────── *
@@ -338,7 +434,11 @@ export function HeatmapLayer({
     Math.max(minDotSpacing, Math.sqrt((imgW * imgH) / targetDotCount)),
   );
 
-  const SIGMA = 28;
+  // SIGMA scales with map size so heat from each source spreads further on
+  // large maps, preventing isolated cold gaps between stores.
+  // Small map (~700px diag) → SIGMA ≈ 28; large map (~6800px diag) → SIGMA capped at 70
+  const mapDiag = Math.sqrt(imgW * imgW + imgH * imgH);
+  const SIGMA = Math.min(40, Math.max(28, mapDiag * 0.014));
   const INTERIOR_SPACING = 16;
   const PERCENTILE_CLAMP = 0.88;
   const GAMMA = 1.2;
@@ -398,8 +498,10 @@ export function HeatmapLayer({
         }
       }
 
-      // Build hull from retail vertices only → tight around the building footprint
-      const hull = retailVertices.length >= 3 ? convexHull(retailVertices) : [];
+      // Build detailed hull from retail vertices to avoid long straight jumps
+      // between far edges; fallback behavior remains stable for sparse inputs.
+      const hull =
+        retailVertices.length >= 3 ? buildDetailedHull(retailVertices) : [];
 
       return {
         retailBBoxes: computeBBoxes(retailPolys),
@@ -515,8 +617,11 @@ export function HeatmapLayer({
       const { col, row, px, py } = dotGrid[i];
       let kdeVal = 0;
       let dominantName = '',
-        dominantFootfall = 0,
         dominantContrib = -1;
+      // Weighted blend: each source contributes footfall proportional to its
+      // Gaussian contribution at this cell → smooth color transitions between zones.
+      let totalContrib = 0;
+      let weightedFootfall = 0;
 
       for (let j = 0; j < srcBB.length; j += 1) {
         const { s, minX, maxX, minY, maxY } = srcBB[j];
@@ -527,12 +632,14 @@ export function HeatmapLayer({
         if (dSq > cutoffSq) continue;
         const contrib = s.weight * Math.exp(-dSq / twoSigmaSq);
         kdeVal += contrib;
-        // Track the source whose weighted contribution is highest
-        // (= the store/entrance that most "owns" this dot's colour)
+        // Accumulate footfall-weighted blend using raw Gaussian (not per-sample weight)
+        const rawContrib = Math.exp(-dSq / twoSigmaSq);
+        totalContrib += rawContrib;
+        weightedFootfall += rawContrib * s.totalWeight;
+        // Still track dominant name for tooltip
         if (contrib > dominantContrib) {
           dominantContrib = contrib;
           dominantName = s.name;
-          dominantFootfall = s.totalWeight;
         }
       }
 
@@ -545,7 +652,9 @@ export function HeatmapLayer({
           py,
           kde: kdeVal,
           nearestName: dominantName,
-          nearestFootfall: dominantFootfall,
+          // Smooth blend: footfall is the weighted average of all contributing stores
+          nearestFootfall:
+            totalContrib > 0 ? weightedFootfall / totalContrib : 0,
         });
       }
     }
@@ -555,13 +664,30 @@ export function HeatmapLayer({
 
   /* ── STAGE 4 — Normalise ──────────────────────────────────────────────
    *
-   * 1. Log-compress  logNorm = ln(1+KDE) / ln(1+maxKDE)
-   * 2. Percentile clamp at PERCENTILE_CLAMP
-   * 3. Power curve with GAMMA
+   * Two separate normalised values are produced per cell:
+   *
+   *   norm          — KDE-based (spatial density). Used for radius + opacity.
+   *                   Reflects how many overlapping sources influence a cell.
+   *
+   *   footfallNorm  — Footfall-based (per-store total). Used for color.
+   *                   Derived from the dominant store's actual footfall so that
+   *                   large polygons with high footfall are NOT diluted by their
+   *                   sample count. Ensures bolder color = higher footfall.
+   *
+   * Color and spatial presence are intentionally decoupled.
+   *
+   * nearestFootfall is now a contribution-weighted blend of all nearby stores
+   * (not winner-takes-all), so footfallNorm transitions smoothly between zones.
    */
+  const maxFootfall = useMemo(
+    () => Math.max(...points.map(p => p.weight), 1),
+    [points],
+  );
+
   const sortedCells = useMemo(() => {
     if (kdeGrid.length === 0) return [];
     const logMax = Math.log1p(maxKDE);
+    const logMaxFootfall = Math.log1p(maxFootfall);
 
     const withLog = kdeGrid.map(c => ({
       ...c,
@@ -574,48 +700,55 @@ export function HeatmapLayer({
 
     return withLog
       .map(c => {
+        // KDE norm: spatial density → drives radius + opacity
         const norm = Math.pow(Math.min(c.logNorm / clampVal, 1.0), GAMMA);
-        return { ...c, norm };
+        // Footfall norm: blended footfall across nearby stores → drives color
+        // Because nearestFootfall is now a weighted average, this value
+        // transitions smoothly as you move from one store's zone into another.
+        const footfallNorm = Math.pow(
+          logMaxFootfall > 0
+            ? Math.log1p(c.nearestFootfall) / logMaxFootfall
+            : 0,
+          GAMMA,
+        );
+        return { ...c, norm, footfallNorm };
       })
       .sort((a, b) => a.norm - b.norm);
-  }, [kdeGrid, maxKDE]);
+  }, [kdeGrid, maxKDE, maxFootfall]);
 
   /* ── STAGE 5 — Render ─────────────────────────────────────────────────
    *
-   * Goal: dots connect visually in high-traffic corridors while the
-   * background floor plan remains legible everywhere.
+   * COLOR   ← footfallNorm (dominant store's total footfall, log-compressed)
+   *           Large high-footfall stores always appear bold/hot.
+   *           Polygon size does not dilute color.
    *
-   * Radius:
-   *   minR = 0.28×cs — slightly smaller cold dots reduce visual crowding
-   *   maxR = 0.52×cs — hot dots still connect, with less over-expansion
-   *   cellSize (cs) is adaptive based on map size. Larger maps → larger dots.
-   *   Example: For 500×500 map, cs≈7 (minR=2.0px, maxR=3.6px);
-   *            For 5700×3800 map, cs≈26 (minR=7.3px, maxR=13.5px)
+   * RADIUS  ← norm (KDE spatial density)
+   *           Corridors with many overlapping influences grow larger.
    *
-   * Opacity: background map lines (store outlines, labels) are always
-   * visible through the heatmap at every heat level.
-   *   norm=0.00 → 0.08 (barely visible — background fully clear)
-   *   norm=0.25 → ~0.30 (light tint — store outlines easily readable)
-   *   norm=0.50 → ~0.39 (medium tint — floor plan lines still legible)
-   *   norm=0.75 → ~0.45 (warm colour — labels visible beneath)
-   *   norm=1.00 → 0.63 (peak — vivid colour, good background contrast)
+   * OPACITY ← norm (KDE spatial density)
+   *           Cells in low-activity areas stay faint.
    *
-   * Formula: 0.08 + norm^0.65 × 0.55
-   *   Lower base (0.08) keeps cold dots visible but subtle.
-   *   Exponent (0.65) creates smooth rise for good contrast.
-   *   Max opacity at 0.63 — strong visual impact while maintaining readability.
-   *
-   * Painting order: cold first, hot on top — so hot dots aren't occluded.
+   * Painting order: cold first, hot on top.
    */
-  const maxR = cellSize * 0.52;
-  const minR = cellSize * 0.28;
+  // Radius multipliers scale slightly with map size so large maps don't look sparse.
+  // At minDotSpacing (small map): cold r≈0.28, hot r≈0.52 of cellSize
+  // At maxDotSpacing (large map): cold r≈0.36, hot r≈0.68 of cellSize
+  const spacingRatio =
+    (adaptiveDotSpacing - minDotSpacing) / (maxDotSpacing - minDotSpacing);
+  const maxR = cellSize * (0.52 + spacingRatio * 0.16);
+  const minR = cellSize * (0.28 + spacingRatio * 0.08);
+  // const debugHullPoints = useMemo(
+  //   () => buildingHull.map(p => `${p.x},${p.y}`).join(' '),
+  //   [buildingHull],
+  // );
 
   return (
     <g className="heatmap-layer">
       {sortedCells.map(cell => {
-        const color = heatmapColor(cell.norm);
+        // Color driven by the dominant store's actual footfall — size-independent
+        const color = heatmapColor(cell.footfallNorm);
+        // Radius + opacity driven by KDE density
         const radius = minR + (maxR - minR) * cell.norm;
-        // Faint hint at cold end, bold at hot end, never fully opaque
         const fillOpacity = 0.08 + Math.pow(cell.norm, 0.65) * 0.55;
 
         return (
@@ -631,6 +764,17 @@ export function HeatmapLayer({
           />
         );
       })}
+      {/* {buildingHull.length >= 3 && (
+        <polygon
+          points={debugHullPoints}
+          fill="none"
+          stroke="#ff0000"
+          strokeWidth={8}
+          strokeOpacity={0.95}
+          vectorEffect="non-scaling-stroke"
+          pointerEvents="none"
+        />
+      )} */}
     </g>
   );
 }
