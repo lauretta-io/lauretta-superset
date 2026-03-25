@@ -328,7 +328,7 @@ function buildDetailedHull(
         const p = pool[j];
         const { dist, t } = pointToSegmentDistance(p, a, b);
         if (t <= 0.07 || t >= 0.93) continue;
-        if (dist > edgeLen * 0.9) continue;
+        if (dist > edgeLen * 0.6) continue;
 
         // Prefer candidates close to this edge and not too close to vertices.
         const score = dist + 0.1 * Math.abs(0.5 - t) * edgeLen;
@@ -442,6 +442,7 @@ export function HeatmapLayer({
   const INTERIOR_SPACING = 16;
   const PERCENTILE_CLAMP = 0.88;
   const GAMMA = 1.2;
+  const COLOR_GAMMA = 0.9;
 
   /* ── STAGE 1 — Classify & build heat sources ─────────────────────────
    *
@@ -709,12 +710,12 @@ export function HeatmapLayer({
           logMaxFootfall > 0
             ? Math.log1p(c.nearestFootfall) / logMaxFootfall
             : 0,
-          GAMMA,
+          COLOR_GAMMA,
         );
         return { ...c, norm, footfallNorm };
       })
       .sort((a, b) => a.norm - b.norm);
-  }, [kdeGrid, maxKDE, maxFootfall]);
+  }, [kdeGrid, maxKDE, maxFootfall, COLOR_GAMMA]);
 
   /* ── STAGE 5 — Render ─────────────────────────────────────────────────
    *
@@ -749,7 +750,7 @@ export function HeatmapLayer({
         // Radius: uniform across all cells (prevents collisions).
         // Opacity still varies with KDE density to show concentration.
         const radius = uniformRadius;
-        const fillOpacity = 0.08 + Math.pow(cell.norm, 0.65) * 0.55;
+        const fillOpacity = 0.4 + Math.pow(cell.norm, 0.65) * 0.72;
 
         return (
           <circle
