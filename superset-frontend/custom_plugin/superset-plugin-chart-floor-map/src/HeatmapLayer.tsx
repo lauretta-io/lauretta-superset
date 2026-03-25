@@ -328,7 +328,7 @@ function buildDetailedHull(
         const p = pool[j];
         const { dist, t } = pointToSegmentDistance(p, a, b);
         if (t <= 0.07 || t >= 0.93) continue;
-        if (dist > edgeLen * 0.6) continue;
+        if (dist > edgeLen * 0.9) continue;
 
         // Prefer candidates close to this edge and not too close to vertices.
         const score = dist + 0.1 * Math.abs(0.5 - t) * edgeLen;
@@ -730,13 +730,12 @@ export function HeatmapLayer({
    *
    * Painting order: cold first, hot on top.
    */
-  // Radius multipliers scale slightly with map size so large maps don't look sparse.
-  // At minDotSpacing (small map): cold r≈0.28, hot r≈0.52 of cellSize
-  // At maxDotSpacing (large map): cold r≈0.36, hot r≈0.68 of cellSize
+  // Uniform radius based on grid spacing, prevents dot collisions on large maps.
+  // Scale slightly with map size: at minDotSpacing (~7) → radius ≈0.42 of cellSize
+  // at maxDotSpacing (26) → radius ≈0.48 of cellSize. Keeps dots uniform size.
   const spacingRatio =
     (adaptiveDotSpacing - minDotSpacing) / (maxDotSpacing - minDotSpacing);
-  const maxR = cellSize * (0.52 + spacingRatio * 0.16);
-  const minR = cellSize * (0.28 + spacingRatio * 0.08);
+  const uniformRadius = cellSize * (0.42 + spacingRatio * 0.06);
   // const debugHullPoints = useMemo(
   //   () => buildingHull.map(p => `${p.x},${p.y}`).join(' '),
   //   [buildingHull],
@@ -747,8 +746,9 @@ export function HeatmapLayer({
       {sortedCells.map(cell => {
         // Color driven by the dominant store's actual footfall — size-independent
         const color = heatmapColor(cell.footfallNorm);
-        // Radius + opacity driven by KDE density
-        const radius = minR + (maxR - minR) * cell.norm;
+        // Radius: uniform across all cells (prevents collisions).
+        // Opacity still varies with KDE density to show concentration.
+        const radius = uniformRadius;
         const fillOpacity = 0.08 + Math.pow(cell.norm, 0.65) * 0.55;
 
         return (
