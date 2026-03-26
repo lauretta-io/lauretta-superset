@@ -372,16 +372,17 @@ function sampleInterior(
 
 /* ─── Color scale ─────────────────────────────────────────────────────────
  *
- * Classic thermal palette: Deep Blue → Cyan → Green → Yellow → Orange → Red
+ * Professional high-contrast perceptually-uniform palette:
+ * Grey → Bright Cyan → Bright Lime → Bright Yellow → Orange → Deep Red
  */
 function heatmapColor(t: number): string {
   const stops = [
-    { p: 0.0, r: 0, g: 0, b: 180 },
-    { p: 0.25, r: 0, g: 200, b: 255 },
-    { p: 0.5, r: 0, g: 220, b: 80 },
-    { p: 0.7, r: 255, g: 230, b: 0 },
-    { p: 0.85, r: 255, g: 100, b: 0 },
-    { p: 1.0, r: 230, g: 0, b: 0 },
+    { p: 0.0, r: 128, g: 128, b: 128 }, // Grey
+    { p: 0.25, r: 0, g: 172, b: 229 }, // Bright cyan
+    { p: 0.5, r: 0, g: 228, b: 54 }, // Bright lime
+    { p: 0.7, r: 255, g: 219, b: 0 }, // Bright yellow
+    { p: 0.85, r: 255, g: 104, b: 0 }, // Orange
+    { p: 1.0, r: 255, g: 0, b: 0 }, // Bold red
   ];
   let lo = stops[0];
   let hi = stops[stops.length - 1];
@@ -644,20 +645,17 @@ export function HeatmapLayer({
         }
       }
 
-      if (kdeVal > 0) {
-        if (kdeVal > globalMax) globalMax = kdeVal;
-        result.push({
-          col,
-          row,
-          px,
-          py,
-          kde: kdeVal,
-          nearestName: dominantName,
-          // Smooth blend: footfall is the weighted average of all contributing stores
-          nearestFootfall:
-            totalContrib > 0 ? weightedFootfall / totalContrib : 0,
-        });
-      }
+      if (kdeVal > globalMax) globalMax = kdeVal;
+      result.push({
+        col,
+        row,
+        px,
+        py,
+        kde: kdeVal,
+        nearestName: dominantName,
+        // Smooth blend: footfall is the weighted average of all contributing stores
+        nearestFootfall: totalContrib > 0 ? weightedFootfall / totalContrib : 0,
+      });
     }
 
     return { kdeGrid: result, maxKDE: globalMax || 1 };
@@ -723,20 +721,16 @@ export function HeatmapLayer({
    *           Large high-footfall stores always appear bold/hot.
    *           Polygon size does not dilute color.
    *
-   * RADIUS  ← norm (KDE spatial density)
-   *           Corridors with many overlapping influences grow larger.
-   *
    * OPACITY ← norm (KDE spatial density)
    *           Cells in low-activity areas stay faint.
    *
-   * Painting order: cold first, hot on top.
+   * GEOMETRY: Full-pixel squares (no gaps) for continuous coverage visualization.
+   *           Each cell rendered as a square filling its grid cell completely.
+   *
+   * Painting order: low-intensity first, high-intensity on top.
    */
-  // Uniform radius based on grid spacing, prevents dot collisions on large maps.
-  // Scale slightly with map size: at minDotSpacing (~7) → radius ≈0.42 of cellSize
-  // at maxDotSpacing (26) → radius ≈0.48 of cellSize. Keeps dots uniform size.
-  const spacingRatio =
-    (adaptiveDotSpacing - minDotSpacing) / (maxDotSpacing - minDotSpacing);
-  const uniformRadius = cellSize * (0.42 + spacingRatio * 0.06);
+  // Full-pixel rendering: each cell is a square that exactly fills cellSize
+  // This creates a continuous pixel-like appearance with no gaps.
   // const debugHullPoints = useMemo(
   //   () => buildingHull.map(p => `${p.x},${p.y}`).join(' '),
   //   [buildingHull],
@@ -747,17 +741,16 @@ export function HeatmapLayer({
       {sortedCells.map(cell => {
         // Color driven by the dominant store's actual footfall — size-independent
         const color = heatmapColor(cell.footfallNorm);
-        // Radius: uniform across all cells (prevents collisions).
-        // Opacity still varies with KDE density to show concentration.
-        const radius = uniformRadius;
-        const fillOpacity = 0.4 + Math.pow(cell.norm, 0.65) * 0.72;
+        // Opacity varies with KDE density to show concentration areas.
+        const fillOpacity = 0.2 + Math.pow(cell.norm, 0.65) * 0.8;
 
         return (
-          <circle
+          <rect
             key={`h-${cell.col}-${cell.row}`}
-            cx={cell.px}
-            cy={cell.py}
-            r={radius}
+            x={cell.px - cellSize / 2}
+            y={cell.py - cellSize / 2}
+            width={cellSize}
+            height={cellSize}
             fill={color}
             fillOpacity={fillOpacity}
             stroke="none"
@@ -793,12 +786,12 @@ export function HeatmapLegend({
 }) {
   const gradientId = 'heatmap-legend-gradient';
   const stops = [
-    { offset: '0%', color: 'rgb(0,0,180)' },
-    { offset: '25%', color: 'rgb(0,200,255)' },
-    { offset: '50%', color: 'rgb(0,220,80)' },
-    { offset: '70%', color: 'rgb(255,230,0)' },
-    { offset: '85%', color: 'rgb(255,100,0)' },
-    { offset: '100%', color: 'rgb(230,0,0)' },
+    { offset: '0%', color: 'rgb(128,128,128)' }, // Grey
+    { offset: '25%', color: 'rgb(0,172,229)' }, // Bright cyan
+    { offset: '50%', color: 'rgb(0,228,54)' }, // Bright lime
+    { offset: '70%', color: 'rgb(255,219,0)' }, // Bright yellow
+    { offset: '85%', color: 'rgb(255,104,0)' }, // Orange
+    { offset: '100%', color: 'rgb(255,0,0)' }, // Bold red
   ];
 
   return (
@@ -874,12 +867,18 @@ export function HeatmapLegend({
         }}
       >
         <svg width={108} height={22}>
-          <circle cx={8} cy={11} r={3.5} fill="rgb(0,0,180)" opacity={0.15} />
+          <circle
+            cx={8}
+            cy={11}
+            r={3.5}
+            fill="rgb(128,128,128)"
+            opacity={0.15}
+          />
           <circle cx={26} cy={11} r={4} fill="rgb(0,200,255)" opacity={0.35} />
           <circle cx={46} cy={11} r={4.5} fill="rgb(0,220,80)" opacity={0.52} />
           <circle cx={66} cy={11} r={5} fill="rgb(255,230,0)" opacity={0.68} />
           <circle cx={85} cy={11} r={5.5} fill="rgb(255,100,0)" opacity={0.8} />
-          <circle cx={103} cy={11} r={6} fill="rgb(230,0,0)" opacity={0.9} />
+          <circle cx={103} cy={11} r={6} fill="rgb(255,0,0)" opacity={0.9} />
         </svg>
         <span style={{ fontSize: 9, color: '#777', fontWeight: 500 }}>
           density →
