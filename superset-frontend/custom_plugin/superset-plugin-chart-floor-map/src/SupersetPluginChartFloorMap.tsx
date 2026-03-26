@@ -530,7 +530,8 @@ export default function SupersetPluginChartFloorMap(
   const [sortField, setSortField] = useState<'name' | 'footfall'>('footfall');
   const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc');
   const [selectedItemName, setSelectedItemName] = useState<string | null>(null);
-  const [layerFilters, setLayerFilters] = useState<string[]>(['Retail']);
+  // CUSTOM CHANGE for Shilla: by default show Retail and Entrances layers
+  const [layerFilters, setLayerFilters] = useState<string[]>(['Retail', 'Entrances']);
   const [isFilterLoading, setIsFilterLoading] = useState(false);
   const [floorsData, setFloorsData] = useState<
     { name: string; image: string }[]
@@ -632,14 +633,14 @@ export default function SupersetPluginChartFloorMap(
       if (!itemMap.has(itemName)) {
         itemMap.set(itemName, {
           name: itemName,
-          total_footfall_zo: item.total_footfall_zo || 0,
+          total_footfall: item.total_footfall || 0,
           category: item.category || '',
           layer: item.layer || 'Unknown',
         });
       }
     });
     return Array.from(itemMap.values()).sort(
-      (a, b) => b.total_footfall_zo - a.total_footfall_zo,
+      (a, b) => b.total_footfall - a.total_footfall,
     );
   }, [data]);
 
@@ -667,8 +668,8 @@ export default function SupersetPluginChartFloorMap(
         return sortDirection === 'asc' ? nameCompare : -nameCompare;
       }
 
-      const footfallA = a.total_footfall_zo || 0;
-      const footfallB = b.total_footfall_zo || 0;
+      const footfallA = a.total_footfall || 0;
+      const footfallB = b.total_footfall || 0;
       return sortDirection === 'asc'
         ? footfallA - footfallB
         : footfallB - footfallA;
@@ -689,7 +690,7 @@ export default function SupersetPluginChartFloorMap(
 
     data.forEach((item: any) => {
       const layer = item.layer || 'Unknown';
-      const footfall = item.total_footfall_zo || 0;
+      const footfall = item.total_footfall || 0;
       // Only consider items that are in the current filter
       if (layerFilters.includes(layer) && footfall > maxByLayer[layer]) {
         maxByLayer[layer] = footfall;
@@ -877,7 +878,8 @@ export default function SupersetPluginChartFloorMap(
               onChange={e => setSearchQuery(e.target.value)}
             />
             <div className="layer-filter">
-              {['Retail', 'Entrances', 'Circulation', 'Public'].map(layer => (
+              {/* CUSTOM CHANGE for Shilla: hide Circulation and Public layers */}
+              {['Retail', 'Entrances'].map(layer => (
                 <button
                   key={layer}
                   className={`layer-btn ${layerFilters.includes(layer) ? 'active' : ''}`}
@@ -903,7 +905,7 @@ export default function SupersetPluginChartFloorMap(
                     className={`store-item ${selectedItemName === item.name ? 'selected' : ''}`}
                     style={{
                       borderLeftColor: getLayerFootfallColor(
-                        item.total_footfall_zo,
+                        item.total_footfall,
                         item.layer,
                         maxFootfallByLayer[item.layer] || 1,
                       ),
@@ -917,13 +919,13 @@ export default function SupersetPluginChartFloorMap(
                         className="value"
                         style={{
                           color: getLayerFootfallColor(
-                            item.total_footfall_zo,
+                            item.total_footfall,
                             item.layer,
                             maxFootfallByLayer[item.layer] || 1,
                           ),
                         }}
                       >
-                        {item.total_footfall_zo.toLocaleString()}
+                        {item.total_footfall.toLocaleString()}
                       </span>
                     </div>
                   </div>
@@ -1003,8 +1005,8 @@ export default function SupersetPluginChartFloorMap(
                   <div className="category-name">{displayedItem.category}</div>
                 </div>
               )}
-              {displayedItem.total_footfall_zo !== undefined &&
-                displayedItem.total_footfall_zo !== null && (
+              {displayedItem.total_footfall !== undefined &&
+                displayedItem.total_footfall !== null && (
                   <div className="footfall-section">
                     <div className="footfall-label">Footfall</div>
                     <div
@@ -1014,7 +1016,7 @@ export default function SupersetPluginChartFloorMap(
                       }}
                     >
                       {(
-                        displayedItem.total_footfall_zo as number
+                        displayedItem.total_footfall as number
                       ).toLocaleString()}
                     </div>
                   </div>
@@ -1038,8 +1040,8 @@ export default function SupersetPluginChartFloorMap(
                   </div>
                 </div>
               )}
-              {selectedItemData.total_footfall_zo !== undefined &&
-                selectedItemData.total_footfall_zo !== null && (
+              {selectedItemData.total_footfall !== undefined &&
+                selectedItemData.total_footfall !== null && (
                   <div className="footfall-section">
                     <div className="footfall-label">Footfall</div>
                     <div
@@ -1049,7 +1051,7 @@ export default function SupersetPluginChartFloorMap(
                       }}
                     >
                       {(
-                        selectedItemData.total_footfall_zo as number
+                        selectedItemData.total_footfall as number
                       ).toLocaleString()}
                     </div>
                   </div>
