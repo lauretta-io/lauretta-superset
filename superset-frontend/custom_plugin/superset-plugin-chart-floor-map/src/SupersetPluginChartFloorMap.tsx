@@ -81,6 +81,8 @@ const Styles = styled.div<SupersetPluginChartFloorMapStylesProps>`
   display: flex;
   flex-direction: column;
   position: relative;
+  z-index: 0;
+  isolation: isolate;
 
   .content-layout {
     width: 100%;
@@ -431,39 +433,38 @@ const StoreListWidget = styled.div`
   }
 `;
 
-const ViewToggle = styled.div`
-  position: absolute;
-  top: 12px;
-  left: 50%;
-  transform: translateX(-50%);
-  z-index: 600;
+const ViewToggleInline = styled.div`
   display: flex;
-  background: rgba(255, 255, 255, 0.95);
-  border-radius: 20px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
-  border: 1px solid #e0e0e0;
-  overflow: hidden;
-  user-select: none;
+  border-left: 1px solid #e8e8e8;
+  padding-left: 6px;
+  margin-left: 2px;
+  gap: 4px;
 
   .toggle-btn {
-    padding: 6px 18px;
+    width: auto;
+    min-width: 80px;
+    height: 28px;
+    padding: 0 10px;
+    border: 1px solid #d9d9d9;
+    border-radius: 2px;
     font-size: 12px;
     font-weight: 500;
     cursor: pointer;
-    border: none;
-    background: transparent;
+    background: #fff;
     color: #595959;
     transition: all 0.2s ease;
     white-space: nowrap;
-    letter-spacing: 0.3px;
+    letter-spacing: 0.2px;
 
     &:hover {
-      color: #1890ff;
-      background: rgba(24, 144, 255, 0.06);
+      color: #40a9ff;
+      border-color: #40a9ff;
+      background: #fff;
     }
 
     &.active {
       background: #1890ff;
+      border-color: #1890ff;
       color: #fff;
       font-weight: 600;
     }
@@ -588,11 +589,6 @@ export default function SupersetPluginChartFloorMap(
   // Active filters depend on current view mode
   const layerFilters =
     viewMode === 'heatmap' ? heatmapLayerFilters : polygonLayerFilters;
-  // Heatmap hover state
-  const [heatmapHoveredName, setHeatmapHoveredName] = useState<string | null>(
-    null,
-  );
-  const [heatmapTooltipPos, setHeatmapTooltipPos] = useState({ x: 0, y: 0 });
   const [isFilterLoading, setIsFilterLoading] = useState(false);
   const [floorsData, setFloorsData] = useState<
     { name: string; image: string }[]
@@ -1082,28 +1078,31 @@ export default function SupersetPluginChartFloorMap(
         )}
 
         <div className="map-panel" ref={mapPanelRef}>
-          <ViewToggle>
-            <button
-              type="button"
-              className={`toggle-btn ${viewMode === 'polygon' ? 'active' : ''}`}
-              onClick={() => setViewMode('polygon')}
-            >
-              Polygon
-            </button>
-            <button
-              type="button"
-              className={`toggle-btn ${viewMode === 'heatmap' ? 'active' : ''}`}
-              onClick={() => {
-                // Reset heatmap filters to ALL when switching to heatmap
-                setHeatmapLayerFilters(ALL_LAYERS);
-                setViewMode('heatmap');
-              }}
-            >
-              Heatmap
-            </button>
-          </ViewToggle>
-
-          <ZoomPanWrapper ref={zoomPanRef}>
+          <ZoomPanWrapper
+            ref={zoomPanRef}
+            extraControls={
+              <ViewToggleInline>
+                <button
+                  type="button"
+                  className={`toggle-btn ${viewMode === 'polygon' ? 'active' : ''}`}
+                  onClick={() => setViewMode('polygon')}
+                >
+                  Polygon
+                </button>
+                <button
+                  type="button"
+                  className={`toggle-btn ${viewMode === 'heatmap' ? 'active' : ''}`}
+                  onClick={() => {
+                    // Reset heatmap filters to ALL when switching to heatmap
+                    setHeatmapLayerFilters(ALL_LAYERS);
+                    setViewMode('heatmap');
+                  }}
+                >
+                  Heatmap
+                </button>
+              </ViewToggleInline>
+            }
+          >
             <svg
               xmlns="http://www.w3.org/2000/svg"
               xmlnsXlink="http://www.w3.org/1999/xlink"
@@ -1165,21 +1164,6 @@ export default function SupersetPluginChartFloorMap(
                   imgW={imgW}
                   imgH={imgH}
                   layerFilters={heatmapLayerFilters}
-                  onHoverEnter={(name, footfall, svgX, svgY, e) => {
-                    const parentRect =
-                      mapPanelRef.current?.getBoundingClientRect();
-                    if (parentRect) {
-                      const rect = (
-                        e.target as SVGCircleElement
-                      ).getBoundingClientRect();
-                      setHeatmapTooltipPos({
-                        x: rect.left - parentRect.left + rect.width / 2,
-                        y: rect.top - parentRect.top,
-                      });
-                    }
-                    setHeatmapHoveredName(name);
-                  }}
-                  onHoverLeave={() => setHeatmapHoveredName(null)}
                 />
               )}
             </svg>

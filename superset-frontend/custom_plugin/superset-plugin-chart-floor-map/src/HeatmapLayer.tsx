@@ -799,7 +799,7 @@ export function HeatmapLegend({
       style={{
         position: 'absolute',
         top: 14,
-        right: 14,
+        left: 14,
         background: 'rgba(255,255,255,0.97)',
         borderRadius: 10,
         padding: '12px 16px 10px',
