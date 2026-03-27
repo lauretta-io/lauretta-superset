@@ -377,12 +377,12 @@ function sampleInterior(
  */
 function heatmapColor(t: number): string {
   const stops = [
-    { p: 0.0, r: 128, g: 128, b: 128 }, // Grey
-    { p: 0.25, r: 0, g: 172, b: 229 }, // Bright cyan
-    { p: 0.5, r: 0, g: 228, b: 54 }, // Bright lime
-    { p: 0.7, r: 255, g: 219, b: 0 }, // Bright yellow
-    { p: 0.85, r: 255, g: 104, b: 0 }, // Orange
-    { p: 1.0, r: 255, g: 0, b: 0 }, // Bold red
+    { p: 0.0, r: 50, g: 120, b: 255 },  // Xanh dương nhạt (Mát / Thấp)
+    { p: 0.25, r: 0, g: 210, b: 255 },  // Cyan
+    { p: 0.5, r: 0, g: 220, b: 60 },    // Xanh lá (Trung bình)
+    { p: 0.75, r: 255, g: 210, b: 0 },  // Vàng
+    { p: 0.9, r: 255, g: 100, b: 0 },   // Cam (Cao)
+    { p: 1.0, r: 255, g: 0, b: 0 },     // Đỏ rực (Rất cao)
   ];
   let lo = stops[0];
   let hi = stops[stops.length - 1];
@@ -439,9 +439,9 @@ export function HeatmapLayer({
   // large maps, preventing isolated cold gaps between stores.
   // Small map (~700px diag) → SIGMA ≈ 28; large map (~6800px diag) → SIGMA capped at 70
   const mapDiag = Math.sqrt(imgW * imgW + imgH * imgH);
-  const SIGMA = Math.min(40, Math.max(28, mapDiag * 0.014));
+  const SIGMA = Math.min(60, Math.max(30, mapDiag * 0.015));
   const INTERIOR_SPACING = 16;
-  const PERCENTILE_CLAMP = 0.88;
+  const PERCENTILE_CLAMP = 0.98;
   const GAMMA = 1.2;
   const COLOR_GAMMA = 0.9;
 
@@ -593,7 +593,7 @@ export function HeatmapLayer({
       return { kdeGrid: [] as any[], maxKDE: 1 };
 
     const twoSigmaSq = 2 * SIGMA * SIGMA;
-    const cutoff = 3 * SIGMA;
+    const cutoff = 4.5 * SIGMA; // Mở rộng bán kính để loang màu mượt hơn
     const cutoffSq = cutoff * cutoff;
 
     const srcBB = sources.map(s => ({
@@ -618,12 +618,12 @@ export function HeatmapLayer({
     for (let i = 0; i < dotGrid.length; i += 1) {
       const { col, row, px, py } = dotGrid[i];
       let kdeVal = 0;
-      let dominantName = '',
-        dominantContrib = -1;
-      // Weighted blend: each source contributes footfall proportional to its
-      // Gaussian contribution at this cell → smooth color transitions between zones.
-      let totalContrib = 0;
+      
+      // Biến nội suy màu sắc (đã khử độ lệch diện tích)
+      let totalFairContrib = 0;
       let weightedFootfall = 0;
+      
+      const storeEnergy: Record<string, number> = {};
 
       for (let j = 0; j < srcBB.length; j += 1) {
         const { s, minX, maxX, minY, maxY } = srcBB[j];
@@ -632,16 +632,27 @@ export function HeatmapLayer({
           dy = py - s.y;
         const dSq = dx * dx + dy * dy;
         if (dSq > cutoffSq) continue;
-        const contrib = s.weight * Math.exp(-dSq / twoSigmaSq);
-        kdeVal += contrib;
-        // Accumulate footfall-weighted blend using raw Gaussian (not per-sample weight)
+        
         const rawContrib = Math.exp(-dSq / twoSigmaSq);
-        totalContrib += rawContrib;
-        weightedFootfall += rawContrib * s.totalWeight;
-        // Still track dominant name for tooltip
-        if (contrib > dominantContrib) {
-          dominantContrib = contrib;
-          dominantName = s.name;
+        const contrib = s.weight * rawContrib;
+        kdeVal += contrib;
+        
+        // LÕI TOÁN HỌC: Khử độ lệch do diện tích cửa hàng (số lượng sample).
+        // Trọng số công bằng = khoảng_cách * (1 / số_lượng_sample)
+        const fairWeight = rawContrib * (s.weight / s.totalWeight);
+        
+        totalFairContrib += fairWeight;
+        weightedFootfall += contrib; // tương đương fairWeight * s.totalWeight
+        
+        storeEnergy[s.name] = (storeEnergy[s.name] || 0) + contrib;
+      }
+
+      let dominantName = '';
+      let maxEnergy = -1;
+      for (const name in storeEnergy) {
+        if (storeEnergy[name] > maxEnergy) {
+          maxEnergy = storeEnergy[name];
+          dominantName = name;
         }
       }
 
@@ -653,8 +664,8 @@ export function HeatmapLayer({
         py,
         kde: kdeVal,
         nearestName: dominantName,
-        // Smooth blend: footfall is the weighted average of all contributing stores
-        nearestFootfall: totalContrib > 0 ? weightedFootfall / totalContrib : 0,
+        // Chia trung bình bằng trọng số công bằng (để 6000 không bị kéo xuống Xanh lá)
+        nearestFootfall: totalFairContrib > 0 ? weightedFootfall / totalFairContrib : 0,
       });
     }
 
@@ -665,28 +676,32 @@ export function HeatmapLayer({
    *
    * Two separate normalised values are produced per cell:
    *
-   *   norm          — KDE-based (spatial density). Used for radius + opacity.
-   *                   Reflects how many overlapping sources influence a cell.
+   * norm          — KDE-based (spatial density). Used for radius + opacity.
+   * Reflects how many overlapping sources influence a cell.
    *
-   *   footfallNorm  — Footfall-based (per-store total). Used for color.
-   *                   Derived from the dominant store's actual footfall so that
-   *                   large polygons with high footfall are NOT diluted by their
-   *                   sample count. Ensures bolder color = higher footfall.
-   *
-   * Color and spatial presence are intentionally decoupled.
-   *
-   * nearestFootfall is now a contribution-weighted blend of all nearby stores
-   * (not winner-takes-all), so footfallNorm transitions smoothly between zones.
+   * footfallNorm  — Footfall-based (per-store total). Used for color.
+   * Derived from the dominant store's actual footfall so that
+   * large polygons with high footfall are NOT diluted by their
+   * sample count. Ensures bolder color = higher footfall.
    */
-  const maxFootfall = useMemo(
-    () => Math.max(...points.map(p => p.weight), 1),
-    [points],
-  );
+  const { robustMaxFootfall } = useMemo(() => {
+    if (points.length === 0) return { robustMaxFootfall: 1 };
+    
+    // SỬA ĐỔI 1: Áp dụng lại Percentile 96% một cách nhẹ nhàng.
+    // Việc này giúp bỏ qua 1-2 cái Entrance/Outlier khổng lồ (như mấy chấm đỏ ngoài rìa),
+    // Lấy mốc Max dựa trên top các cửa hàng Retail thực sự, giúp map không bị đè bẹp.
+    const footfalls = points.map(p => p.weight).filter(w => w > 0).sort((a, b) => a - b);
+    if (footfalls.length === 0) return { robustMaxFootfall: 1 };
+
+    const clampIdx = Math.floor(footfalls.length * 0.96);
+    const robustMax = footfalls[clampIdx] || footfalls[footfalls.length - 1];
+
+    return { robustMaxFootfall: Math.max(robustMax, 1) };
+  }, [points]);
 
   const sortedCells = useMemo(() => {
     if (kdeGrid.length === 0) return [];
     const logMax = Math.log1p(maxKDE);
-    const logMaxFootfall = Math.log1p(maxFootfall);
 
     const withLog = kdeGrid.map(c => ({
       ...c,
@@ -697,60 +712,74 @@ export function HeatmapLayer({
     const clampIdx = Math.floor(vals.length * PERCENTILE_CLAMP);
     const clampVal = Math.max(vals[clampIdx] ?? 1, 0.01);
 
+    // SỬA ĐỔI 2: DYNAMIC COLOR GAMMA = 0.45 (Căn bậc hai)
+    // Thay vì dùng COLOR_GAMMA = 0.9 như cũ, mức 0.45 sẽ "giải cứu" các store màu Xanh Dương.
+    // Ví dụ: Cửa hàng có footfall bằng 1/10 mức Max (0.1) -> 0.1^0.45 = 0.35 -> Ra màu Xanh Lá/Cyan rất đẹp!
+    // Cửa hàng 6000/12000 (0.5) -> 0.5^0.45 = 0.73 -> Vẫn giữ được màu Vàng/Cam.
+    const DYNAMIC_COLOR_GAMMA = 0.45;
+
     return withLog
       .map(c => {
-        // KDE norm: spatial density → drives radius + opacity
+        // Opacity (Norm): Sự phân bố không gian (decay) chạy từ 1.0 (tâm) xuống 0.0 (rìa)
         const norm = Math.pow(Math.min(c.logNorm / clampVal, 1.0), GAMMA);
-        // Footfall norm: blended footfall across nearby stores → drives color
-        // Because nearestFootfall is now a weighted average, this value
-        // transitions smoothly as you move from one store's zone into another.
-        const footfallNorm = Math.pow(
-          logMaxFootfall > 0
-            ? Math.log1p(c.nearestFootfall) / logMaxFootfall
-            : 0,
-          COLOR_GAMMA,
-        );
+        
+        // Color: Lấy tỷ lệ footfall gốc của cửa hàng
+        const clampedFootfall = Math.min(c.nearestFootfall, robustMaxFootfall);
+        const footfallRatio = clampedFootfall / robustMaxFootfall;
+        
+        // BƯỚC 1: Sức mạnh màu gốc (Base Color Strength)
+        // Áp dụng DYNAMIC_COLOR_GAMMA để đẩy màu cho các store nhỏ (cứu map có outlier)
+        const baseColorStrength = Math.pow(footfallRatio, DYNAMIC_COLOR_GAMMA);
+        
+        // BƯỚC 2: Phân rã không gian ĐỘC LẬP (Spatial Decay)
+        // Dùng norm^0.75 để ép màu Đỏ/Cam phải rớt dốc rõ ràng xuống Vàng/Xanh khi ra rìa.
+        const spatialDecay = Math.pow(norm, 0.35); 
+        
+        // BƯỚC 3: Tổ hợp lại
+        const footfallNorm = baseColorStrength * spatialDecay;
+
         return { ...c, norm, footfallNorm };
       })
       .sort((a, b) => a.norm - b.norm);
-  }, [kdeGrid, maxKDE, maxFootfall, COLOR_GAMMA]);
+  }, [kdeGrid, maxKDE, robustMaxFootfall, PERCENTILE_CLAMP, GAMMA]);
 
   /* ── STAGE 5 — Render ─────────────────────────────────────────────────
    *
    * COLOR   ← footfallNorm (dominant store's total footfall, log-compressed)
-   *           Large high-footfall stores always appear bold/hot.
-   *           Polygon size does not dilute color.
+   * Large high-footfall stores always appear bold/hot.
+   * Polygon size does not dilute color.
    *
    * OPACITY ← norm (KDE spatial density)
-   *           Cells in low-activity areas stay faint.
+   * Cells in low-activity areas stay faint but visible.
    *
    * GEOMETRY: Full-pixel squares (no gaps) for continuous coverage visualization.
-   *           Each cell rendered as a square filling its grid cell completely.
+   * Each cell rendered as a square filling its grid cell completely.
    *
    * Painting order: low-intensity first, high-intensity on top.
    */
-  // Full-pixel rendering: each cell is a square that exactly fills cellSize
-  // This creates a continuous pixel-like appearance with no gaps.
+  // Mở khóa phần map điểm của buildingHull để vẽ viền polygon
   // const debugHullPoints = useMemo(
   //   () => buildingHull.map(p => `${p.x},${p.y}`).join(' '),
   //   [buildingHull],
   // );
 
   return (
-    <g className="heatmap-layer">
+    <g className="heatmap-layer" style={{ mixBlendMode: 'multiply' }}>
       {sortedCells.map(cell => {
-        // Color driven by the dominant store's actual footfall — size-independent
         const color = heatmapColor(cell.footfallNorm);
-        // Opacity varies with KDE density to show concentration areas.
-        const fillOpacity = 0.2 + Math.pow(cell.norm, 0.65) * 0.8;
+        
+        const baseOpacity = 0.15; 
+        const maxOpacity = 0.85;
+        
+        const fillOpacity = baseOpacity + (maxOpacity - baseOpacity) * Math.pow(cell.norm, 1.2);
 
         return (
           <rect
             key={`h-${cell.col}-${cell.row}`}
             x={cell.px - cellSize / 2}
             y={cell.py - cellSize / 2}
-            width={cellSize}
-            height={cellSize}
+            width={cellSize + 0.75} 
+            height={cellSize + 0.75}
             fill={color}
             fillOpacity={fillOpacity}
             stroke="none"
@@ -762,7 +791,7 @@ export function HeatmapLayer({
         <polygon
           points={debugHullPoints}
           fill="none"
-          stroke="#ff0000"
+          stroke="#ff0000" // Viền màu đỏ để dễ nhìn
           strokeWidth={8}
           strokeOpacity={0.95}
           vectorEffect="non-scaling-stroke"
@@ -770,8 +799,7 @@ export function HeatmapLayer({
         />
       )} */}
     </g>
-  );
-}
+  );}
 
 /* ═══════════════════════════════════════════════════════════════════════════
  *  HEATMAP LEGEND
@@ -786,12 +814,12 @@ export function HeatmapLegend({
 }) {
   const gradientId = 'heatmap-legend-gradient';
   const stops = [
-    { offset: '0%', color: 'rgb(128,128,128)' }, // Grey
-    { offset: '25%', color: 'rgb(0,172,229)' }, // Bright cyan
-    { offset: '50%', color: 'rgb(0,228,54)' }, // Bright lime
-    { offset: '70%', color: 'rgb(255,219,0)' }, // Bright yellow
-    { offset: '85%', color: 'rgb(255,104,0)' }, // Orange
-    { offset: '100%', color: 'rgb(255,0,0)' }, // Bold red
+    { offset: '0%', color: 'rgb(50,120,255)' },
+    { offset: '25%', color: 'rgb(0,210,255)' },
+    { offset: '50%', color: 'rgb(0,220,60)' },
+    { offset: '75%', color: 'rgb(255,210,0)' },
+    { offset: '90%', color: 'rgb(255,100,0)' },
+    { offset: '100%', color: 'rgb(255,0,0)' },
   ];
 
   return (
@@ -867,18 +895,12 @@ export function HeatmapLegend({
         }}
       >
         <svg width={108} height={22}>
-          <circle
-            cx={8}
-            cy={11}
-            r={3.5}
-            fill="rgb(128,128,128)"
-            opacity={0.15}
-          />
-          <circle cx={26} cy={11} r={4} fill="rgb(0,200,255)" opacity={0.35} />
-          <circle cx={46} cy={11} r={4.5} fill="rgb(0,220,80)" opacity={0.52} />
-          <circle cx={66} cy={11} r={5} fill="rgb(255,230,0)" opacity={0.68} />
-          <circle cx={85} cy={11} r={5.5} fill="rgb(255,100,0)" opacity={0.8} />
-          <circle cx={103} cy={11} r={6} fill="rgb(255,0,0)" opacity={0.9} />
+          <circle cx={8} cy={11} r={3.5} fill="rgb(50,120,255)" opacity={0.25} />
+          <circle cx={26} cy={11} r={4} fill="rgb(0,210,255)" opacity={0.4} />
+          <circle cx={46} cy={11} r={4.5} fill="rgb(0,220,60)" opacity={0.55} />
+          <circle cx={66} cy={11} r={5} fill="rgb(255,210,0)" opacity={0.7} />
+          <circle cx={85} cy={11} r={5.5} fill="rgb(255,100,0)" opacity={0.85} />
+          <circle cx={103} cy={11} r={6} fill="rgb(255,0,0)" opacity={0.95} />
         </svg>
         <span style={{ fontSize: 9, color: '#777', fontWeight: 500 }}>
           density →
