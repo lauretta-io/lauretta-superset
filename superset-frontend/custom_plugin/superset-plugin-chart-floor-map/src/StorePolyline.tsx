@@ -122,7 +122,7 @@ export function StorePolyline({
   onClick,
 }: StorePolylineProps) {
   const fillColor = getLayerFootfallColor(
-    store.total_footfall_zo,
+    store.total_footfall,
     layer,
     maxFootfall,
   );

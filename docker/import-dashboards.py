@@ -102,7 +102,7 @@ SELECT
     res.layer,
     res.category,
     res.points,
-    res.total_footfall_zo,
+    res.total_footfall,
     COALESCE(res.event_time, CAST({{ "'" + start_date + "'" if from_dttm else start_date }} AS TIMESTAMP)) AS event_time
 FROM (
     -- Units
@@ -111,7 +111,7 @@ FROM (
         'Retail' AS layer, 
         COALESCE(ug.name, 'Uncategorized') AS category,
         z.points,
-        COALESCE(usd.total_footfall_zo, 0) AS total_footfall_zo,
+        COALESCE(usd.total_footfall, 0) AS total_footfall,
         usd.event_time
     FROM property.zones z
     LEFT JOIN property.unit_zone_mappings uzm ON uzm.zone_id = z.id
@@ -119,7 +119,7 @@ FROM (
     LEFT JOIN property.unit_unit_group_mappings uugm ON uugm.unit_id = u.id
     LEFT JOIN property.unit_groups ug ON ug.id = uugm.unit_group_id
     LEFT JOIN (
-        SELECT unit_id, SUM(footfall_zo) AS total_footfall_zo, MAX({{ t_col }}) as event_time
+        SELECT unit_id, SUM(footfall_zo) AS total_footfall, MAX({{ t_col }}) as event_time
         FROM property.unit_summary{{ suffix }}
         WHERE 1=1
           {% if from_dttm %} AND {{ t_col }}::timestamp >= '{{ from_str.replace("T", " ") }}'::timestamp {% endif %}
@@ -138,13 +138,13 @@ FROM (
         'Public' AS layer, 
         'Public' AS category, 
         z.points,
-        COALESCE(pssd.total_footfall_zo, 0) AS total_footfall_zo,
+        COALESCE(pssd.total_footfall, 0) AS total_footfall,
         pssd.event_time
     FROM property.public_spaces ps 
     LEFT JOIN property.public_space_zone_mappings pszm ON pszm.public_space_id = ps.id 
     LEFT JOIN property.zones z ON z.id = pszm.zone_id 
     LEFT JOIN (
-        SELECT public_space_id, SUM(footfall_zo) AS total_footfall_zo, MAX({{ t_col }}) as event_time
+        SELECT public_space_id, SUM(footfall_zo) AS total_footfall, MAX({{ t_col }}) as event_time
         FROM property.public_space_summary{{ suffix }}
         WHERE 1=1
           {% if from_dttm %} AND {{ t_col }}::timestamp >= '{{ from_str.replace("T", " ") }}'::timestamp {% endif %}
@@ -160,13 +160,13 @@ FROM (
         'Entrances' AS layer, 
         'Entrances' AS category, 
         z.points,
-        COALESCE(esd.total_footfall_zo, 0) AS total_footfall_zo,
+        COALESCE(esd.total_footfall, 0) AS total_footfall,
         esd.event_time
     FROM property.entrances e
     LEFT JOIN property.entrance_zone_mappings ezm ON ezm.entrance_id = e.id
     LEFT JOIN property.zones z ON z.id = ezm.zone_id
     LEFT JOIN (
-        SELECT entrance_id, SUM(footfall_zo) AS total_footfall_zo, MAX({{ t_col }}) as event_time
+        SELECT entrance_id, SUM(footfall_zo) AS total_footfall, MAX({{ t_col }}) as event_time
         FROM property.entrance_summary{{ suffix }}
         WHERE 1=1
           {% if from_dttm %} AND {{ t_col }}::timestamp >= '{{ from_str.replace("T", " ") }}'::timestamp {% endif %}
@@ -182,13 +182,13 @@ FROM (
         'Circulation' AS layer, 
         'Circulation' AS category, 
         z.points,
-        COALESCE(esd.total_footfall_zo, 0) AS total_footfall_zo,
+        COALESCE(esd.total_footfall, 0) AS total_footfall,
         esd.event_time
     FROM property.escalators e
     LEFT JOIN property.escalator_zone_mappings ezm ON ezm.escalator_id = e.id
     LEFT JOIN property.zones z ON z.id = ezm.zone_id
     LEFT JOIN (
-        SELECT escalator_id, SUM(footfall_zo) AS total_footfall_zo, MAX({{ t_col }}) as event_time
+        SELECT escalator_id, SUM(footfall_zo) AS total_footfall, MAX({{ t_col }}) as event_time
         FROM property.escalator_summary{{ suffix }}
         WHERE 1=1
           {% if from_dttm %} AND {{ t_col }}::timestamp >= '{{ from_str.replace("T", " ") }}'::timestamp {% endif %}
@@ -204,13 +204,13 @@ FROM (
         'Circulation' AS layer, 
         'Circulation' AS category, 
         z.points,
-        COALESCE(llsd.total_footfall_zo, 0) AS total_footfall_zo,
+        COALESCE(llsd.total_footfall, 0) AS total_footfall,
         llsd.event_time
     FROM property.lift_lobbies ll
     LEFT JOIN property.lift_lobby_zone_mappings llzm ON llzm.lift_lobby_id = ll.id
     LEFT JOIN property.zones z ON z.id = llzm.zone_id
     LEFT JOIN (
-        SELECT lift_lobby_id, SUM(footfall_zo) AS total_footfall_zo, MAX({{ t_col }}) as event_time
+        SELECT lift_lobby_id, SUM(footfall_zo) AS total_footfall, MAX({{ t_col }}) as event_time
         FROM property.lift_lobby_summary{{ suffix }}
         WHERE 1=1
           {% if from_dttm %} AND {{ t_col }}::timestamp >= '{{ from_str.replace("T", " ") }}'::timestamp {% endif %}
@@ -269,7 +269,7 @@ WHERE res.name IS NOT NULL
                 'extra': {}
             },
             {
-                'column_name': 'total_footfall_zo',
+                'column_name': 'total_footfall',
                 'verbose_name': None,
                 'is_dttm': False,
                 'is_active': True,
@@ -427,7 +427,7 @@ def create_default_chart_template(floor_name, floor_id, chart_id, dataset_uuid, 
         'slice_id': chart_id,
         'floor_selection': floor_name,
         'floor_image': public_floor_image,
-        'cols': ['name', 'category', 'points', 'total_footfall_zo', 'layer'],
+        'cols': ['name', 'category', 'points', 'total_footfall', 'layer'],
         'adhoc_filters': adhoc_filters,
         'row_limit': 5000,
         'extra_form_data': {}
@@ -453,7 +453,7 @@ def create_default_chart_template(floor_name, floor_id, chart_id, dataset_uuid, 
                 'url_params': {},
                 'custom_params': {},
                 'custom_form_data': {},
-                'groupby': ['name', 'category', 'points', 'total_footfall_zo', 'layer']
+                'groupby': ['name', 'category', 'points', 'total_footfall', 'layer']
             }
         ],
         'form_data': {
@@ -461,7 +461,7 @@ def create_default_chart_template(floor_name, floor_id, chart_id, dataset_uuid, 
             'slice_id': chart_id,
             'floor_selection': floor_name,
             'floor_image': public_floor_image,
-            'cols': ['name', 'category', 'points', 'total_footfall_zo', 'layer'],
+            'cols': ['name', 'category', 'points', 'total_footfall', 'layer'],
             'adhoc_filters': adhoc_filters,
             'row_limit': 5000,
             'extra_form_data': {},
