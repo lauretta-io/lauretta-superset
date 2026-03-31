@@ -111,7 +111,6 @@ SELECT
     res.category,
     res.points,
     res.total_footfall,
-    property_footfall.prop_footfall,
     ROUND(100 * (res.total_footfall::NUMERIC / property_footfall.prop_footfall::NUMERIC), 2) AS percentage_of_prop,
     COALESCE(res.event_time, CAST({{ "'" + start_date + "'" if from_dttm else start_date }} AS TIMESTAMP)) AS event_time
 FROM (
