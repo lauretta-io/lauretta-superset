@@ -1,57 +1,95 @@
 /**
  * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- *
- *   http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * or more contributor license agreements...
  */
 import { buildQueryContext, QueryFormData } from '@superset-ui/core';
 
 /**
- * The buildQuery function is used to create an instance of QueryContext that's
- * sent to the chart data endpoint. In addition to containing information of which
- * datasource to use, it specifies the type (e.g. full payload, samples, query) and
- * format (e.g. CSV or JSON) of the result and whether or not to force refresh the data from
- * the datasource as opposed to using a cached copy of the data, if available.
- *
- * More importantly though, QueryContext contains a property `queries`, which is an array of
- * QueryObjects specifying individual data requests to be made. A QueryObject specifies which
- * columns, metrics and filters, among others, to use during the query. Usually it will be enough
- * to specify just one query based on the baseQueryObject, but for some more advanced use cases
- * it is possible to define post processing operations in the QueryObject, or multiple queries
- * if a viz needs multiple different result sets.
+ * Columns that belong to unit/unit_group filters which should be STRIPPED
+ * from query 1 (full-floor heatmap). All other filters (floor_id, time range,
+ * temporal adhoc filters) are preserved in both queries.
  */
+const UNIT_FILTER_COLUMNS = new Set(['unit_name', 'unit_group_name']);
+
+/** Strip standard filters */
+function stripUnitFilters(filters: any[] = []): any[] {
+  return filters.filter((f: any) => {
+    const col: string = f.col ?? f.column ?? f.subject ?? '';
+    return !UNIT_FILTER_COLUMNS.has(col);
+  });
+}
+
+/** Strip adhoc filters */
+function stripUnitAdhocFilters(filters: any[] = []): any[] {
+  return filters.filter((f: any) => {
+    const col: string = f.subject ?? f.col ?? f.column ?? '';
+    return !UNIT_FILTER_COLUMNS.has(col);
+  });
+}
+
+/** 🔥 Strip dashboard/native filters (IMPORTANT for refresh issue) */
+function stripUnitExtraFilters(filters: any[] = []): any[] {
+  return filters.filter((f: any) => {
+    const col: string = f.col ?? f.column ?? f.subject ?? '';
+    return !UNIT_FILTER_COLUMNS.has(col);
+  });
+}
+
 export default function buildQuery(formData: QueryFormData) {
   const { cols: groupby } = formData;
 
-  // Always include a dummy metric to ensure a valid query
-  // This allows the chart to render with or without data
-  // Return actual data including store, category, points fields (points can be NULL)
   const hasGroupby = groupby && Array.isArray(groupby) && groupby.length > 0;
 
-  return buildQueryContext(formData, baseQueryObject => [
+  const baseMetrics = [
     {
-      ...baseQueryObject,
-      groupby: hasGroupby ? groupby : [],
-      // Always add a COUNT(*) dummy metric to ensure valid query
-      metrics: [
-        {
-          expressionType: 'SQL',
-          sqlExpression: 'COUNT(*)',
-          label: '_dummy_metric',
-        },
-      ],
+      expressionType: 'SQL' as const,
+      sqlExpression: 'COUNT(*)',
+      label: '_dummy_metric',
     },
-  ]);
+  ];
+
+  return buildQueryContext(formData, baseQueryObject => {
+    // 🔍 DEBUG: inspect incoming filters BEFORE stripping
+    console.log('🔍 BASE QUERY OBJECT (before strip)', {
+      filters: baseQueryObject.filters,
+      adhoc_filters: baseQueryObject.adhoc_filters,
+      extra_filters: baseQueryObject.extra_filters,
+    });
+
+    const strippedFilters = stripUnitFilters(baseQueryObject.filters ?? []);
+    const strippedAdhoc = stripUnitAdhocFilters(
+      baseQueryObject.adhoc_filters ?? [],
+    );
+    const strippedExtra = stripUnitExtraFilters(
+      baseQueryObject.extra_filters ?? [],
+    );
+
+    // 🔍 DEBUG: inspect AFTER stripping
+    console.log('🧹 STRIPPED QUERY OBJECT (query 1)', {
+      filters: strippedFilters,
+      adhoc_filters: strippedAdhoc,
+      extra_filters: strippedExtra,
+    });
+
+    return [
+      // ── Query 0: FULLY FILTERED ──────────────────────────────────────────
+      {
+        ...baseQueryObject,
+        groupby: hasGroupby ? groupby : [],
+        metrics: baseMetrics,
+      },
+
+      // ── Query 1: UNIT-FILTER-STRIPPED ────────────────────────────────────
+      {
+        ...baseQueryObject,
+        groupby: hasGroupby ? groupby : [],
+        metrics: baseMetrics,
+
+        // ✅ Keep everything except unit filters
+        filters: strippedFilters,
+        adhoc_filters: strippedAdhoc,
+        extra_filters: strippedExtra,
+      },
+    ];
+  });
 }

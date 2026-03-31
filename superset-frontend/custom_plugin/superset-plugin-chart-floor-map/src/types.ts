@@ -41,8 +41,11 @@ export type SupersetPluginChartFloorMapQueryFormData = QueryFormData &
   SupersetPluginChartFloorMapStylesProps &
   SupersetPluginChartFloorMapCustomizeProps;
 
-export type SupersetPluginChartFloorMapProps = SupersetPluginChartFloorMapStylesProps &
-  SupersetPluginChartFloorMapCustomizeProps & {
-    data: TimeseriesDataRecord[];
-    // add typing here for the props you pass in from transformProps.ts!
-  };
+export type SupersetPluginChartFloorMapProps =
+  SupersetPluginChartFloorMapStylesProps &
+    SupersetPluginChartFloorMapCustomizeProps & {
+      /** Filtered dataset — respects all UI filters. Drives polygon colors + store list. */
+      data: TimeseriesDataRecord[];
+      /** Unit-filter-stripped dataset — same floor + time range, all zones. Drives heatmap. */
+      unfilteredData: TimeseriesDataRecord[];
+    };

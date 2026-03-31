@@ -377,12 +377,12 @@ function sampleInterior(
  */
 function heatmapColor(t: number): string {
   const stops = [
-    { p: 0.0, r: 50, g: 120, b: 255 },  // Xanh dương nhạt (Mát / Thấp)
-    { p: 0.25, r: 0, g: 210, b: 255 },  // Cyan
-    { p: 0.5, r: 0, g: 220, b: 60 },    // Xanh lá (Trung bình)
-    { p: 0.75, r: 255, g: 210, b: 0 },  // Vàng
-    { p: 0.9, r: 255, g: 100, b: 0 },   // Cam (Cao)
-    { p: 1.0, r: 255, g: 0, b: 0 },     // Đỏ rực (Rất cao)
+    { p: 0.0, r: 50, g: 120, b: 255 }, // Xanh dương nhạt (Mát / Thấp)
+    { p: 0.25, r: 0, g: 210, b: 255 }, // Cyan
+    { p: 0.5, r: 0, g: 220, b: 60 }, // Xanh lá (Trung bình)
+    { p: 0.75, r: 255, g: 210, b: 0 }, // Vàng
+    { p: 0.9, r: 255, g: 100, b: 0 }, // Cam (Cao)
+    { p: 1.0, r: 255, g: 0, b: 0 }, // Đỏ rực (Rất cao)
   ];
   let lo = stops[0];
   let hi = stops[stops.length - 1];
@@ -511,7 +511,7 @@ export function HeatmapLayer({
         buildingHull: hull,
         sources: src,
       };
-    }, [points]);
+    }, [points, INTERIOR_SPACING]);
 
   /* ── STAGE 2 — Walkable dot grid ─────────────────────────────────────
    *
@@ -584,26 +584,42 @@ export function HeatmapLayer({
     return { dotGrid: grid, cellSize: cs };
   }, [buildingHull, retailBBoxes, nonRetailBBoxes, adaptiveDotSpacing]);
 
-  /* ── STAGE 3 — KDE ────────────────────────────────────────────────────
+  /* ── STAGE 3 — KDE with spatial grid index ────────────────────────────
    *
    * KDE(p) = Σ_i  w_i · exp( −‖p − s_i‖² / 2σ² )
+   *
+   * Performance optimisation: instead of iterating every source for every
+   * dot (O(dots × sources)), we build a coarse spatial hash-grid keyed by
+   * (bucketCol, bucketRow) with bucket size = cutoff.  For each dot we only
+   * look up the 9 surrounding buckets — typically 10-50× fewer comparisons.
    */
   const { kdeGrid, maxKDE } = useMemo(() => {
     if (sources.length === 0 || dotGrid.length === 0)
       return { kdeGrid: [] as any[], maxKDE: 1 };
 
     const twoSigmaSq = 2 * SIGMA * SIGMA;
-    const cutoff = 4.5 * SIGMA; // Mở rộng bán kính để loang màu mượt hơn
+    const cutoff = 4.5 * SIGMA;
     const cutoffSq = cutoff * cutoff;
 
-    const srcBB = sources.map(s => ({
-      s,
-      minX: s.x - cutoff,
-      maxX: s.x + cutoff,
-      minY: s.y - cutoff,
-      maxY: s.y + cutoff,
-    }));
+    // ── Build spatial hash-grid for sources ──────────────────────────────
+    // Bucket size = cutoff so only the 3×3 neighbourhood needs checking.
+    const bucketSize = cutoff;
+    const srcGrid = new Map<string, typeof sources>();
 
+    for (let j = 0; j < sources.length; j += 1) {
+      const s = sources[j];
+      const bCol = Math.floor(s.x / bucketSize);
+      const bRow = Math.floor(s.y / bucketSize);
+      const key = `${bCol},${bRow}`;
+      let bucket = srcGrid.get(key);
+      if (!bucket) {
+        bucket = [];
+        srcGrid.set(key, bucket);
+      }
+      bucket.push(s);
+    }
+
+    // ── KDE loop ─────────────────────────────────────────────────────────
     let globalMax = 0;
     const result: {
       col: number;
@@ -618,33 +634,39 @@ export function HeatmapLayer({
     for (let i = 0; i < dotGrid.length; i += 1) {
       const { col, row, px, py } = dotGrid[i];
       let kdeVal = 0;
-      
-      // Biến nội suy màu sắc (đã khử độ lệch diện tích)
       let totalFairContrib = 0;
       let weightedFootfall = 0;
-      
       const storeEnergy: Record<string, number> = {};
 
-      for (let j = 0; j < srcBB.length; j += 1) {
-        const { s, minX, maxX, minY, maxY } = srcBB[j];
-        if (px < minX || px > maxX || py < minY || py > maxY) continue;
-        const dx = px - s.x,
-          dy = py - s.y;
-        const dSq = dx * dx + dy * dy;
-        if (dSq > cutoffSq) continue;
-        
-        const rawContrib = Math.exp(-dSq / twoSigmaSq);
-        const contrib = s.weight * rawContrib;
-        kdeVal += contrib;
-        
-        // LÕI TOÁN HỌC: Khử độ lệch do diện tích cửa hàng (số lượng sample).
-        // Trọng số công bằng = khoảng_cách * (1 / số_lượng_sample)
-        const fairWeight = rawContrib * (s.weight / s.totalWeight);
-        
-        totalFairContrib += fairWeight;
-        weightedFootfall += contrib; // tương đương fairWeight * s.totalWeight
-        
-        storeEnergy[s.name] = (storeEnergy[s.name] || 0) + contrib;
+      // Only check sources in the 3×3 bucket neighbourhood
+      const bColCenter = Math.floor(px / bucketSize);
+      const bRowCenter = Math.floor(py / bucketSize);
+
+      for (let dbCol = -1; dbCol <= 1; dbCol += 1) {
+        for (let dbRow = -1; dbRow <= 1; dbRow += 1) {
+          const bucket = srcGrid.get(
+            `${bColCenter + dbCol},${bRowCenter + dbRow}`,
+          );
+          if (!bucket) continue;
+
+          for (let j = 0; j < bucket.length; j += 1) {
+            const s = bucket[j];
+            const dx = px - s.x;
+            const dy = py - s.y;
+            const dSq = dx * dx + dy * dy;
+            if (dSq > cutoffSq) continue;
+
+            const rawContrib = Math.exp(-dSq / twoSigmaSq);
+            const contrib = s.weight * rawContrib;
+            kdeVal += contrib;
+
+            const fairWeight = rawContrib * (s.weight / s.totalWeight);
+            totalFairContrib += fairWeight;
+            weightedFootfall += contrib;
+
+            storeEnergy[s.name] = (storeEnergy[s.name] || 0) + contrib;
+          }
+        }
       }
 
       let dominantName = '';
@@ -664,13 +686,13 @@ export function HeatmapLayer({
         py,
         kde: kdeVal,
         nearestName: dominantName,
-        // Chia trung bình bằng trọng số công bằng (để 6000 không bị kéo xuống Xanh lá)
-        nearestFootfall: totalFairContrib > 0 ? weightedFootfall / totalFairContrib : 0,
+        nearestFootfall:
+          totalFairContrib > 0 ? weightedFootfall / totalFairContrib : 0,
       });
     }
 
     return { kdeGrid: result, maxKDE: globalMax || 1 };
-  }, [dotGrid, sources]);
+  }, [dotGrid, sources, SIGMA]);
 
   /* ── STAGE 4 — Normalise ──────────────────────────────────────────────
    *
@@ -686,11 +708,14 @@ export function HeatmapLayer({
    */
   const { robustMaxFootfall } = useMemo(() => {
     if (points.length === 0) return { robustMaxFootfall: 1 };
-    
+
     // SỬA ĐỔI 1: Áp dụng lại Percentile 96% một cách nhẹ nhàng.
     // Việc này giúp bỏ qua 1-2 cái Entrance/Outlier khổng lồ (như mấy chấm đỏ ngoài rìa),
     // Lấy mốc Max dựa trên top các cửa hàng Retail thực sự, giúp map không bị đè bẹp.
-    const footfalls = points.map(p => p.weight).filter(w => w > 0).sort((a, b) => a - b);
+    const footfalls = points
+      .map(p => p.weight)
+      .filter(w => w > 0)
+      .sort((a, b) => a - b);
     if (footfalls.length === 0) return { robustMaxFootfall: 1 };
 
     const clampIdx = Math.floor(footfalls.length * 0.96);
@@ -722,19 +747,19 @@ export function HeatmapLayer({
       .map(c => {
         // Opacity (Norm): Sự phân bố không gian (decay) chạy từ 1.0 (tâm) xuống 0.0 (rìa)
         const norm = Math.pow(Math.min(c.logNorm / clampVal, 1.0), GAMMA);
-        
+
         // Color: Lấy tỷ lệ footfall gốc của cửa hàng
         const clampedFootfall = Math.min(c.nearestFootfall, robustMaxFootfall);
         const footfallRatio = clampedFootfall / robustMaxFootfall;
-        
+
         // BƯỚC 1: Sức mạnh màu gốc (Base Color Strength)
         // Áp dụng DYNAMIC_COLOR_GAMMA để đẩy màu cho các store nhỏ (cứu map có outlier)
         const baseColorStrength = Math.pow(footfallRatio, DYNAMIC_COLOR_GAMMA);
-        
+
         // BƯỚC 2: Phân rã không gian ĐỘC LẬP (Spatial Decay)
         // Dùng norm^0.75 để ép màu Đỏ/Cam phải rớt dốc rõ ràng xuống Vàng/Xanh khi ra rìa.
-        const spatialDecay = Math.pow(norm, 0.35); 
-        
+        const spatialDecay = Math.pow(norm, 0.35);
+
         // BƯỚC 3: Tổ hợp lại
         const footfallNorm = baseColorStrength * spatialDecay;
 
@@ -767,18 +792,19 @@ export function HeatmapLayer({
     <g className="heatmap-layer" style={{ mixBlendMode: 'multiply' }}>
       {sortedCells.map(cell => {
         const color = heatmapColor(cell.footfallNorm);
-        
-        const baseOpacity = 0.15; 
+
+        const baseOpacity = 0.15;
         const maxOpacity = 0.85;
-        
-        const fillOpacity = baseOpacity + (maxOpacity - baseOpacity) * Math.pow(cell.norm, 1.2);
+
+        const fillOpacity =
+          baseOpacity + (maxOpacity - baseOpacity) * Math.pow(cell.norm, 1.2);
 
         return (
           <rect
             key={`h-${cell.col}-${cell.row}`}
             x={cell.px - cellSize / 2}
             y={cell.py - cellSize / 2}
-            width={cellSize + 0.75} 
+            width={cellSize + 0.75}
             height={cellSize + 0.75}
             fill={color}
             fillOpacity={fillOpacity}
@@ -799,7 +825,8 @@ export function HeatmapLayer({
         />
       )} */}
     </g>
-  );}
+  );
+}
 
 /* ═══════════════════════════════════════════════════════════════════════════
  *  HEATMAP LEGEND
@@ -895,11 +922,23 @@ export function HeatmapLegend({
         }}
       >
         <svg width={108} height={22}>
-          <circle cx={8} cy={11} r={3.5} fill="rgb(50,120,255)" opacity={0.25} />
+          <circle
+            cx={8}
+            cy={11}
+            r={3.5}
+            fill="rgb(50,120,255)"
+            opacity={0.25}
+          />
           <circle cx={26} cy={11} r={4} fill="rgb(0,210,255)" opacity={0.4} />
           <circle cx={46} cy={11} r={4.5} fill="rgb(0,220,60)" opacity={0.55} />
           <circle cx={66} cy={11} r={5} fill="rgb(255,210,0)" opacity={0.7} />
-          <circle cx={85} cy={11} r={5.5} fill="rgb(255,100,0)" opacity={0.85} />
+          <circle
+            cx={85}
+            cy={11}
+            r={5.5}
+            fill="rgb(255,100,0)"
+            opacity={0.85}
+          />
           <circle cx={103} cy={11} r={6} fill="rgb(255,0,0)" opacity={0.95} />
         </svg>
         <span style={{ fontSize: 9, color: '#777', fontWeight: 500 }}>

@@ -569,7 +569,8 @@ export default function SupersetPluginChartFloorMap(
 ) {
   // height and width are the height and width of the DOM element as it exists in the dashboard.
   // There is also a `data` prop, which is, of course, your DATA 🎉
-  const { data, height, width, floorImage, floorSelection } = props;
+  const { data, unfilteredData, height, width, floorImage, floorSelection } =
+    props;
   const ALL_LAYERS = ['Retail', 'Entrances', 'Circulation', 'Public'];
   const [viewMode, setViewMode] = useState<ViewMode>('polygon');
   const [hoveredItemName, setHoveredItemName] = useState<string | null>(null);
@@ -590,6 +591,8 @@ export default function SupersetPluginChartFloorMap(
   const layerFilters =
     viewMode === 'heatmap' ? heatmapLayerFilters : polygonLayerFilters;
   const [isFilterLoading, setIsFilterLoading] = useState(false);
+  // React 17-compatible pending state for heatmap mode switch
+  const [isHeatmapPending, setIsHeatmapPending] = useState(false);
   const [floorsData, setFloorsData] = useState<
     { name: string; image: string }[]
   >([]);
@@ -757,14 +760,33 @@ export default function SupersetPluginChartFloorMap(
     return maxByLayer;
   }, [data, layerFilters]);
 
-  // Build heatmap points from ALL data rows.
-  // The new HeatmapLayer needs complete polygon data for negative-space walkable
-  // area detection. Items with rawPoints are included even when centroid is null
-  // (their polygons are used as obstacles in Point-in-Polygon testing).
-  const heatmapPoints = React.useMemo(() => {
-    if (!data || !Array.isArray(data)) return [];
+  // React 17-compatible deferred data: update heatmap source on next tick
+  // so the UI (spinner, button state) paints first before the heavy memo runs.
+  const rawHeatmapSource =
+    unfilteredData && Array.isArray(unfilteredData) && unfilteredData.length > 0
+      ? unfilteredData
+      : data;
+  const [deferredUnfilteredData, setDeferredUnfilteredData] =
+    useState(rawHeatmapSource);
 
-    const rawPts = data
+  useEffect(() => {
+    // Push the expensive heatmapPoints recompute to the next event-loop tick
+    // so React can flush the pending spinner render first.
+    const id = setTimeout(() => {
+      setDeferredUnfilteredData(rawHeatmapSource);
+      setIsHeatmapPending(false);
+    }, 0);
+    return () => clearTimeout(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [unfilteredData, data]);
+
+  // Build heatmap points from the UNFILTERED dataset so the heatmap always
+  // renders every zone on the floor regardless of active UI filters.
+  const heatmapPoints = React.useMemo(() => {
+    const source = deferredUnfilteredData;
+    if (!source || !Array.isArray(source)) return [];
+
+    const rawPts = source
       .map((item: any) => {
         const pointsStr = item.points || '';
         const centroid = computeCentroid(pointsStr);
@@ -823,7 +845,7 @@ export default function SupersetPluginChartFloorMap(
       y: ((p.y - minY) / rangeY) * imgH,
       polygonArea: p.polygonArea * areaScale,
     }));
-  }, [data, imgW, imgH]);
+  }, [deferredUnfilteredData, imgW, imgH]);
 
   // Global max footfall for heatmap legend (across all active layers)
   const heatmapMaxFootfall = React.useMemo(
@@ -1032,7 +1054,7 @@ export default function SupersetPluginChartFloorMap(
                 </button>
               ))}
             </div>
-            {isFilterLoading && (
+            {(isFilterLoading || isHeatmapPending) && (
               <div className="loading-overlay">
                 <div className="loading-spinner"></div>
               </div>
@@ -1093,9 +1115,10 @@ export default function SupersetPluginChartFloorMap(
                   type="button"
                   className={`toggle-btn ${viewMode === 'heatmap' ? 'active' : ''}`}
                   onClick={() => {
-                    // Reset heatmap filters to ALL when switching to heatmap
                     setHeatmapLayerFilters(ALL_LAYERS);
-                    setViewMode('heatmap');
+                    setIsHeatmapPending(true);
+                    // setViewMode on next tick so the spinner renders first
+                    setTimeout(() => setViewMode('heatmap'), 0);
                   }}
                 >
                   Heatmap
