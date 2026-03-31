@@ -633,6 +633,7 @@ export default function SupersetPluginChartFloorMap(
         itemMap.set(itemName, {
           name: itemName,
           total_footfall: item.total_footfall || 0,
+          percentage_of_prop: item.percentage_of_prop || 0,
           category: item.category || '',
           layer: item.layer || 'Unknown',
         });
@@ -923,7 +924,7 @@ export default function SupersetPluginChartFloorMap(
                           ),
                         }}
                       >
-                        {item.total_footfall.toLocaleString()}
+                        {`${item.total_footfall.toLocaleString()} (${item.percentage_of_prop}%)`}
                       </span>
                     </div>
                   </div>
@@ -1013,9 +1014,7 @@ export default function SupersetPluginChartFloorMap(
                         color: 'black',
                       }}
                     >
-                      {(
-                        displayedItem.total_footfall as number
-                      ).toLocaleString()}
+                      {`${displayedItem.total_footfall.toLocaleString()} (${displayedItem.percentage_of_prop}%)`}
                     </div>
                   </div>
                 )}
@@ -1048,9 +1047,7 @@ export default function SupersetPluginChartFloorMap(
                         color: 'black',
                       }}
                     >
-                      {(
-                        selectedItemData.total_footfall as number
-                      ).toLocaleString()}
+                      {`${selectedItemData.total_footfall.toLocaleString()} (${selectedItemData.percentage_of_prop}%)`}
                     </div>
                   </div>
                 )}

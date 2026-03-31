@@ -95,6 +95,14 @@ def create_default_dataset_template(db_uuid):
 {% set start_date = from_dttm if from_dttm else "CURRENT_DATE - INTERVAL '1 day'" %}
 {% set end_date = to_dttm if to_dttm else "CURRENT_DATE" %}
 
+WITH property_footfall AS (
+  SELECT 
+      SUM(pd.footfall_zo) AS prop_footfall
+  FROM property.property_summary{{ suffix }} pd
+  WHERE 1=1
+    {% if from_dttm %} AND {{ t_col }}::timestamp >= '{{ from_str.replace("T", " ") }}'::timestamp {% endif %}
+    {% if to_dttm %} AND {{ t_col }}::timestamp < '{{ to_str.replace("T", " ") }}'::timestamp {% endif %}
+)
 SELECT 
     res.floor_id,
     res.zone_name,
@@ -103,6 +111,8 @@ SELECT
     res.category,
     res.points,
     res.total_footfall,
+    property_footfall.prop_footfall,
+    ROUND(100 * (res.total_footfall::NUMERIC / property_footfall.prop_footfall::NUMERIC), 2) AS percentage_of_prop,
     COALESCE(res.event_time, CAST({{ "'" + start_date + "'" if from_dttm else start_date }} AS TIMESTAMP)) AS event_time
 FROM (
     -- Units
@@ -218,7 +228,7 @@ FROM (
         GROUP BY lift_lobby_id
     ) llsd ON llsd.lift_lobby_id = ll.id
 
-) res 
+) res, property_footfall
 WHERE res.name IS NOT NULL
 """
 
@@ -274,6 +284,20 @@ WHERE res.name IS NOT NULL
                 'is_dttm': False,
                 'is_active': True,
                 'type': 'LONGINTEGER',
+                'advanced_data_type': None,
+                'groupby': True,
+                'filterable': True,
+                'expression': None,
+                'description': None,
+                'python_date_format': None,
+                'extra': {}
+            },
+            {
+                'column_name': 'percentage_of_prop',
+                'verbose_name': None,
+                'is_dttm': False,
+                'is_active': True,
+                'type': 'DECIMAL',
                 'advanced_data_type': None,
                 'groupby': True,
                 'filterable': True,
@@ -427,7 +451,7 @@ def create_default_chart_template(floor_name, floor_id, chart_id, dataset_uuid, 
         'slice_id': chart_id,
         'floor_selection': floor_name,
         'floor_image': public_floor_image,
-        'cols': ['name', 'category', 'points', 'total_footfall', 'layer'],
+        'cols': ['name', 'category', 'points', 'total_footfall', 'percentage_of_prop', 'layer'],
         'adhoc_filters': adhoc_filters,
         'row_limit': 5000,
         'extra_form_data': {}
@@ -453,7 +477,7 @@ def create_default_chart_template(floor_name, floor_id, chart_id, dataset_uuid, 
                 'url_params': {},
                 'custom_params': {},
                 'custom_form_data': {},
-                'groupby': ['name', 'category', 'points', 'total_footfall', 'layer']
+                'groupby': ['name', 'category', 'points', 'total_footfall', 'percentage_of_prop', 'layer']
             }
         ],
         'form_data': {
@@ -461,7 +485,7 @@ def create_default_chart_template(floor_name, floor_id, chart_id, dataset_uuid, 
             'slice_id': chart_id,
             'floor_selection': floor_name,
             'floor_image': public_floor_image,
-            'cols': ['name', 'category', 'points', 'total_footfall', 'layer'],
+            'cols': ['name', 'category', 'points', 'total_footfall', 'percentage_of_prop', 'layer'],
             'adhoc_filters': adhoc_filters,
             'row_limit': 5000,
             'extra_form_data': {},
