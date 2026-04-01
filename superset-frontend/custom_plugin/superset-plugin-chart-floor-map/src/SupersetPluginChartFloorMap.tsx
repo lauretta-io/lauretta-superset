@@ -659,7 +659,6 @@ export default function SupersetPluginChartFloorMap(
     floorsData.find(f => f.name === floorSelection)?.image ||
     floorSelection;
   const currentFloorImage = getFloorImageUrl(resolvedImage);
-  console.log('CURRENT FLOOR IMAGE: ', currentFloorImage);
 
   // Load floor image to detect its natural dimensions (so viewBox matches the real image)
   useEffect(() => {
@@ -1107,7 +1106,10 @@ export default function SupersetPluginChartFloorMap(
                 <button
                   type="button"
                   className={`toggle-btn ${viewMode === 'polygon' ? 'active' : ''}`}
-                  onClick={() => setViewMode('polygon')}
+                  onClick={() => {
+                    setViewMode('polygon');
+                    setIsHeatmapPending(false);
+                  }}
                 >
                   Polygon
                 </button>

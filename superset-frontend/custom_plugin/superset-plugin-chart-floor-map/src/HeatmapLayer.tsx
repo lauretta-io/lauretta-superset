@@ -377,12 +377,12 @@ function sampleInterior(
  */
 function heatmapColor(t: number): string {
   const stops = [
-    { p: 0.0, r: 50, g: 120, b: 255 }, // Xanh dương nhạt (Mát / Thấp)
+    { p: 0.0, r: 50, g: 120, b: 255 }, // Light blue (Cool / Low)
     { p: 0.25, r: 0, g: 210, b: 255 }, // Cyan
-    { p: 0.5, r: 0, g: 220, b: 60 }, // Xanh lá (Trung bình)
-    { p: 0.75, r: 255, g: 210, b: 0 }, // Vàng
-    { p: 0.9, r: 255, g: 100, b: 0 }, // Cam (Cao)
-    { p: 1.0, r: 255, g: 0, b: 0 }, // Đỏ rực (Rất cao)
+    { p: 0.5, r: 0, g: 220, b: 60 }, // Green (Medium)
+    { p: 0.75, r: 255, g: 210, b: 0 }, // Yellow
+    { p: 0.9, r: 255, g: 100, b: 0 }, // Orange (High)
+    { p: 1.0, r: 255, g: 0, b: 0 }, // Bright red (Very High)
   ];
   let lo = stops[0];
   let hi = stops[stops.length - 1];
@@ -397,6 +397,10 @@ function heatmapColor(t: number): string {
   const f = (t - lo.p) / range;
   return `rgb(${Math.round(lo.r + f * (hi.r - lo.r))},${Math.round(lo.g + f * (hi.g - lo.g))},${Math.round(lo.b + f * (hi.b - lo.b))})`;
 }
+
+// Shared color-normalisation constants used by both heatmap rendering and legend bins.
+const HEATMAP_DYNAMIC_COLOR_GAMMA = 0.45;
+const HEATMAP_SPATIAL_DECAY_GAMMA = 0.35;
 
 /* ═══════════════════════════════════════════════════════════════════════════
  *  MAIN COMPONENT
@@ -443,7 +447,6 @@ export function HeatmapLayer({
   const INTERIOR_SPACING = 16;
   const PERCENTILE_CLAMP = 0.98;
   const GAMMA = 1.2;
-  const COLOR_GAMMA = 0.9;
 
   /* ── STAGE 1 — Classify & build heat sources ─────────────────────────
    *
@@ -709,9 +712,9 @@ export function HeatmapLayer({
   const { robustMaxFootfall } = useMemo(() => {
     if (points.length === 0) return { robustMaxFootfall: 1 };
 
-    // SỬA ĐỔI 1: Áp dụng lại Percentile 96% một cách nhẹ nhàng.
-    // Việc này giúp bỏ qua 1-2 cái Entrance/Outlier khổng lồ (như mấy chấm đỏ ngoài rìa),
-    // Lấy mốc Max dựa trên top các cửa hàng Retail thực sự, giúp map không bị đè bẹp.
+    // Clamp at 96th percentile to ignore 1-2 large Entrance/Outlier polygons
+    // (e.g. red blobs near the perimeter). The effective max is anchored to the
+    // top retail stores so the colour scale is not crushed by outliers.
     const footfalls = points
       .map(p => p.weight)
       .filter(w => w > 0)
@@ -737,30 +740,27 @@ export function HeatmapLayer({
     const clampIdx = Math.floor(vals.length * PERCENTILE_CLAMP);
     const clampVal = Math.max(vals[clampIdx] ?? 1, 0.01);
 
-    // SỬA ĐỔI 2: DYNAMIC COLOR GAMMA = 0.45 (Căn bậc hai)
-    // Thay vì dùng COLOR_GAMMA = 0.9 như cũ, mức 0.45 sẽ "giải cứu" các store màu Xanh Dương.
-    // Ví dụ: Cửa hàng có footfall bằng 1/10 mức Max (0.1) -> 0.1^0.45 = 0.35 -> Ra màu Xanh Lá/Cyan rất đẹp!
-    // Cửa hàng 6000/12000 (0.5) -> 0.5^0.45 = 0.73 -> Vẫn giữ được màu Vàng/Cam.
-    const DYNAMIC_COLOR_GAMMA = 0.45;
-
     return withLog
       .map(c => {
-        // Opacity (Norm): Sự phân bố không gian (decay) chạy từ 1.0 (tâm) xuống 0.0 (rìa)
+        // Opacity: spatial density — 1.0 at the centre of a source, 0.0 at the edge.
         const norm = Math.pow(Math.min(c.logNorm / clampVal, 1.0), GAMMA);
 
-        // Color: Lấy tỷ lệ footfall gốc của cửa hàng
+        // Color: use the dominant store's raw footfall ratio.
         const clampedFootfall = Math.min(c.nearestFootfall, robustMaxFootfall);
         const footfallRatio = clampedFootfall / robustMaxFootfall;
 
-        // BƯỚC 1: Sức mạnh màu gốc (Base Color Strength)
-        // Áp dụng DYNAMIC_COLOR_GAMMA để đẩy màu cho các store nhỏ (cứu map có outlier)
-        const baseColorStrength = Math.pow(footfallRatio, DYNAMIC_COLOR_GAMMA);
+        // Step 1: Base color strength — apply gamma to lift small stores so
+        // outliers do not crush the rest of the colour scale.
+        const baseColorStrength = Math.pow(
+          footfallRatio,
+          HEATMAP_DYNAMIC_COLOR_GAMMA,
+        );
 
-        // BƯỚC 2: Phân rã không gian ĐỘC LẬP (Spatial Decay)
-        // Dùng norm^0.75 để ép màu Đỏ/Cam phải rớt dốc rõ ràng xuống Vàng/Xanh khi ra rìa.
-        const spatialDecay = Math.pow(norm, 0.35);
+        // Step 2: Independent spatial decay — forces Orange/Red to fall off
+        // clearly toward Yellow/Green away from the source centre.
+        const spatialDecay = Math.pow(norm, HEATMAP_SPATIAL_DECAY_GAMMA);
 
-        // BƯỚC 3: Tổ hợp lại
+        // Step 3: Combine into final colour input.
         const footfallNorm = baseColorStrength * spatialDecay;
 
         return { ...c, norm, footfallNorm };
@@ -782,7 +782,7 @@ export function HeatmapLayer({
    *
    * Painting order: low-intensity first, high-intensity on top.
    */
-  // Mở khóa phần map điểm của buildingHull để vẽ viền polygon
+  // Uncomment to render the building hull outline for debugging:
   // const debugHullPoints = useMemo(
   //   () => buildingHull.map(p => `${p.x},${p.y}`).join(' '),
   //   [buildingHull],
@@ -829,6 +829,71 @@ export function HeatmapLayer({
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
+ *  HEATMAP LEGEND - Color Bins Helper
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * Generate discrete color bins for heatmap legend display
+ * Similar to polygon legend, divides the footfall range into 6 equal bins
+ */
+export function getHeatmapColorBins(
+  minVal: number,
+  maxVal: number,
+): {
+  min: number;
+  max: number;
+  fromColor: string;
+  toColor: string;
+  label: string;
+}[] {
+  const BIN_COUNT = 6;
+
+  if (maxVal <= minVal) {
+    const color = heatmapColor(0);
+    return Array.from({ length: BIN_COUNT }, () => ({
+      min: minVal,
+      max: minVal,
+      fromColor: color,
+      toColor: color,
+      label: minVal.toLocaleString(),
+    }));
+  }
+
+  const range = maxVal - minVal;
+  const binSize = Math.ceil(range / BIN_COUNT);
+  const safeRange = Math.max(range, 1);
+
+  return Array.from({ length: BIN_COUNT }, (_, index) => {
+    const min = minVal + index * binSize;
+    const max =
+      index === BIN_COUNT - 1
+        ? maxVal
+        : Math.min(maxVal, minVal + (index + 1) * binSize - 1);
+
+    const minRatio = Math.max(0, Math.min(1, (min - minVal) / safeRange));
+    const maxRatio = Math.max(0, Math.min(1, (max - minVal) / safeRange));
+
+    // Mirror heatmap renderer: footfallRatio^gamma for color strength.
+    const baseMinStrength = Math.pow(minRatio, HEATMAP_DYNAMIC_COLOR_GAMMA);
+    const baseMaxStrength = Math.pow(maxRatio, HEATMAP_DYNAMIC_COLOR_GAMMA);
+
+    // Legend colors mirror the heatmap at peak spatial density (spatialDecay = 1),
+    // showing the color a store at this footfall range displays at its centre.
+    // Formula: heatmapColor(footfallRatio ^ DYNAMIC_GAMMA) with spatialDecay = 1.
+    const fromColor = heatmapColor(baseMinStrength);
+    const toColor = heatmapColor(baseMaxStrength);
+
+    return {
+      min,
+      max,
+      fromColor,
+      toColor,
+      label: min.toLocaleString(),
+    };
+  });
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
  *  HEATMAP LEGEND
  * ═══════════════════════════════════════════════════════════════════════════ */
 
@@ -839,15 +904,18 @@ export function HeatmapLegend({
   minVal: number;
   maxVal: number;
 }) {
-  const gradientId = 'heatmap-legend-gradient';
-  const stops = [
-    { offset: '0%', color: 'rgb(50,120,255)' },
-    { offset: '25%', color: 'rgb(0,210,255)' },
-    { offset: '50%', color: 'rgb(0,220,60)' },
-    { offset: '75%', color: 'rgb(255,210,0)' },
-    { offset: '90%', color: 'rgb(255,100,0)' },
-    { offset: '100%', color: 'rgb(255,0,0)' },
-  ];
+  const colorBins = getHeatmapColorBins(minVal, maxVal);
+
+  // Dynamically size the bar so labels never overflow.
+  // Each label is at most maxVal digits + locale separators (~1 extra char per 3 digits).
+  // At font-size 9px, each character is ~5.5px wide. We need BIN_COUNT slots.
+  const longestLabel = colorBins.reduce(
+    (longest, bin) => (bin.label.length > longest.length ? bin.label : longest),
+    '',
+  );
+  const maxLabelWidth = longestLabel.length * 5.8; // px per char at 9px font
+  const minBarWidth = 280;
+  const barWidth = Math.max(minBarWidth, colorBins.length * maxLabelWidth);
 
   return (
     <div
@@ -855,24 +923,23 @@ export function HeatmapLegend({
         position: 'absolute',
         top: 14,
         left: 14,
-        background: 'rgba(255,255,255,0.97)',
-        borderRadius: 10,
-        padding: '12px 16px 10px',
-        boxShadow: '0 2px 12px rgba(0,0,0,0.15)',
+        background: 'white',
+        borderRadius: 8,
+        padding: '12px 16px',
+        boxShadow: '0 2px 8px rgba(0, 0, 0, 0.15)',
         zIndex: 500,
         display: 'flex',
         flexDirection: 'column',
         alignItems: 'stretch',
-        gap: 6,
-        minWidth: 170,
-        border: '1px solid #e0e0e0',
+        gap: 10,
+        border: '1px solid #ddd',
       }}
     >
       <div
         style={{
           fontSize: 12,
-          fontWeight: 700,
-          color: '#222',
+          fontWeight: 600,
+          color: '#333',
           textAlign: 'center',
           letterSpacing: 0.3,
         }}
@@ -880,70 +947,73 @@ export function HeatmapLegend({
         Foot Traffic Concentration
       </div>
 
-      <svg width={150} height={16}>
-        <defs>
-          <linearGradient id={gradientId} x1="0%" y1="0%" x2="100%" y2="0%">
-            {stops.map(s => (
-              <stop key={s.offset} offset={s.offset} stopColor={s.color} />
-            ))}
-          </linearGradient>
-        </defs>
-        <rect
-          x={0}
-          y={0}
-          width={150}
-          height={16}
-          fill={`url(#${gradientId})`}
-          rx={4}
+      {/* Continuous gradient bar across all bins */}
+      <div
+        style={{
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 0,
+          width: barWidth,
+        }}
+      >
+        {/* Gradient bar */}
+        <div
+          style={{
+            height: 14,
+            borderRadius: '2px',
+            backgroundImage: `linear-gradient(90deg, ${[
+              ...colorBins.map(
+                (bin, idx) =>
+                  `${bin.fromColor} ${((idx / colorBins.length) * 100).toFixed(1)}%`,
+              ),
+              `${colorBins[colorBins.length - 1].toColor} 100%`,
+            ].join(', ')})`,
+          }}
         />
-      </svg>
 
-      <div
-        style={{
-          display: 'flex',
-          justifyContent: 'space-between',
-          fontSize: 10,
-          color: '#555',
-          fontWeight: 500,
-        }}
-      >
-        <span>Low ({minVal.toLocaleString()})</span>
-        <span>High ({maxVal.toLocaleString()})</span>
-      </div>
+        {/* Tick marks at each milestone boundary */}
+        <div style={{ position: 'relative', height: 6 }}>
+          {colorBins.map((bin, idx) => {
+            const pct = (idx / colorBins.length) * 100;
+            return (
+              <div
+                key={idx}
+                style={{
+                  position: 'absolute',
+                  left: `${pct}%`,
+                  top: 0,
+                  width: 1,
+                  height: 6,
+                  backgroundColor: '#999',
+                  transform: 'translateX(-50%)',
+                }}
+              />
+            );
+          })}
+        </div>
 
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          gap: 6,
-          paddingTop: 5,
-          borderTop: '1px solid #eee',
-        }}
-      >
-        <svg width={108} height={22}>
-          <circle
-            cx={8}
-            cy={11}
-            r={3.5}
-            fill="rgb(50,120,255)"
-            opacity={0.25}
-          />
-          <circle cx={26} cy={11} r={4} fill="rgb(0,210,255)" opacity={0.4} />
-          <circle cx={46} cy={11} r={4.5} fill="rgb(0,220,60)" opacity={0.55} />
-          <circle cx={66} cy={11} r={5} fill="rgb(255,210,0)" opacity={0.7} />
-          <circle
-            cx={85}
-            cy={11}
-            r={5.5}
-            fill="rgb(255,100,0)"
-            opacity={0.85}
-          />
-          <circle cx={103} cy={11} r={6} fill="rgb(255,0,0)" opacity={0.95} />
-        </svg>
-        <span style={{ fontSize: 9, color: '#777', fontWeight: 500 }}>
-          density →
-        </span>
+        {/* Labels aligned to each tick */}
+        <div style={{ position: 'relative', height: 14 }}>
+          {colorBins.map((bin, idx) => {
+            const pct = (idx / colorBins.length) * 100;
+            return (
+              <span
+                key={idx}
+                style={{
+                  position: 'absolute',
+                  left: `${pct}%`,
+                  transform: idx === 0 ? 'none' : 'translateX(-50%)',
+                  fontSize: 9,
+                  color: '#666',
+                  fontWeight: 500,
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                {bin.label}
+              </span>
+            );
+          })}
+        </div>
       </div>
     </div>
   );

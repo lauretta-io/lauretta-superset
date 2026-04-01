@@ -19,28 +19,18 @@ function stripUnitFilters(filters: any[] = []): any[] {
   });
 }
 
-/** Strip adhoc filters */
-function stripUnitAdhocFilters(filters: any[] = []): any[] {
-  return filters.filter((f: any) => {
-    const col: string = f.subject ?? f.col ?? f.column ?? '';
-    return !UNIT_FILTER_COLUMNS.has(col);
-  });
-}
-
-/** 🔥 Strip dashboard/native filters (IMPORTANT for refresh issue) */
-function stripUnitExtraFilters(filters: any[] = []): any[] {
-  return filters.filter((f: any) => {
-    const col: string = f.col ?? f.column ?? f.subject ?? '';
-    return !UNIT_FILTER_COLUMNS.has(col);
-  });
-}
-
 export default function buildQuery(formData: QueryFormData) {
   const { cols: groupby } = formData;
 
   const hasGroupby = groupby && Array.isArray(groupby) && groupby.length > 0;
 
-  const baseMetrics = [
+  /**
+   * Default dummy metric: COUNT(*)
+   * This ensures Superset always executes a query with an aggregate function,
+   * so even when filters return no data, the query structure is valid and the
+   * floor map base image will display.
+   */
+  const defaultMetrics = [
     {
       expressionType: 'SQL' as const,
       sqlExpression: 'COUNT(*)',
@@ -49,43 +39,29 @@ export default function buildQuery(formData: QueryFormData) {
   ];
 
   return buildQueryContext(formData, baseQueryObject => {
-    // 🔍 DEBUG: inspect incoming filters BEFORE stripping
-    console.log('🔍 BASE QUERY OBJECT (before strip)', {
-      filters: baseQueryObject.filters,
-      adhoc_filters: baseQueryObject.adhoc_filters,
-      extra_filters: baseQueryObject.extra_filters,
-    });
-
     const strippedFilters = stripUnitFilters(baseQueryObject.filters ?? []);
-    const strippedAdhoc = stripUnitAdhocFilters(
-      baseQueryObject.adhoc_filters ?? [],
+    const adhocRaw = baseQueryObject.adhoc_filters;
+    const strippedAdhoc = stripUnitFilters(
+      Array.isArray(adhocRaw) ? adhocRaw : [],
     );
-    const strippedExtra = stripUnitExtraFilters(
-      baseQueryObject.extra_filters ?? [],
+    const extraRaw = baseQueryObject.extra_filters;
+    const strippedExtra = stripUnitFilters(
+      Array.isArray(extraRaw) ? extraRaw : [],
     );
-
-    // 🔍 DEBUG: inspect AFTER stripping
-    console.log('🧹 STRIPPED QUERY OBJECT (query 1)', {
-      filters: strippedFilters,
-      adhoc_filters: strippedAdhoc,
-      extra_filters: strippedExtra,
-    });
 
     return [
-      // ── Query 0: FULLY FILTERED ──────────────────────────────────────────
+      // ── Query 0: FULLY FILTERED (polygon mode + store list) ──────────
       {
         ...baseQueryObject,
         groupby: hasGroupby ? groupby : [],
-        metrics: baseMetrics,
+        metrics: defaultMetrics,
       },
 
-      // ── Query 1: UNIT-FILTER-STRIPPED ────────────────────────────────────
+      // ── Query 1: UNIT-FILTER-STRIPPED (heatmap — full floor) ─────────
       {
         ...baseQueryObject,
         groupby: hasGroupby ? groupby : [],
-        metrics: baseMetrics,
-
-        // ✅ Keep everything except unit filters
+        metrics: defaultMetrics,
         filters: strippedFilters,
         adhoc_filters: strippedAdhoc,
         extra_filters: strippedExtra,

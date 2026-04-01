@@ -103,7 +103,9 @@ SELECT
     res.category,
     res.points,
     res.total_footfall_zo,
-    COALESCE(res.event_time, CAST({{ "'" + start_date + "'" if from_dttm else start_date }} AS TIMESTAMP)) AS event_time
+    COALESCE(res.event_time, CAST({{ "'" + start_date + "'" if from_dttm else start_date }} AS TIMESTAMP)) AS event_time,
+    res.unit_name,
+    res.unit_group_name
 FROM (
     -- Units
     SELECT
@@ -112,7 +114,9 @@ FROM (
         COALESCE(ug.name, 'Uncategorized') AS category,
         z.points,
         COALESCE(usd.total_footfall_zo, 0) AS total_footfall_zo,
-        usd.event_time
+        usd.event_time,
+        u.name AS unit_name,
+        ug.name AS unit_group_name
     FROM property.zones z
     LEFT JOIN property.unit_zone_mappings uzm ON uzm.zone_id = z.id
     LEFT JOIN property.units u ON u.id = uzm.unit_id
@@ -126,9 +130,7 @@ FROM (
           {% if to_dttm %} AND {{ t_col }}::timestamp < '{{ to_str.replace("T", " ") }}'::timestamp {% endif %}
         GROUP BY unit_id
     ) usd ON usd.unit_id = u.id
-    WHERE 1=1
-    {% if filter_values('unit_name') %} AND u.name IN {{ filter_values('unit_name') | where_in }} {% endif %}
-    {% if filter_values('unit_group_name') %} AND ug.name IN {{ filter_values('unit_group_name') | where_in }} {% endif %}
+    WHERE u.id IS NOT NULL
 
     UNION ALL
 
@@ -139,7 +141,9 @@ FROM (
         'Public' AS category, 
         z.points,
         COALESCE(pssd.total_footfall_zo, 0) AS total_footfall_zo,
-        pssd.event_time
+        pssd.event_time,
+        NULL AS unit_name,
+        NULL AS unit_group_name
     FROM property.public_spaces ps 
     LEFT JOIN property.public_space_zone_mappings pszm ON pszm.public_space_id = ps.id 
     LEFT JOIN property.zones z ON z.id = pszm.zone_id 
@@ -161,7 +165,9 @@ FROM (
         'Entrances' AS category, 
         z.points,
         COALESCE(esd.total_footfall_zo, 0) AS total_footfall_zo,
-        esd.event_time
+        esd.event_time,
+        NULL AS unit_name,
+        NULL AS unit_group_name
     FROM property.entrances e
     LEFT JOIN property.entrance_zone_mappings ezm ON ezm.entrance_id = e.id
     LEFT JOIN property.zones z ON z.id = ezm.zone_id
@@ -183,7 +189,9 @@ FROM (
         'Circulation' AS category, 
         z.points,
         COALESCE(esd.total_footfall_zo, 0) AS total_footfall_zo,
-        esd.event_time
+        esd.event_time,
+        NULL AS unit_name,
+        NULL AS unit_group_name
     FROM property.escalators e
     LEFT JOIN property.escalator_zone_mappings ezm ON ezm.escalator_id = e.id
     LEFT JOIN property.zones z ON z.id = ezm.zone_id
@@ -205,7 +213,9 @@ FROM (
         'Circulation' AS category, 
         z.points,
         COALESCE(llsd.total_footfall_zo, 0) AS total_footfall_zo,
-        llsd.event_time
+        llsd.event_time,
+        NULL AS unit_name,
+        NULL AS unit_group_name
     FROM property.lift_lobbies ll
     LEFT JOIN property.lift_lobby_zone_mappings llzm ON llzm.lift_lobby_id = ll.id
     LEFT JOIN property.zones z ON z.id = llzm.zone_id
@@ -354,6 +364,34 @@ WHERE res.name IS NOT NULL
             },
             {
                 'column_name': 'points',
+                'verbose_name': None,
+                'is_dttm': False,
+                'is_active': True,
+                'type': 'STRING',
+                'advanced_data_type': None,
+                'groupby': True,
+                'filterable': True,
+                'expression': None,
+                'description': None,
+                'python_date_format': None,
+                'extra': {}
+            },
+            {
+                'column_name': 'unit_name',
+                'verbose_name': None,
+                'is_dttm': False,
+                'is_active': True,
+                'type': 'STRING',
+                'advanced_data_type': None,
+                'groupby': True,
+                'filterable': True,
+                'expression': None,
+                'description': None,
+                'python_date_format': None,
+                'extra': {}
+            },
+            {
+                'column_name': 'unit_group_name',
                 'verbose_name': None,
                 'is_dttm': False,
                 'is_active': True,
