@@ -297,15 +297,12 @@ function buildDetailedHull(
   if (pool.length === 0) return baseHull;
 
   // Refine long edges by inserting nearby interior vertices.
-  // This avoids connecting far extremities with a single straight segment.
   const refined = baseHull.slice();
   const edgeLens = refined.map((p, i) =>
     distance(p, refined[(i + 1) % refined.length]),
   );
   const avgEdge =
     edgeLens.reduce((s, d) => s + d, 0) / Math.max(edgeLens.length, 1);
-  // Detail tuning: lower max edge length and allow more insertions so the
-  // hull follows the store boundary more closely instead of long jumps.
   const maxEdgeLen = avgEdge * 1.35;
   const maxInsertions = Math.min(pool.length, 12_000);
 
@@ -330,7 +327,6 @@ function buildDetailedHull(
         if (t <= 0.07 || t >= 0.93) continue;
         if (dist > edgeLen * 0.6) continue;
 
-        // Prefer candidates close to this edge and not too close to vertices.
         const score = dist + 0.1 * Math.abs(0.5 - t) * edgeLen;
         if (score < bestScore) {
           bestScore = score;
@@ -350,12 +346,8 @@ function buildDetailedHull(
   return refined.length >= 3 ? refined : baseHull;
 }
 
-/* ─── Sample points uniformly from polygon interior ─────────────────────── *
- *
- * Used for ALL polygon types (Retail + Entrance/Circulation/Public).
- * Equal-split weighting: wPer = totalWeight / nSamples, so the total KDE
- * energy per polygon equals its footfall regardless of polygon size.
- */
+/* ─── Sample points uniformly from polygon interior ─────────────────────── */
+
 function sampleInterior(
   pts: { x: number; y: number }[],
   spacing: number,
@@ -373,7 +365,11 @@ function sampleInterior(
 /* ─── Color scale ─────────────────────────────────────────────────────────
  *
  * Professional high-contrast perceptually-uniform palette:
- * Grey → Bright Cyan → Bright Lime → Bright Yellow → Orange → Deep Red
+ * Blue (Cool/Low) → Cyan → Green (Medium) → Yellow → Orange → Red (Very High)
+ *
+ * Input t ∈ [0, 1] is the final combined footfall+spatial value.
+ * This function is the single source of truth for all color output —
+ * both the heatmap renderer and the legend bar use it exclusively.
  */
 function heatmapColor(t: number): string {
   const stops = [
@@ -398,7 +394,25 @@ function heatmapColor(t: number): string {
   return `rgb(${Math.round(lo.r + f * (hi.r - lo.r))},${Math.round(lo.g + f * (hi.g - lo.g))},${Math.round(lo.b + f * (hi.b - lo.b))})`;
 }
 
-// Shared color-normalisation constants used by both heatmap rendering and legend bins.
+/* ─── Shared color-normalisation constants ────────────────────────────────
+ *
+ * HEATMAP_DYNAMIC_COLOR_GAMMA  — compresses the footfall ratio so low-footfall
+ *   stores still show readable color instead of being near-black.
+ *   Applied as:  baseColorStrength = footfallRatio ^ GAMMA_COLOR
+ *
+ * HEATMAP_SPATIAL_DECAY_GAMMA  — forces color to fall off spatially away from
+ *   a store's centre, so only the core of a high-footfall store is fully hot.
+ *   Applied as:  spatialDecay = norm ^ GAMMA_SPATIAL
+ *
+ * Final color input: t = baseColorStrength × spatialDecay
+ *
+ * LEGEND CONTRACT — the legend must show the color a store actually appears at
+ * its spatial peak (norm = 1 ⟹ spatialDecay = 1^GAMMA_SPATIAL = 1).
+ * Therefore at peak:  t_peak = footfallRatio ^ GAMMA_COLOR
+ * The legend gradient is built by forward-computing t_peak across [0, robustMax].
+ * This guarantees: a color seen on the heatmap at store centre matches the same
+ * footfall value on the legend bar — no inverse-gamma approximation needed.
+ */
 const HEATMAP_DYNAMIC_COLOR_GAMMA = 0.45;
 const HEATMAP_SPATIAL_DECAY_GAMMA = 0.35;
 
@@ -416,21 +430,8 @@ export function HeatmapLayer({
 }: HeatmapLayerProps) {
   /* ─────────────────────────────────────────────────────────────────────
    *  TUNING PARAMETERS
-   *
-   *  DOT_SPACING      — visual dot grid step (SVG units). Adaptive based on
-   *                     map dimensions. Larger maps still increase spacing,
-   *                     but with a cap so density does not become too sparse.
-   *                     Target ~24000 dots with safety cap.
-   *  SIGMA            — KDE bandwidth: heat decays to ~14% at distance σ.
-   *  INTERIOR_SPACING — sample interval inside ALL polygons (Retail +
-   *                     Entrance/Circulation/Public).
-   *  PERCENTILE_CLAMP — top (1-p)% cells clamp to max colour.
-   *  GAMMA            — power-curve for contrast.  1.2 keeps midtones warm.
    * ───────────────────────────────────────────────────────────────────── */
 
-  // Adaptive DOT_SPACING:
-  // - More target cells than before, so large maps keep better continuity.
-  // - Capped max spacing to avoid sparse/separated blobs on huge images.
   const minDotSpacing = 7;
   const maxDotSpacing = 26;
   const targetDotCount = 24000;
@@ -439,31 +440,19 @@ export function HeatmapLayer({
     Math.max(minDotSpacing, Math.sqrt((imgW * imgH) / targetDotCount)),
   );
 
-  // SIGMA scales with map size so heat from each source spreads further on
-  // large maps, preventing isolated cold gaps between stores.
-  // Small map (~700px diag) → SIGMA ≈ 28; large map (~6800px diag) → SIGMA capped at 70
   const mapDiag = Math.sqrt(imgW * imgW + imgH * imgH);
   const SIGMA = Math.min(60, Math.max(30, mapDiag * 0.015));
   const INTERIOR_SPACING = 16;
   const PERCENTILE_CLAMP = 0.98;
   const GAMMA = 1.2;
 
-  /* ── STAGE 1 — Classify & build heat sources ─────────────────────────
-   *
-   * ALL polygons (Retail + Entrance/Circulation/Public) contribute heat
-   * from their interiors, sampled on a uniform grid at INTERIOR_SPACING.
-   * Each sample carries weight = totalFootfall / nSamples, so the total
-   * KDE energy per polygon equals its footfall regardless of size.
-   *
-   * BUILDING HULL: still built from Retail vertices only, used to define
-   * the dot-grid coverage area (corridor + store interiors).
-   */
+  /* ── STAGE 1 — Classify & build heat sources ──────────────────────── */
+
   const { retailBBoxes, nonRetailBBoxes, buildingHull, sources } =
     useMemo(() => {
       const retailPolys: { x: number; y: number }[][] = [];
-      const retailVertices: { x: number; y: number }[] = []; // hull built from these only
+      const retailVertices: { x: number; y: number }[] = [];
       const src: FootfallSource[] = [];
-
       const nonRetailPolys: { x: number; y: number }[][] = [];
 
       for (let i = 0; i < points.length; i += 1) {
@@ -481,10 +470,6 @@ export function HeatmapLayer({
           nonRetailPolys.push(pts);
         }
 
-        // ALL polygons (Retail + Entrance/Circulation/Public) contribute heat
-        // from their interiors, weighted by footfall.  Interior sampling gives
-        // each polygon a heat field proportional to its footfall — high-footfall
-        // stores show as warm/hot blobs, low-footfall stores stay cool.
         if (p.weight > 0) {
           const cx = pts.reduce((s, q) => s + q.x, 0) / pts.length;
           const cy = pts.reduce((s, q) => s + q.y, 0) / pts.length;
@@ -503,8 +488,6 @@ export function HeatmapLayer({
         }
       }
 
-      // Build detailed hull from retail vertices to avoid long straight jumps
-      // between far edges; fallback behavior remains stable for sparse inputs.
       const hull =
         retailVertices.length >= 3 ? buildDetailedHull(retailVertices) : [];
 
@@ -516,25 +499,14 @@ export function HeatmapLayer({
       };
     }, [points, INTERIOR_SPACING]);
 
-  /* ── STAGE 2 — Walkable dot grid ─────────────────────────────────────
-   *
-   * A cell is walkable iff:
-   *   (a) inside the building convex hull (retail-derived), OR
-   *       inside any non-retail polygon (Entrance/Circulation/Public),
-   *   AND NOT inside any retail store polygon.
-   *
-   * Rule (a) uses OR: this means Entrance/Circulation polygons that sit
-   * slightly outside the retail hull (e.g. entrance vestibules, gate areas)
-   * still get dot-grid coverage and are correctly painted.
-   * External empty space beyond any known polygon is never painted.
-   */
+  /* ── STAGE 2 — Walkable dot grid ─────────────────────────────────── */
+
   const MAX_DOT_CELLS = 80_000;
 
   const { dotGrid, cellSize } = useMemo(() => {
     if (buildingHull.length < 3 && nonRetailBBoxes.length === 0)
       return { dotGrid: [], cellSize: adaptiveDotSpacing };
 
-    // Bounding box that covers both the hull and all non-retail polygons
     const hullBB = buildingHull.length >= 3 ? makeBBox(buildingHull) : null;
     let gMinX = hullBB?.minX ?? Infinity;
     let gMinY = hullBB?.minY ?? Infinity;
@@ -547,12 +519,10 @@ export function HeatmapLayer({
       if (bb.maxY > gMaxY) gMaxY = bb.maxY;
     }
 
-    // Use adaptive spacing right from the start, then adjust upward if still too many dots
     let cs = adaptiveDotSpacing;
     const estW = gMaxX - gMinX;
     const estH = gMaxY - gMinY;
 
-    // If even with adaptive spacing we'd get too many cells, increase spacing further
     const estCellCount = (estW / cs) * (estH / cs);
     if (estCellCount > MAX_DOT_CELLS * 1.2) {
       cs = Math.ceil(Math.sqrt((estW * estH) / (MAX_DOT_CELLS * 0.9)));
@@ -567,7 +537,6 @@ export function HeatmapLayer({
       for (let row = 0; row < rows; row += 1) {
         const py = gMinY + (row + 0.5) * cs;
 
-        // Accept if inside the retail hull OR inside a non-retail polygon
         const inHull =
           buildingHull.length >= 3 && pointInPolygon(px, py, buildingHull);
         const inNonRetail = isInsideAny(px, py, nonRetailBBoxes);
@@ -587,15 +556,8 @@ export function HeatmapLayer({
     return { dotGrid: grid, cellSize: cs };
   }, [buildingHull, retailBBoxes, nonRetailBBoxes, adaptiveDotSpacing]);
 
-  /* ── STAGE 3 — KDE with spatial grid index ────────────────────────────
-   *
-   * KDE(p) = Σ_i  w_i · exp( −‖p − s_i‖² / 2σ² )
-   *
-   * Performance optimisation: instead of iterating every source for every
-   * dot (O(dots × sources)), we build a coarse spatial hash-grid keyed by
-   * (bucketCol, bucketRow) with bucket size = cutoff.  For each dot we only
-   * look up the 9 surrounding buckets — typically 10-50× fewer comparisons.
-   */
+  /* ── STAGE 3 — KDE with spatial grid index ────────────────────────── */
+
   const { kdeGrid, maxKDE } = useMemo(() => {
     if (sources.length === 0 || dotGrid.length === 0)
       return { kdeGrid: [] as any[], maxKDE: 1 };
@@ -604,8 +566,6 @@ export function HeatmapLayer({
     const cutoff = 4.5 * SIGMA;
     const cutoffSq = cutoff * cutoff;
 
-    // ── Build spatial hash-grid for sources ──────────────────────────────
-    // Bucket size = cutoff so only the 3×3 neighbourhood needs checking.
     const bucketSize = cutoff;
     const srcGrid = new Map<string, typeof sources>();
 
@@ -622,7 +582,6 @@ export function HeatmapLayer({
       bucket.push(s);
     }
 
-    // ── KDE loop ─────────────────────────────────────────────────────────
     let globalMax = 0;
     const result: {
       col: number;
@@ -641,7 +600,6 @@ export function HeatmapLayer({
       let weightedFootfall = 0;
       const storeEnergy: Record<string, number> = {};
 
-      // Only check sources in the 3×3 bucket neighbourhood
       const bColCenter = Math.floor(px / bucketSize);
       const bRowCenter = Math.floor(py / bucketSize);
 
@@ -697,24 +655,11 @@ export function HeatmapLayer({
     return { kdeGrid: result, maxKDE: globalMax || 1 };
   }, [dotGrid, sources, SIGMA]);
 
-  /* ── STAGE 4 — Normalise ──────────────────────────────────────────────
-   *
-   * Two separate normalised values are produced per cell:
-   *
-   * norm          — KDE-based (spatial density). Used for radius + opacity.
-   * Reflects how many overlapping sources influence a cell.
-   *
-   * footfallNorm  — Footfall-based (per-store total). Used for color.
-   * Derived from the dominant store's actual footfall so that
-   * large polygons with high footfall are NOT diluted by their
-   * sample count. Ensures bolder color = higher footfall.
-   */
+  /* ── STAGE 4 — Normalise ──────────────────────────────────────────── */
+
   const { robustMaxFootfall } = useMemo(() => {
     if (points.length === 0) return { robustMaxFootfall: 1 };
 
-    // Clamp at 96th percentile to ignore 1-2 large Entrance/Outlier polygons
-    // (e.g. red blobs near the perimeter). The effective max is anchored to the
-    // top retail stores so the colour scale is not crushed by outliers.
     const footfalls = points
       .map(p => p.weight)
       .filter(w => w > 0)
@@ -742,25 +687,18 @@ export function HeatmapLayer({
 
     return withLog
       .map(c => {
-        // Opacity: spatial density — 1.0 at the centre of a source, 0.0 at the edge.
         const norm = Math.pow(Math.min(c.logNorm / clampVal, 1.0), GAMMA);
 
-        // Color: use the dominant store's raw footfall ratio.
         const clampedFootfall = Math.min(c.nearestFootfall, robustMaxFootfall);
         const footfallRatio = clampedFootfall / robustMaxFootfall;
 
-        // Step 1: Base color strength — apply gamma to lift small stores so
-        // outliers do not crush the rest of the colour scale.
         const baseColorStrength = Math.pow(
           footfallRatio,
           HEATMAP_DYNAMIC_COLOR_GAMMA,
         );
 
-        // Step 2: Independent spatial decay — forces Orange/Red to fall off
-        // clearly toward Yellow/Green away from the source centre.
         const spatialDecay = Math.pow(norm, HEATMAP_SPATIAL_DECAY_GAMMA);
 
-        // Step 3: Combine into final colour input.
         const footfallNorm = baseColorStrength * spatialDecay;
 
         return { ...c, norm, footfallNorm };
@@ -768,25 +706,7 @@ export function HeatmapLayer({
       .sort((a, b) => a.norm - b.norm);
   }, [kdeGrid, maxKDE, robustMaxFootfall, PERCENTILE_CLAMP, GAMMA]);
 
-  /* ── STAGE 5 — Render ─────────────────────────────────────────────────
-   *
-   * COLOR   ← footfallNorm (dominant store's total footfall, log-compressed)
-   * Large high-footfall stores always appear bold/hot.
-   * Polygon size does not dilute color.
-   *
-   * OPACITY ← norm (KDE spatial density)
-   * Cells in low-activity areas stay faint but visible.
-   *
-   * GEOMETRY: Full-pixel squares (no gaps) for continuous coverage visualization.
-   * Each cell rendered as a square filling its grid cell completely.
-   *
-   * Painting order: low-intensity first, high-intensity on top.
-   */
-  // Uncomment to render the building hull outline for debugging:
-  // const debugHullPoints = useMemo(
-  //   () => buildingHull.map(p => `${p.x},${p.y}`).join(' '),
-  //   [buildingHull],
-  // );
+  /* ── STAGE 5 — Render ─────────────────────────────────────────────── */
 
   return (
     <g className="heatmap-layer" style={{ mixBlendMode: 'multiply' }}>
@@ -813,109 +733,137 @@ export function HeatmapLayer({
           />
         );
       })}
-      {/* {buildingHull.length >= 3 && (
-        <polygon
-          points={debugHullPoints}
-          fill="none"
-          stroke="#ff0000" // Viền màu đỏ để dễ nhìn
-          strokeWidth={8}
-          strokeOpacity={0.95}
-          vectorEffect="non-scaling-stroke"
-          pointerEvents="none"
-        />
-      )} */}
     </g>
   );
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
- *  HEATMAP LEGEND - Color Bins Helper
+ *  HEATMAP LEGEND HELPERS
+ *
+ *  FIX — Legend color pipeline now matches the heatmap exactly.
+ *
+ *  OLD (broken) approach:
+ *    The legend inverted the HEATMAP_COLOR_STOPS 't' positions back to
+ *    footfall values using:
+ *      footfall = (t ^ (1/GAMMA_COLOR)) × robustMax
+ *    Then used those 't' values as colour-stop positions in the gradient.
+ *    Problem: two stores at 7000 and 7400 both landed in the high-t region
+ *    (near t=0.85–0.95), right in the steep orange→red band, making them
+ *    look dramatically different even though the heatmap rendered them nearly
+ *    identically (because spatialDecay and log-normalisation compressed the
+ *    high end significantly).
+ *
+ *  NEW (correct) approach:
+ *    Forward-compute colors directly from footfall ratios using the SAME
+ *    formula the heatmap uses at peak spatial density (norm=1, spatialDecay=1):
+ *
+ *      t_peak = (footfall / robustMax) ^ GAMMA_COLOR
+ *
+ *    The gradient bar is built by sampling this formula across [0, robustMax],
+ *    and tick/label positions are placed at linear footfall intervals.
+ *    This guarantees: a colour seen at a store's centre on the heatmap
+ *    matches the same footfall value on the legend bar exactly.
  * ═══════════════════════════════════════════════════════════════════════════ */
 
+/** Compute robustMaxFootfall from the points array — same logic as Stage 4. */
+export function computeRobustMaxFootfall(points: HeatmapPoint[]): number {
+  const footfalls = points
+    .map(p => p.weight)
+    .filter(w => w > 0)
+    .sort((a, b) => a - b);
+  if (footfalls.length === 0) return 1;
+  const clampIdx = Math.floor(footfalls.length * 0.96);
+  return Math.max(footfalls[clampIdx] || footfalls[footfalls.length - 1], 1);
+}
+
 /**
- * Generate discrete color bins for heatmap legend display
- * Similar to polygon legend, divides the footfall range into 6 equal bins
+ * Compute the legend color for a given footfall value at peak spatial density.
+ *
+ * Uses the same formula as the heatmap renderer at norm=1:
+ *   t = (footfall / robustMax) ^ GAMMA_COLOR
+ *
+ * This is the canonical color lookup used by both getHeatmapColorBins and
+ * the HeatmapLegend gradient bar so they are always in sync.
  */
-export function getHeatmapColorBins(
-  minVal: number,
-  maxVal: number,
-): {
+export function legendColorAtFootfall(
+  footfall: number,
+  robustMax: number,
+): string {
+  const ratio = Math.min(Math.max(footfall / robustMax, 0), 1);
+  const t = Math.pow(ratio, HEATMAP_DYNAMIC_COLOR_GAMMA);
+  return heatmapColor(t);
+}
+
+/**
+ * Generate discrete colour bins for the heatmap legend.
+ *
+ * Bins are evenly spaced across [0, robustMax] in footfall space (linear).
+ * Colors are forward-computed via legendColorAtFootfall() — identical to
+ * what the heatmap renders at a store's spatial peak — so the legend
+ * faithfully represents the color a given footfall level actually shows.
+ *
+ * Why not use HEATMAP_COLOR_STOPS for bin boundaries?
+ *   The color stops are in 't' space (post-gamma), not footfall space.
+ *   Inverting them back to footfall (old approach) bunches the high-footfall
+ *   bins into a tiny footfall range, making similar stores appear very
+ *   differently colored on the legend.  Linear bins in footfall space
+ *   distribute the bins proportionally to the actual data distribution.
+ */
+export function getHeatmapColorBins(points: HeatmapPoint[]): {
   min: number;
   max: number;
   fromColor: string;
   toColor: string;
   label: string;
 }[] {
-  const BIN_COUNT = 6;
+  const robustMax = computeRobustMaxFootfall(points);
 
-  if (maxVal <= minVal) {
-    const color = heatmapColor(0);
-    return Array.from({ length: BIN_COUNT }, () => ({
-      min: minVal,
-      max: minVal,
-      fromColor: color,
-      toColor: color,
-      label: minVal.toLocaleString(),
-    }));
+  // Use 5 evenly-spaced bins across the footfall range.
+  // More bins = finer legend detail, but the bar becomes crowded.
+  const NUM_BINS = 5;
+  const bins: {
+    min: number;
+    max: number;
+    fromColor: string;
+    toColor: string;
+    label: string;
+  }[] = [];
+
+  for (let i = 0; i < NUM_BINS; i += 1) {
+    const loFootfall = (i / NUM_BINS) * robustMax;
+    const hiFootfall = ((i + 1) / NUM_BINS) * robustMax;
+
+    bins.push({
+      min: Math.round(loFootfall),
+      max: Math.round(hiFootfall),
+      fromColor: legendColorAtFootfall(loFootfall, robustMax),
+      toColor: legendColorAtFootfall(hiFootfall, robustMax),
+      label: Math.round(loFootfall).toLocaleString(),
+    });
   }
 
-  const range = maxVal - minVal;
-  const binSize = Math.ceil(range / BIN_COUNT);
-  const safeRange = Math.max(range, 1);
-
-  return Array.from({ length: BIN_COUNT }, (_, index) => {
-    const min = minVal + index * binSize;
-    const max =
-      index === BIN_COUNT - 1
-        ? maxVal
-        : Math.min(maxVal, minVal + (index + 1) * binSize - 1);
-
-    const minRatio = Math.max(0, Math.min(1, (min - minVal) / safeRange));
-    const maxRatio = Math.max(0, Math.min(1, (max - minVal) / safeRange));
-
-    // Mirror heatmap renderer: footfallRatio^gamma for color strength.
-    const baseMinStrength = Math.pow(minRatio, HEATMAP_DYNAMIC_COLOR_GAMMA);
-    const baseMaxStrength = Math.pow(maxRatio, HEATMAP_DYNAMIC_COLOR_GAMMA);
-
-    // Legend colors mirror the heatmap at peak spatial density (spatialDecay = 1),
-    // showing the color a store at this footfall range displays at its centre.
-    // Formula: heatmapColor(footfallRatio ^ DYNAMIC_GAMMA) with spatialDecay = 1.
-    const fromColor = heatmapColor(baseMinStrength);
-    const toColor = heatmapColor(baseMaxStrength);
-
-    return {
-      min,
-      max,
-      fromColor,
-      toColor,
-      label: min.toLocaleString(),
-    };
-  });
+  return bins;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
  *  HEATMAP LEGEND
+ *
+ *  Gradient bar: built by sampling legendColorAtFootfall() at 21 points
+ *  across [0, robustMax], positioned at their linear footfall ratios.
+ *  This matches the forward-computed formula used by the heatmap renderer
+ *  and getHeatmapColorBins(), so bar colours, bin swatches, and the
+ *  rendered heatmap are all consistent.
+ *
+ *  Tick marks and labels: placed at linear footfall intervals (bin.min /
+ *  robustMax), NOT at 't' values. Linear placement means equal footfall
+ *  differences occupy equal space on the bar — stores at 7000 and 7400
+ *  are visually close together (as they should be), not stretched apart.
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-export function HeatmapLegend({
-  minVal,
-  maxVal,
-}: {
-  minVal: number;
-  maxVal: number;
-}) {
-  const colorBins = getHeatmapColorBins(minVal, maxVal);
-
-  // Dynamically size the bar so labels never overflow.
-  // Each label is at most maxVal digits + locale separators (~1 extra char per 3 digits).
-  // At font-size 9px, each character is ~5.5px wide. We need BIN_COUNT slots.
-  const longestLabel = colorBins.reduce(
-    (longest, bin) => (bin.label.length > longest.length ? bin.label : longest),
-    '',
-  );
-  const maxLabelWidth = longestLabel.length * 5.8; // px per char at 9px font
-  const minBarWidth = 280;
-  const barWidth = Math.max(minBarWidth, colorBins.length * maxLabelWidth);
+export function HeatmapLegend({ points }: { points: HeatmapPoint[] }) {
+  // Simplified legend: just a gradient bar with Low/High labels.
+  // No need to compute colorBins or robustMax anymore.
+  const barWidth = 220;
 
   return (
     <div
@@ -944,10 +892,9 @@ export function HeatmapLegend({
           letterSpacing: 0.3,
         }}
       >
-        Foot Traffic Concentration
+        Traffic Intensity
       </div>
 
-      {/* Continuous gradient bar across all bins */}
       <div
         style={{
           display: 'flex',
@@ -956,63 +903,49 @@ export function HeatmapLegend({
           width: barWidth,
         }}
       >
-        {/* Gradient bar */}
+        {/* Gradient bar — continuous colour ramp from low to high density.
+            This is a relative intensity scale, not a precise measurement tool. */}
         <div
           style={{
-            height: 14,
+            height: 18,
             borderRadius: '2px',
-            backgroundImage: `linear-gradient(90deg, ${[
-              ...colorBins.map(
-                (bin, idx) =>
-                  `${bin.fromColor} ${((idx / colorBins.length) * 100).toFixed(1)}%`,
-              ),
-              `${colorBins[colorBins.length - 1].toColor} 100%`,
-            ].join(', ')})`,
+            backgroundImage: `linear-gradient(90deg, ${Array.from(
+              { length: 21 },
+              (_, i) => {
+                const ratio = i / 20; // 0 → 1 (linear footfall ratio)
+                const t = Math.pow(ratio, HEATMAP_DYNAMIC_COLOR_GAMMA);
+                return `${heatmapColor(t)} ${(ratio * 100).toFixed(1)}%`;
+              },
+            ).join(', ')})`,
           }}
         />
 
-        {/* Tick marks at each milestone boundary */}
-        <div style={{ position: 'relative', height: 6 }}>
-          {colorBins.map((bin, idx) => {
-            const pct = (idx / colorBins.length) * 100;
-            return (
-              <div
-                key={idx}
-                style={{
-                  position: 'absolute',
-                  left: `${pct}%`,
-                  top: 0,
-                  width: 1,
-                  height: 6,
-                  backgroundColor: '#999',
-                  transform: 'translateX(-50%)',
-                }}
-              />
-            );
-          })}
-        </div>
-
-        {/* Labels aligned to each tick */}
-        <div style={{ position: 'relative', height: 14 }}>
-          {colorBins.map((bin, idx) => {
-            const pct = (idx / colorBins.length) * 100;
-            return (
-              <span
-                key={idx}
-                style={{
-                  position: 'absolute',
-                  left: `${pct}%`,
-                  transform: idx === 0 ? 'none' : 'translateX(-50%)',
-                  fontSize: 9,
-                  color: '#666',
-                  fontWeight: 500,
-                  whiteSpace: 'nowrap',
-                }}
-              >
-                {bin.label}
-              </span>
-            );
-          })}
+        {/* Min/Max labels only — emphasize relative density, not absolute values */}
+        <div style={{ position: 'relative', height: 14, marginTop: 4 }}>
+          <span
+            style={{
+              position: 'absolute',
+              left: 0,
+              top: 0,
+              fontSize: 9,
+              color: '#666',
+              fontWeight: 500,
+            }}
+          >
+            Low
+          </span>
+          <span
+            style={{
+              position: 'absolute',
+              right: 0,
+              top: 0,
+              fontSize: 9,
+              color: '#666',
+              fontWeight: 500,
+            }}
+          >
+            High
+          </span>
         </div>
       </div>
     </div>

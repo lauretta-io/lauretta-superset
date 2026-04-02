@@ -623,17 +623,23 @@ export default function SupersetPluginChartFloorMap(
   useEffect(() => {
     const checkFullScreen = () => {
       if (rootElem.current) {
+        let nextIsFullScreen = false;
         // Check if any parent has position fixed (indicates fullscreen in Superset dashboard)
         let parent = rootElem.current.parentElement;
         while (parent) {
           const style = window.getComputedStyle(parent);
           if (style.position === 'fixed' && style.zIndex === '3000') {
-            setIsFullScreen(true);
-            return;
+            nextIsFullScreen = true;
+            break;
           }
           parent = parent.parentElement;
         }
-        setIsFullScreen(false);
+        setIsFullScreen(prevIsFullScreen => {
+          if (prevIsFullScreen !== nextIsFullScreen) {
+            zoomPanRef.current?.resetTransform();
+          }
+          return nextIsFullScreen;
+        });
       }
     };
 
@@ -692,14 +698,15 @@ export default function SupersetPluginChartFloorMap(
       if (!itemMap.has(itemName)) {
         itemMap.set(itemName, {
           name: itemName,
-          total_footfall_zo: item.total_footfall_zo || 0,
+          total_footfall: item.total_footfall || 0,
+          percentage_of_prop: item.percentage_of_prop || 0,
           category: item.category || '',
           layer: item.layer || 'Unknown',
         });
       }
     });
     return Array.from(itemMap.values()).sort(
-      (a, b) => b.total_footfall_zo - a.total_footfall_zo,
+      (a, b) => b.total_footfall - a.total_footfall,
     );
   }, [data]);
 
@@ -727,8 +734,8 @@ export default function SupersetPluginChartFloorMap(
         return sortDirection === 'asc' ? nameCompare : -nameCompare;
       }
 
-      const footfallA = a.total_footfall_zo || 0;
-      const footfallB = b.total_footfall_zo || 0;
+      const footfallA = a.total_footfall || 0;
+      const footfallB = b.total_footfall || 0;
       return sortDirection === 'asc'
         ? footfallA - footfallB
         : footfallB - footfallA;
@@ -749,7 +756,7 @@ export default function SupersetPluginChartFloorMap(
 
     data.forEach((item: any) => {
       const layer = item.layer || 'Unknown';
-      const footfall = item.total_footfall_zo || 0;
+      const footfall = item.total_footfall || 0;
       // Only consider items that are in the current filter
       if (layerFilters.includes(layer) && footfall > maxByLayer[layer]) {
         maxByLayer[layer] = footfall;
@@ -793,7 +800,7 @@ export default function SupersetPluginChartFloorMap(
         return {
           x: centroid?.x ?? 0,
           y: centroid?.y ?? 0,
-          weight: item.total_footfall_zo || 0,
+          weight: item.total_footfall || 0,
           name: item.name || 'Unknown',
           category: item.category || '',
           polygonArea: area,
@@ -845,21 +852,6 @@ export default function SupersetPluginChartFloorMap(
       polygonArea: p.polygonArea * areaScale,
     }));
   }, [deferredUnfilteredData, imgW, imgH]);
-
-  // Global max footfall for heatmap legend (across all active layers)
-  const heatmapMaxFootfall = React.useMemo(
-    () => Math.max(...heatmapPoints.map(p => p.weight), 1),
-    [heatmapPoints],
-  );
-
-  const heatmapMinFootfall = React.useMemo(
-    () =>
-      Math.min(
-        ...heatmapPoints.filter(p => p.weight > 0).map(p => p.weight),
-        0,
-      ),
-    [heatmapPoints],
-  );
 
   // Handle layer filter change with loading (toggle multiple selections)
   // Works for both polygon and heatmap modes independently
@@ -1066,7 +1058,7 @@ export default function SupersetPluginChartFloorMap(
                     className={`store-item ${selectedItemName === item.name ? 'selected' : ''}`}
                     style={{
                       borderLeftColor: getLayerFootfallColor(
-                        item.total_footfall_zo,
+                        item.total_footfall,
                         item.layer,
                         maxFootfallByLayer[item.layer] || 1,
                       ),
@@ -1080,13 +1072,13 @@ export default function SupersetPluginChartFloorMap(
                         className="value"
                         style={{
                           color: getLayerFootfallColor(
-                            item.total_footfall_zo,
+                            item.total_footfall,
                             item.layer,
                             maxFootfallByLayer[item.layer] || 1,
                           ),
                         }}
                       >
-                        {item.total_footfall_zo.toLocaleString()}
+                        {`${item.total_footfall.toLocaleString()} (${item.percentage_of_prop}%)`}
                       </span>
                     </div>
                   </div>
@@ -1109,6 +1101,7 @@ export default function SupersetPluginChartFloorMap(
                   onClick={() => {
                     setViewMode('polygon');
                     setIsHeatmapPending(false);
+                    zoomPanRef.current?.resetTransform();
                   }}
                 >
                   Polygon
@@ -1119,6 +1112,7 @@ export default function SupersetPluginChartFloorMap(
                   onClick={() => {
                     setHeatmapLayerFilters(ALL_LAYERS);
                     setIsHeatmapPending(true);
+                    zoomPanRef.current?.resetTransform();
                     // setViewMode on next tick so the spinner renders first
                     setTimeout(() => setViewMode('heatmap'), 0);
                   }}
@@ -1194,7 +1188,7 @@ export default function SupersetPluginChartFloorMap(
             </svg>
           </ZoomPanWrapper>
 
-          {/* Show tooltip for hovered item (polygon mode only) */}
+          {/* Show tooltip for hovered item */}
           {viewMode === 'polygon' &&
             displayedItem &&
             hoveredItemName !== null && (
@@ -1208,8 +1202,8 @@ export default function SupersetPluginChartFloorMap(
                     </div>
                   </div>
                 )}
-                {displayedItem.total_footfall_zo !== undefined &&
-                  displayedItem.total_footfall_zo !== null && (
+                {displayedItem.total_footfall !== undefined &&
+                  displayedItem.total_footfall !== null && (
                     <div className="footfall-section">
                       <div className="footfall-label">Footfall</div>
                       <div
@@ -1218,9 +1212,7 @@ export default function SupersetPluginChartFloorMap(
                           color: 'black',
                         }}
                       >
-                        {(
-                          displayedItem.total_footfall_zo as number
-                        ).toLocaleString()}
+                        {`${displayedItem.total_footfall.toLocaleString()} (${displayedItem.percentage_of_prop}%)`}
                       </div>
                     </div>
                   )}
@@ -1243,8 +1235,8 @@ export default function SupersetPluginChartFloorMap(
                   </div>
                 </div>
               )}
-              {selectedItemData.total_footfall_zo !== undefined &&
-                selectedItemData.total_footfall_zo !== null && (
+              {selectedItemData.total_footfall !== undefined &&
+                selectedItemData.total_footfall !== null && (
                   <div className="footfall-section">
                     <div className="footfall-label">Footfall</div>
                     <div
@@ -1253,9 +1245,7 @@ export default function SupersetPluginChartFloorMap(
                         color: 'black',
                       }}
                     >
-                      {(
-                        selectedItemData.total_footfall_zo as number
-                      ).toLocaleString()}
+                      {`${selectedItemData.total_footfall.toLocaleString()} (${selectedItemData.percentage_of_prop}%)`}
                     </div>
                   </div>
                 )}
@@ -1264,10 +1254,7 @@ export default function SupersetPluginChartFloorMap(
 
           {/* Heatmap legend (fullscreen + heatmap mode only) */}
           {viewMode === 'heatmap' && isFullScreen && (
-            <HeatmapLegend
-              minVal={heatmapMinFootfall}
-              maxVal={heatmapMaxFootfall}
-            />
+            <HeatmapLegend points={heatmapPoints} />
           )}
 
           {/* Color Legend (polygon mode only) */}
