@@ -848,22 +848,118 @@ export function getHeatmapColorBins(points: HeatmapPoint[]): {
 /* ═══════════════════════════════════════════════════════════════════════════
  *  HEATMAP LEGEND
  *
- *  Gradient bar: built by sampling legendColorAtFootfall() at 21 points
- *  across [0, robustMax], positioned at their linear footfall ratios.
- *  This matches the forward-computed formula used by the heatmap renderer
- *  and getHeatmapColorBins(), so bar colours, bin swatches, and the
- *  rendered heatmap are all consistent.
+ *  Layout — two-zone bar:
  *
- *  Tick marks and labels: placed at linear footfall intervals (bin.min /
- *  robustMax), NOT at 't' values. Linear placement means equal footfall
- *  differences occupy equal space on the bar — stores at 7000 and 7400
- *  are visually close together (as they should be), not stretched apart.
+ *   Zone A  [0 … robustMax]   — occupies LEFT_PCT% of bar width.
+ *     Gradient: full blue→red spectrum in t-space (matches the renderer).
+ *     Ticks: nice footfall values from 0 up to robustMax, placed at their
+ *       t-position  t = (footfall/robustMax)^GAMMA  within Zone A.
+ *
+ *   Divider at robustMax — a thin dashed white line + "▲" marker.
+ *
+ *   Zone B  [robustMax … actualMax]  — occupies remaining (1-LEFT_PCT)% of bar.
+ *     Solid red (t=1). Only one label: actualMax at the right edge.
+ *     This zone only appears if actualMax > robustMax by a meaningful margin.
+ *
+ *  This design ensures:
+ *   • Colors in Zone A match what the map shows (gamma-correct placement).
+ *   • The full footfall range is communicated, including outlier stores.
+ *   • No label crowding — Zone B has at most one label.
  * ═══════════════════════════════════════════════════════════════════════════ */
 
+function estimateLabelWidth(label: string, fontSize: number): number {
+  return label.length * fontSize * 0.58;
+}
+
 export function HeatmapLegend({ points }: { points: HeatmapPoint[] }) {
-  // Simplified legend: just a gradient bar with Low/High labels.
-  // No need to compute colorBins or robustMax anymore.
-  const barWidth = 220;
+  const { actualMax, robustMax } = useMemo(() => {
+    const footfalls = points
+      .map(p => p.weight)
+      .filter(w => w > 0)
+      .sort((a, b) => a - b);
+    if (footfalls.length === 0) return { actualMax: 1, robustMax: 1 };
+    const aMax = Math.max(...footfalls, 1);
+    const clampIdx = Math.floor(footfalls.length * 0.96);
+    const rMax = Math.max(
+      footfalls[clampIdx] || footfalls[footfalls.length - 1],
+      1,
+    );
+    return { actualMax: aMax, robustMax: rMax };
+  }, [points]);
+
+  const BAR_W = 260;
+  const BAR_H = 14;
+  const TICK_FONT = 10;
+  const MIN_LABEL_GAP = 6;
+
+  const hasZoneB = actualMax > robustMax * 1.02;
+
+  const ZONE_A_PCT = hasZoneB ? 0.75 : 1.0;
+  const ZONE_A_W = BAR_W * ZONE_A_PCT;
+  const ZONE_B_W = BAR_W - ZONE_A_W;
+
+  const gradientAStops = useMemo(() => {
+    const N = 20;
+    // Zone A ends at deep orange (t=0.85), red transition starts in Zone B only
+    const T_MAX_A = hasZoneB ? 0.85 : 1.0;
+    return Array.from({ length: N + 1 }, (_, i) => {
+      const t = (i / N) * T_MAX_A;
+      return { offset: `${((i / N) * 100).toFixed(1)}%`, color: heatmapColor(t) };
+    });
+  }, [hasZoneB]);
+
+  const zoneATicks = useMemo(() => {
+    if (robustMax <= 0) return [{ label: '0', x: 0 }];
+
+    const rawStep = robustMax / 4;
+    const mag = Math.pow(10, Math.floor(Math.log10(rawStep)));
+    const residual = rawStep / mag;
+    let niceStep: number;
+    if (residual <= 1.5) niceStep = 1 * mag;
+    else if (residual <= 3) niceStep = 2 * mag;
+    else if (residual <= 7) niceStep = 5 * mag;
+    else niceStep = 10 * mag;
+
+    const result: { label: string; x: number }[] = [];
+    for (let v = 0; v < robustMax - niceStep * 0.1; v += niceStep) {
+      const t = Math.pow(v / robustMax, HEATMAP_DYNAMIC_COLOR_GAMMA);
+      result.push({
+        label: Math.round(v).toLocaleString(),
+        x: t * ZONE_A_W,
+      });
+    }
+
+    result.push({
+      label: Math.round(robustMax).toLocaleString(),
+      x: ZONE_A_W,
+    });
+
+    return result;
+  }, [robustMax, ZONE_A_W]);
+
+  const visibleZoneATicks = useMemo(() => {
+    if (zoneATicks.length <= 2) return zoneATicks;
+
+    const kept = [zoneATicks[0]];
+    let prevRight = estimateLabelWidth(zoneATicks[0].label, TICK_FONT);
+
+    for (let i = 1; i < zoneATicks.length - 1; i += 1) {
+      const tick = zoneATicks[i];
+      const hw = estimateLabelWidth(tick.label, TICK_FONT) / 2;
+      const lastTick = zoneATicks[zoneATicks.length - 1];
+      const lastLeft = lastTick.x - estimateLabelWidth(lastTick.label, TICK_FONT);
+
+      if (
+        tick.x - hw > prevRight + MIN_LABEL_GAP &&
+        tick.x + hw < lastLeft - MIN_LABEL_GAP
+      ) {
+        kept.push(tick);
+        prevRight = tick.x + hw;
+      }
+    }
+    kept.push(zoneATicks[zoneATicks.length - 1]);
+    return kept;
+  }, [zoneATicks]);
 
   return (
     <div
@@ -873,14 +969,11 @@ export function HeatmapLegend({ points }: { points: HeatmapPoint[] }) {
         left: 14,
         background: 'white',
         borderRadius: 8,
-        padding: '12px 16px',
-        boxShadow: '0 2px 8px rgba(0, 0, 0, 0.15)',
+        padding: '10px 16px 10px',
+        boxShadow: '0 2px 8px rgba(0,0,0,0.15)',
         zIndex: 500,
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'stretch',
-        gap: 10,
         border: '1px solid #ddd',
+        minWidth: BAR_W + 32,
       }}
     >
       <div
@@ -889,65 +982,132 @@ export function HeatmapLegend({ points }: { points: HeatmapPoint[] }) {
           fontWeight: 600,
           color: '#333',
           textAlign: 'center',
-          letterSpacing: 0.3,
+          marginBottom: 8,
         }}
       >
-        Traffic Intensity
+        Foot Traffic Concentration
       </div>
 
-      <div
-        style={{
-          display: 'flex',
-          flexDirection: 'column',
-          gap: 0,
-          width: barWidth,
-        }}
+      <svg
+        width={BAR_W}
+        height={hasZoneB ? 46 : 34}
+        style={{ display: 'block', overflow: 'visible' }}
       >
-        {/* Gradient bar — continuous colour ramp from low to high density.
-            This is a relative intensity scale, not a precise measurement tool. */}
-        <div
-          style={{
-            height: 18,
-            borderRadius: '2px',
-            backgroundImage: `linear-gradient(90deg, ${Array.from(
-              { length: 21 },
-              (_, i) => {
-                const ratio = i / 20; // 0 → 1 (linear footfall ratio)
-                const t = Math.pow(ratio, HEATMAP_DYNAMIC_COLOR_GAMMA);
-                return `${heatmapColor(t)} ${(ratio * 100).toFixed(1)}%`;
-              },
-            ).join(', ')})`,
-          }}
-        />
+        <defs>
+          <linearGradient id="heatleg-zone-a" x1="0" x2="1" y1="0" y2="0">
+            {gradientAStops.map((s, i) => (
+              <stop key={i} offset={s.offset} stopColor={s.color} />
+            ))}
+          </linearGradient>
+          {/* Zone B gradient: orange → red (smooth continuation from Zone A) */}
+          <linearGradient id="heatleg-zone-b" x1="0" x2="1" y1="0" y2="0">
+            <stop offset="0%" stopColor={heatmapColor(0.85)} />
+            <stop offset="100%" stopColor={heatmapColor(1.0)} />
+          </linearGradient>
+          {/* Clip paths for rounded corners */}
+          <clipPath id="heatleg-clip-full">
+            <rect x={0} y={0} width={BAR_W} height={BAR_H} rx={3} />
+          </clipPath>
+          <clipPath id="heatleg-clip-a">
+            <rect x={0} y={0} width={ZONE_A_W} height={BAR_H} rx={0} />
+          </clipPath>
+        </defs>
 
-        {/* Min/Max labels only — emphasize relative density, not absolute values */}
-        <div style={{ position: 'relative', height: 14, marginTop: 4 }}>
-          <span
-            style={{
-              position: 'absolute',
-              left: 0,
-              top: 0,
-              fontSize: 9,
-              color: '#666',
-              fontWeight: 500,
-            }}
-          >
-            Low
-          </span>
-          <span
-            style={{
-              position: 'absolute',
-              right: 0,
-              top: 0,
-              fontSize: 9,
-              color: '#666',
-              fontWeight: 500,
-            }}
-          >
-            High
-          </span>
-        </div>
-      </div>
+        {/* ── Rounded outer shell (clips both zones) ── */}
+        <g clipPath="url(#heatleg-clip-full)">
+          {/* Zone A */}
+          <rect
+            x={0}
+            y={0}
+            width={ZONE_A_W}
+            height={BAR_H}
+            fill="url(#heatleg-zone-a)"
+          />
+          {/* Zone B (orange→red gradient, only if hasZoneB) */}
+          {hasZoneB && (
+            <rect
+              x={ZONE_A_W}
+              y={0}
+              width={ZONE_B_W}
+              height={BAR_H}
+              fill="url(#heatleg-zone-b)"
+            />
+          )}
+        </g>
+
+        {visibleZoneATicks.map((tick, idx) => {
+          const isFirst = idx === 0;
+          const isLast = idx === visibleZoneATicks.length - 1;
+          const isDivider = isLast && hasZoneB;
+          return (
+            <React.Fragment key={idx}>
+              <line
+                x1={tick.x}
+                y1={BAR_H}
+                x2={tick.x}
+                y2={BAR_H + (isDivider ? 6 : 4)}
+                stroke={isDivider ? '#555' : '#aaa'}
+                strokeWidth={isDivider ? 1.2 : 0.8}
+                visibility={isFirst ? 'hidden' : 'visible'}
+              />
+              <text
+                x={tick.x}
+                y={BAR_H + 15}
+                fontSize={TICK_FONT}
+                fill={isDivider ? '#444' : '#666'}
+                fontWeight={isDivider ? 600 : 400}
+                textAnchor={isFirst ? 'start' : isDivider ? 'middle' : 'middle'}
+              >
+                {tick.label}
+              </text>
+              {/* Zone B: actualMax label below right edge */}
+              {isDivider && hasZoneB && (
+                <>
+                  {/* Thin dashed divider line through the bar */}
+                  <line
+                    x1={ZONE_A_W}
+                    y1={0}
+                    x2={ZONE_A_W}
+                    y2={BAR_H}
+                    stroke="rgba(255,255,255,0.7)"
+                    strokeWidth={1.5}
+                    strokeDasharray="2,2"
+                  />
+                  {/* actualMax label at right edge */}
+                  <line
+                    x1={BAR_W}
+                    y1={BAR_H}
+                    x2={BAR_W}
+                    y2={BAR_H + 4}
+                    stroke="#aaa"
+                    strokeWidth={0.8}
+                  />
+                  <text
+                    x={BAR_W}
+                    y={BAR_H + 15}
+                    fontSize={TICK_FONT}
+                    fill="#666"
+                    fontWeight={400}
+                    textAnchor="end"
+                  >
+                    {Math.round(actualMax).toLocaleString()}
+                  </text>
+                  {/* "≥" annotation below Zone B */}
+                  <text
+                    x={BAR_W}
+                    y={BAR_H + 28}
+                    fontSize={9}
+                    fill="#999"
+                    textAnchor="end"
+                  >
+                    ≥ {Math.round(robustMax).toLocaleString()} – High Concentration
+                  </text>
+                </>
+              )}
+            </React.Fragment>
+          );
+        })}
+      </svg>
     </div>
   );
 }
