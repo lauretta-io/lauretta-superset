@@ -904,7 +904,10 @@ export function HeatmapLegend({ points }: { points: HeatmapPoint[] }) {
     const T_MAX_A = hasZoneB ? 0.85 : 1.0;
     return Array.from({ length: N + 1 }, (_, i) => {
       const t = (i / N) * T_MAX_A;
-      return { offset: `${((i / N) * 100).toFixed(1)}%`, color: heatmapColor(t) };
+      return {
+        offset: `${((i / N) * 100).toFixed(1)}%`,
+        color: heatmapColor(t),
+      };
     });
   }, [hasZoneB]);
 
@@ -947,7 +950,8 @@ export function HeatmapLegend({ points }: { points: HeatmapPoint[] }) {
       const tick = zoneATicks[i];
       const hw = estimateLabelWidth(tick.label, TICK_FONT) / 2;
       const lastTick = zoneATicks[zoneATicks.length - 1];
-      const lastLeft = lastTick.x - estimateLabelWidth(lastTick.label, TICK_FONT);
+      const lastLeft =
+        lastTick.x - estimateLabelWidth(lastTick.label, TICK_FONT);
 
       if (
         tick.x - hw > prevRight + MIN_LABEL_GAP &&
@@ -965,8 +969,9 @@ export function HeatmapLegend({ points }: { points: HeatmapPoint[] }) {
     <div
       style={{
         position: 'absolute',
-        top: 14,
-        left: 14,
+        bottom: 20,
+        left: '50%',
+        transform: 'translateX(-50%)',
         background: 'white',
         borderRadius: 8,
         padding: '10px 16px 10px',
@@ -1100,7 +1105,8 @@ export function HeatmapLegend({ points }: { points: HeatmapPoint[] }) {
                     fill="#999"
                     textAnchor="end"
                   >
-                    ≥ {Math.round(robustMax).toLocaleString()} – High Concentration
+                    ≥ {Math.round(robustMax).toLocaleString()} – High
+                    Concentration
                   </text>
                 </>
               )}

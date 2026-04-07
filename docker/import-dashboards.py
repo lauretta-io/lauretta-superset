@@ -82,24 +82,20 @@ def find_template_dataset(extract_dir):
 
 def create_default_dataset_template(db_uuid):
     """Create a single Floor Maps Dataset template (no floor_id filter in SQL)."""
-    sql_template = """
- {% set is_hourly = false %}
+    sql_template = """{% set is_hourly = false %}
 {% set from_str = from_dttm | string if from_dttm else '' %}
 {% set to_str = to_dttm | string if to_dttm else '' %}
 {% if (from_str and '00:00:00' not in from_str) or (to_str and '00:00:00' not in to_str) or (from_str[:10] == to_str[:10]) %}
-    {% set is_hourly = true %}
+{% set is_hourly = true %}
 {% endif %}
 {% set suffix = '_hourly' if is_hourly else '_daily' %}
 {% set t_col = 'timestamp' if is_hourly else 'datestamp' %}
-
 {% set start_date = from_dttm if from_dttm else "CURRENT_DATE - INTERVAL '1 day'" %}
 {% set end_date = to_dttm if to_dttm else "CURRENT_DATE" %}
-
 {% set floor_filter = filter_values('floor_id') %}
 {% set un = filter_values('unit_name') %}
 {% set ugn = filter_values('unit_group_name') %}
 {% set name_filter = filter_values('name') %}
-
 WITH property_footfall AS (
     SELECT
             SUM(pd.footfall_zo) AS prop_footfall
@@ -155,9 +151,7 @@ main_query AS (
                     GROUP BY unit_id
             ) usd ON usd.unit_id = u.id
             WHERE u.id IS NOT NULL
-
             UNION ALL
-
             -- Public Spaces
             SELECT
                     z.floor_id, z.name as zone_name, ps.name as name,
@@ -179,9 +173,7 @@ main_query AS (
                         {% if to_dttm %} AND {{ t_col }}::timestamp < '{{ to_str.replace("T", " ") }}'::timestamp {% endif %}
                     GROUP BY public_space_id
             ) pssd ON pssd.public_space_id = ps.id
-
             UNION ALL
-
             -- Entrances
             SELECT
                     z.floor_id, z.name as zone_name, e.name as name,
@@ -203,9 +195,7 @@ main_query AS (
                         {% if to_dttm %} AND {{ t_col }}::timestamp < '{{ to_str.replace("T", " ") }}'::timestamp {% endif %}
                     GROUP BY entrance_id
             ) esd ON esd.entrance_id = e.id
-
             UNION ALL
-
             -- Escalators
             SELECT
                     z.floor_id, z.name as zone_name, e.name as name,
@@ -227,9 +217,7 @@ main_query AS (
                         {% if to_dttm %} AND {{ t_col }}::timestamp < '{{ to_str.replace("T", " ") }}'::timestamp {% endif %}
                     GROUP BY escalator_id
             ) esd ON esd.escalator_id = e.id
-
             UNION ALL
-
             -- Lift Lobbies
             SELECT
                     z.floor_id, z.name as zone_name, ll.name as name,
@@ -251,12 +239,9 @@ main_query AS (
                         {% if to_dttm %} AND {{ t_col }}::timestamp < '{{ to_str.replace("T", " ") }}'::timestamp {% endif %}
                     GROUP BY lift_lobby_id
             ) llsd ON llsd.lift_lobby_id = ll.id
-
             UNION ALL
-
             -- Dummy row (always present, mirrors all active filters)
-            SELECT
-                    {{ floor_filter[0] if floor_filter else 0 }}                                                                                          AS floor_id,
+            SELECT {{ floor_filter[0] if floor_filter else 0 }}                                                                                          AS floor_id,
                     'No Data'                                                                                                                              AS zone_name,
                     'No Data'                                                                                                                              AS name,
                     'None'                                                                                                                                 AS layer,
@@ -271,10 +256,8 @@ main_query AS (
     CROSS JOIN property_footfall
     WHERE res.name IS NOT NULL OR res.name = 'No Data'
 )
-
 SELECT * FROM main_query  
 """
-
     return {
         'table_name': 'Floor Map Summary',
         'main_dttm_col': None,

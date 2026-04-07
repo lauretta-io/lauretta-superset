@@ -40,6 +40,7 @@ import {
   HeatmapLegend,
   computeCentroid,
   computePolygonArea,
+  legendColorAtFootfall,
 } from './HeatmapLayer';
 
 const LAURETTA_IMAGE_API_PREFIX = '/api/v1/lauretta/images/';
@@ -304,6 +305,12 @@ const StoreListWidget = styled.div`
 
     &::-webkit-scrollbar-thumb:hover {
       background: #555;
+    }
+  }
+
+  &.heatmap-mode {
+    .store-list {
+      max-height: none;
     }
   }
 
@@ -784,7 +791,7 @@ export default function SupersetPluginChartFloorMap(
     }, 0);
     return () => clearTimeout(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [unfilteredData, data]);
+  }, [unfilteredData, data, viewMode]);
 
   // Build heatmap points from the UNFILTERED dataset so the heatmap always
   // renders every zone on the floor regardless of active UI filters.
@@ -917,6 +924,20 @@ export default function SupersetPluginChartFloorMap(
     setSelectedItemName(null);
   };
 
+  // Reset transient UI state when switching map modes so previous tooltip/selection
+  // does not carry over between polygon and heatmap views.
+  useEffect(() => {
+    setHoveredItemName(null);
+    setSelectedItemName(null);
+  }, [viewMode]);
+
+  // Reset transient UI state when entering/exiting fullscreen so tooltip/selection
+  // from a previous fullscreen session does not bleed through.
+  useEffect(() => {
+    setHoveredItemName(null);
+    setSelectedItemName(null);
+  }, [isFullScreen]);
+
   // Get the first item data for the hovered item name (to show only one tooltip)
   const displayedItem =
     hoveredItemName && data && Array.isArray(data)
@@ -929,9 +950,22 @@ export default function SupersetPluginChartFloorMap(
       ? data.find((item: any) => item.name === selectedItemName)
       : null;
 
-  // Show store panel only in fullscreen, when there are items, and NOT in heatmap mode
-  const showStorePanel =
-    isFullScreen && uniqueItems.length > 0 && viewMode !== 'heatmap';
+  // Show store panel only in fullscreen, when there are items
+  const showStorePanel = isFullScreen && uniqueItems.length > 0;
+
+  // Heatmap colour scale: robust max computed from the deduplicated sidebar
+  // items (uniqueItems) so that exactly the top 4% of unique stores show as red
+  // and the remaining 96% follow the gradient — regardless of how many raw rows
+  // each store contributes to the underlying dataset.
+  const heatmapRobustMax = React.useMemo(() => {
+    const footfalls = uniqueItems
+      .map(item => item.total_footfall as number)
+      .filter(f => f > 0)
+      .sort((a, b) => a - b);
+    if (footfalls.length === 0) return 1;
+    const clampIdx = Math.floor(footfalls.length * 0.96);
+    return Math.max(footfalls[clampIdx] ?? footfalls[footfalls.length - 1], 1);
+  }, [uniqueItems]);
 
   // Calculate tooltip position for selected item
   const [selectedTooltipPos, setSelectedTooltipPos] = useState({ x: 0, y: 0 });
@@ -972,7 +1006,9 @@ export default function SupersetPluginChartFloorMap(
     >
       <div className={`content-layout ${showStorePanel ? 'split-view' : ''}`}>
         {showStorePanel && (
-          <StoreListWidget>
+          <StoreListWidget
+            className={viewMode === 'heatmap' ? 'heatmap-mode' : ''}
+          >
             <div className="widget-header-row">
               <div className="widget-header">Store Footfall</div>
               <div className="sort-controls">
@@ -1031,20 +1067,22 @@ export default function SupersetPluginChartFloorMap(
               value={searchQuery}
               onChange={e => setSearchQuery(e.target.value)}
             />
-            <div className="layer-filter">
-              {['Retail', 'Entrances', 'Circulation', 'Public'].map(layer => (
-                <button
-                  key={layer}
-                  className={`layer-btn ${layerFilters.includes(layer) ? 'active' : ''}`}
-                  onClick={() => handleLayerChange(layer)}
-                >
-                  {layerImages[layer] && (
-                    <img src={layerImages[layer]} alt={layer} />
-                  )}
-                  {layer}
-                </button>
-              ))}
-            </div>
+            {viewMode === 'polygon' && (
+              <div className="layer-filter">
+                {['Retail', 'Entrances', 'Circulation', 'Public'].map(layer => (
+                  <button
+                    key={layer}
+                    className={`layer-btn ${layerFilters.includes(layer) ? 'active' : ''}`}
+                    onClick={() => handleLayerChange(layer)}
+                  >
+                    {layerImages[layer] && (
+                      <img src={layerImages[layer]} alt={layer} />
+                    )}
+                    {layer}
+                  </button>
+                ))}
+              </div>
+            )}
             {(isFilterLoading || isHeatmapPending) && (
               <div className="loading-overlay">
                 <div className="loading-spinner"></div>
@@ -1057,11 +1095,17 @@ export default function SupersetPluginChartFloorMap(
                     key={index}
                     className={`store-item ${selectedItemName === item.name ? 'selected' : ''}`}
                     style={{
-                      borderLeftColor: getLayerFootfallColor(
-                        item.total_footfall,
-                        item.layer,
-                        maxFootfallByLayer[item.layer] || 1,
-                      ),
+                      borderLeftColor:
+                        viewMode === 'heatmap'
+                          ? legendColorAtFootfall(
+                              item.total_footfall,
+                              heatmapRobustMax,
+                            )
+                          : getLayerFootfallColor(
+                              item.total_footfall,
+                              item.layer,
+                              maxFootfallByLayer[item.layer] || 1,
+                            ),
                     }}
                     onClick={() => handleItemClick(item.name)}
                   >
@@ -1071,11 +1115,17 @@ export default function SupersetPluginChartFloorMap(
                       <span
                         className="value"
                         style={{
-                          color: getLayerFootfallColor(
-                            item.total_footfall,
-                            item.layer,
-                            maxFootfallByLayer[item.layer] || 1,
-                          ),
+                          color:
+                            viewMode === 'heatmap'
+                              ? legendColorAtFootfall(
+                                  item.total_footfall,
+                                  heatmapRobustMax,
+                                )
+                              : getLayerFootfallColor(
+                                  item.total_footfall,
+                                  item.layer,
+                                  maxFootfallByLayer[item.layer] || 1,
+                                ),
                         }}
                       >
                         {`${item.total_footfall.toLocaleString()} (${item.percentage_of_prop}%)`}
@@ -1178,17 +1228,42 @@ export default function SupersetPluginChartFloorMap(
                 })}
               {/* Heatmap mode */}
               {viewMode === 'heatmap' && (
-                <HeatmapLayer
-                  points={heatmapPoints}
-                  imgW={imgW}
-                  imgH={imgH}
-                  layerFilters={heatmapLayerFilters}
-                />
+                <>
+                  <HeatmapLayer
+                    points={heatmapPoints}
+                    imgW={imgW}
+                    imgH={imgH}
+                    layerFilters={heatmapLayerFilters}
+                  />
+                  {/* Draw transparent polygons in heatmap mode for click/hover */}
+                  {data &&
+                    Array.isArray(data) &&
+                    data.map((item: any, index: number) => {
+                      const itemName = item.name || 'Unknown';
+                      const isItemSelected = selectedItemName === itemName;
+                      const pointsStr = item.points || '';
+                      if (!pointsStr || pointsStr === 'null') return null;
+
+                      return (
+                        <g
+                          key={index}
+                          id={`store-polyline-${itemName.replace(/\s+/g, '-')}`}
+                        >
+                          <polygon
+                            points={pointsStr}
+                            fill="transparent"
+                            stroke={isItemSelected ? '#000' : 'transparent'}
+                            strokeWidth={isItemSelected ? 6 : 0}
+                          />
+                        </g>
+                      );
+                    })}
+                </>
               )}
             </svg>
           </ZoomPanWrapper>
 
-          {/* Show tooltip for hovered item */}
+          {/* Show tooltip for hovered item (polygon mode only) */}
           {viewMode === 'polygon' &&
             displayedItem &&
             hoveredItemName !== null && (
@@ -1219,8 +1294,8 @@ export default function SupersetPluginChartFloorMap(
               </TooltipBox>
             )}
 
-          {/* Show tooltip for selected item (polygon mode only) */}
-          {viewMode === 'polygon' && selectedItemData && !hoveredItemName && (
+          {/* Show tooltip for selected item (both modes) */}
+          {selectedItemData && !hoveredItemName && (
             <TooltipBox
               isVisible={true}
               x={selectedTooltipPos.x}
