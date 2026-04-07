@@ -696,6 +696,26 @@ export default function SupersetPluginChartFloorMap(
   const imgW = imageDimensions?.width ?? 5700;
   const imgH = imageDimensions?.height ?? 3800;
 
+  // React 17-compatible deferred data: update heatmap source on next tick
+  // so the UI (spinner, button state) paints first before the heavy memo runs.
+  const rawHeatmapSource =
+    unfilteredData && Array.isArray(unfilteredData) && unfilteredData.length > 0
+      ? unfilteredData
+      : data;
+  const [deferredUnfilteredData, setDeferredUnfilteredData] =
+    useState(rawHeatmapSource);
+
+  useEffect(() => {
+    // Push the expensive heatmapPoints recompute to the next event-loop tick
+    // so React can flush the pending spinner render first.
+    const id = setTimeout(() => {
+      setDeferredUnfilteredData(rawHeatmapSource);
+      setIsHeatmapPending(false);
+    }, 0);
+    return () => clearTimeout(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [unfilteredData, data, viewMode]);
+
   // Get unique items with their total footfall for the list widget
   const uniqueItems = React.useMemo(() => {
     if (!data || !Array.isArray(data)) return [];
@@ -717,8 +737,51 @@ export default function SupersetPluginChartFloorMap(
     );
   }, [data]);
 
+  // Deduplicated store list from the UNFILTERED dataset — used for the sidebar
+  // in heatmap mode so all stores are shown regardless of active dashboard filters.
+  const uniqueItemsUnfiltered = React.useMemo(() => {
+    const source = deferredUnfilteredData;
+    if (!source || !Array.isArray(source)) return [];
+    const itemMap = new Map();
+    source.forEach((item: any) => {
+      const itemName = item.name || 'Unknown';
+      if (!itemMap.has(itemName)) {
+        itemMap.set(itemName, {
+          name: itemName,
+          total_footfall: item.total_footfall || 0,
+          percentage_of_prop: item.percentage_of_prop || 0,
+          category: item.category || '',
+          layer: item.layer || 'Unknown',
+        });
+      }
+    });
+    return Array.from(itemMap.values()).sort(
+      (a, b) => b.total_footfall - a.total_footfall,
+    );
+  }, [deferredUnfilteredData]);
+
   // Filter items based on search query and layer filter
   const filteredItems = React.useMemo(() => {
+    // In heatmap mode use the unfiltered dataset; all layers are always active.
+    if (viewMode === 'heatmap') {
+      let result = uniqueItemsUnfiltered;
+      if (searchQuery.trim()) {
+        const query = searchQuery.toLowerCase().trim();
+        result = result.filter(item => item.name.toLowerCase().includes(query));
+      }
+      return [...result].sort((a, b) => {
+        if (sortField === 'name') {
+          const cmp = a.name.localeCompare(b.name, undefined, {
+            sensitivity: 'base',
+          });
+          return sortDirection === 'asc' ? cmp : -cmp;
+        }
+        const fa = a.total_footfall || 0;
+        const fb = b.total_footfall || 0;
+        return sortDirection === 'asc' ? fa - fb : fb - fa;
+      });
+    }
+
     // If no layers selected, return empty array
     if (layerFilters.length === 0) return [];
 
@@ -749,7 +812,15 @@ export default function SupersetPluginChartFloorMap(
     });
 
     return result;
-  }, [uniqueItems, searchQuery, layerFilters, sortField, sortDirection]);
+  }, [
+    viewMode,
+    uniqueItems,
+    uniqueItemsUnfiltered,
+    searchQuery,
+    layerFilters,
+    sortField,
+    sortDirection,
+  ]);
 
   // Calculate max footfall per layer for dynamic color scaling
   const maxFootfallByLayer = React.useMemo(() => {
@@ -772,26 +843,6 @@ export default function SupersetPluginChartFloorMap(
 
     return maxByLayer;
   }, [data, layerFilters]);
-
-  // React 17-compatible deferred data: update heatmap source on next tick
-  // so the UI (spinner, button state) paints first before the heavy memo runs.
-  const rawHeatmapSource =
-    unfilteredData && Array.isArray(unfilteredData) && unfilteredData.length > 0
-      ? unfilteredData
-      : data;
-  const [deferredUnfilteredData, setDeferredUnfilteredData] =
-    useState(rawHeatmapSource);
-
-  useEffect(() => {
-    // Push the expensive heatmapPoints recompute to the next event-loop tick
-    // so React can flush the pending spinner render first.
-    const id = setTimeout(() => {
-      setDeferredUnfilteredData(rawHeatmapSource);
-      setIsHeatmapPending(false);
-    }, 0);
-    return () => clearTimeout(id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [unfilteredData, data, viewMode]);
 
   // Build heatmap points from the UNFILTERED dataset so the heatmap always
   // renders every zone on the floor regardless of active UI filters.
@@ -945,27 +996,37 @@ export default function SupersetPluginChartFloorMap(
       : null;
 
   // Get selected item data for tooltip when an item is focused/selected
-  const selectedItemData =
-    selectedItemName && data && Array.isArray(data)
-      ? data.find((item: any) => item.name === selectedItemName)
-      : null;
+  const selectedItemData = React.useMemo(() => {
+    if (!selectedItemName) return null;
+    // In heatmap mode search the unfiltered dataset so items filtered out of
+    // the first query still have tooltip data available.
+    const source =
+      viewMode === 'heatmap' &&
+      deferredUnfilteredData &&
+      Array.isArray(deferredUnfilteredData)
+        ? deferredUnfilteredData
+        : data;
+    if (!source || !Array.isArray(source)) return null;
+    return source.find((item: any) => item.name === selectedItemName) ?? null;
+  }, [selectedItemName, viewMode, deferredUnfilteredData, data]);
 
   // Show store panel only in fullscreen, when there are items
-  const showStorePanel = isFullScreen && uniqueItems.length > 0;
+  const showStorePanel =
+    isFullScreen &&
+    (viewMode === 'heatmap' ? uniqueItemsUnfiltered : uniqueItems).length > 0;
 
-  // Heatmap colour scale: robust max computed from the deduplicated sidebar
-  // items (uniqueItems) so that exactly the top 4% of unique stores show as red
-  // and the remaining 96% follow the gradient — regardless of how many raw rows
-  // each store contributes to the underlying dataset.
+  // Heatmap colour scale: robust max computed from the deduplicated UNFILTERED
+  // sidebar items so that exactly the top 4% of unique stores show as red
+  // and the remaining 96% follow the gradient — based on the full store set.
   const heatmapRobustMax = React.useMemo(() => {
-    const footfalls = uniqueItems
+    const footfalls = uniqueItemsUnfiltered
       .map(item => item.total_footfall as number)
       .filter(f => f > 0)
       .sort((a, b) => a - b);
     if (footfalls.length === 0) return 1;
     const clampIdx = Math.floor(footfalls.length * 0.96);
     return Math.max(footfalls[clampIdx] ?? footfalls[footfalls.length - 1], 1);
-  }, [uniqueItems]);
+  }, [uniqueItemsUnfiltered]);
 
   // Calculate tooltip position for selected item
   const [selectedTooltipPos, setSelectedTooltipPos] = useState({ x: 0, y: 0 });
@@ -1236,9 +1297,11 @@ export default function SupersetPluginChartFloorMap(
                     layerFilters={heatmapLayerFilters}
                   />
                   {/* Draw transparent polygons in heatmap mode for click/hover */}
-                  {data &&
-                    Array.isArray(data) &&
-                    data.map((item: any, index: number) => {
+                  {/* Use deferredUnfilteredData so polygons exist for every store
+                      shown in the sidebar, regardless of active dashboard filters */}
+                  {deferredUnfilteredData &&
+                    Array.isArray(deferredUnfilteredData) &&
+                    deferredUnfilteredData.map((item: any, index: number) => {
                       const itemName = item.name || 'Unknown';
                       const isItemSelected = selectedItemName === itemName;
                       const pointsStr = item.points || '';
