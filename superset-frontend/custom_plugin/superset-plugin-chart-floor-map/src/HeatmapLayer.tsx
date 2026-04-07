@@ -16,7 +16,7 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import React, { useMemo } from 'react';
+import React, { useMemo, useEffect } from 'react';
 
 /* ═══════════════════════════════════════════════════════════════════════════
  *  FLOOR-PLAN CONCENTRATION HEATMAP
@@ -66,6 +66,7 @@ interface HeatmapLayerProps {
     e: React.MouseEvent<SVGCircleElement>,
   ) => void;
   onHoverLeave?: () => void;
+  onStoreColors?: (colors: Record<string, string>) => void;
 }
 
 interface FootfallSource {
@@ -427,6 +428,7 @@ export function HeatmapLayer({
   layerFilters,
   onHoverEnter,
   onHoverLeave,
+  onStoreColors,
 }: HeatmapLayerProps) {
   /* ─────────────────────────────────────────────────────────────────────
    *  TUNING PARAMETERS
@@ -705,6 +707,33 @@ export function HeatmapLayer({
       })
       .sort((a, b) => a.norm - b.norm);
   }, [kdeGrid, maxKDE, robustMaxFootfall, PERCENTILE_CLAMP, GAMMA]);
+
+  /* ── STAGE 4b — Per-store peak color (for sidebar sync) ────────────
+   *  For each store, find the cell with the highest footfallNorm that is
+   *  dominated by that store. This is the exact peak color the heatmap
+   *  renders at the store's hottest spot — including spatial decay.
+   * ───────────────────────────────────────────────────────────────────── */
+
+  const storeColors = useMemo(() => {
+    const colorMap: Record<string, string> = {};
+    if (sortedCells.length === 0) return colorMap;
+    const storePeak: Record<string, number> = {};
+    for (let i = 0; i < sortedCells.length; i += 1) {
+      const cell = sortedCells[i];
+      if (!cell.nearestName) continue;
+      if ((storePeak[cell.nearestName] || 0) < cell.footfallNorm) {
+        storePeak[cell.nearestName] = cell.footfallNorm;
+      }
+    }
+    for (const name in storePeak) {
+      colorMap[name] = heatmapColor(storePeak[name]);
+    }
+    return colorMap;
+  }, [sortedCells]);
+
+  useEffect(() => {
+    if (onStoreColors) onStoreColors(storeColors);
+  }, [storeColors, onStoreColors]);
 
   /* ── STAGE 5 — Render ─────────────────────────────────────────────── */
 

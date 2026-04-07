@@ -40,6 +40,7 @@ import {
   HeatmapLegend,
   computeCentroid,
   computePolygonArea,
+  computeRobustMaxFootfall,
   legendColorAtFootfall,
 } from './HeatmapLayer';
 
@@ -600,6 +601,10 @@ export default function SupersetPluginChartFloorMap(
   const [isFilterLoading, setIsFilterLoading] = useState(false);
   // React 17-compatible pending state for heatmap mode switch
   const [isHeatmapPending, setIsHeatmapPending] = useState(false);
+  // Per-store peak colors computed by the heatmap renderer (includes spatial decay)
+  const [heatmapStoreColors, setHeatmapStoreColors] = useState<
+    Record<string, string>
+  >({});
   const [floorsData, setFloorsData] = useState<
     { name: string; image: string }[]
   >([]);
@@ -928,10 +933,16 @@ export default function SupersetPluginChartFloorMap(
     }, 300);
   };
 
-  // Handle item click from the list - zoom to the item on the map
+  // Handle item click from the list - zoom to the item on the map or toggle selection
   const handleItemClick = (itemName: string) => {
+    // Toggle: if already selected, deselect and hide tooltip
+    if (selectedItemName === itemName) {
+      setSelectedItemName(null);
+      return;
+    }
+
+    // Otherwise, select and zoom to the item
     setSelectedItemName(itemName);
-    // Find the item element and zoom to it
     const itemElementId = `store-polyline-${itemName.replace(/\s+/g, '-')}`;
     if (zoomPanRef.current) {
       zoomPanRef.current.zoomToElement(itemElementId, 2.5);
@@ -990,10 +1001,17 @@ export default function SupersetPluginChartFloorMap(
   }, [isFullScreen]);
 
   // Get the first item data for the hovered item name (to show only one tooltip)
-  const displayedItem =
-    hoveredItemName && data && Array.isArray(data)
-      ? data.find((item: any) => item.name === hoveredItemName)
-      : null;
+  const displayedItem = React.useMemo(() => {
+    if (!hoveredItemName) return null;
+    const source =
+      viewMode === 'heatmap' &&
+      deferredUnfilteredData &&
+      Array.isArray(deferredUnfilteredData)
+        ? deferredUnfilteredData
+        : data;
+    if (!source || !Array.isArray(source)) return null;
+    return source.find((item: any) => item.name === hoveredItemName) ?? null;
+  }, [hoveredItemName, viewMode, deferredUnfilteredData, data]);
 
   // Get selected item data for tooltip when an item is focused/selected
   const selectedItemData = React.useMemo(() => {
@@ -1015,18 +1033,13 @@ export default function SupersetPluginChartFloorMap(
     isFullScreen &&
     (viewMode === 'heatmap' ? uniqueItemsUnfiltered : uniqueItems).length > 0;
 
-  // Heatmap colour scale: robust max computed from the deduplicated UNFILTERED
-  // sidebar items so that exactly the top 4% of unique stores show as red
-  // and the remaining 96% follow the gradient — based on the full store set.
-  const heatmapRobustMax = React.useMemo(() => {
-    const footfalls = uniqueItemsUnfiltered
-      .map(item => item.total_footfall as number)
-      .filter(f => f > 0)
-      .sort((a, b) => a - b);
-    if (footfalls.length === 0) return 1;
-    const clampIdx = Math.floor(footfalls.length * 0.96);
-    return Math.max(footfalls[clampIdx] ?? footfalls[footfalls.length - 1], 1);
-  }, [uniqueItemsUnfiltered]);
+  // Heatmap colour scale: use the same robustMax that HeatmapLayer computes
+  // internally from the raw points array so sidebar colors match the rendered
+  // heatmap exactly (same 96th-percentile, same input data).
+  const heatmapRobustMax = React.useMemo(
+    () => computeRobustMaxFootfall(heatmapPoints),
+    [heatmapPoints],
+  );
 
   // Calculate tooltip position for selected item
   const [selectedTooltipPos, setSelectedTooltipPos] = useState({ x: 0, y: 0 });
@@ -1158,7 +1171,8 @@ export default function SupersetPluginChartFloorMap(
                     style={{
                       borderLeftColor:
                         viewMode === 'heatmap'
-                          ? legendColorAtFootfall(
+                          ? heatmapStoreColors[item.name] ||
+                            legendColorAtFootfall(
                               item.total_footfall,
                               heatmapRobustMax,
                             )
@@ -1178,7 +1192,8 @@ export default function SupersetPluginChartFloorMap(
                         style={{
                           color:
                             viewMode === 'heatmap'
-                              ? legendColorAtFootfall(
+                              ? heatmapStoreColors[item.name] ||
+                                legendColorAtFootfall(
                                   item.total_footfall,
                                   heatmapRobustMax,
                                 )
@@ -1295,6 +1310,7 @@ export default function SupersetPluginChartFloorMap(
                     imgW={imgW}
                     imgH={imgH}
                     layerFilters={heatmapLayerFilters}
+                    onStoreColors={setHeatmapStoreColors}
                   />
                   {/* Draw transparent polygons in heatmap mode for click/hover */}
                   {/* Use deferredUnfilteredData so polygons exist for every store
@@ -1304,6 +1320,7 @@ export default function SupersetPluginChartFloorMap(
                     deferredUnfilteredData.map((item: any, index: number) => {
                       const itemName = item.name || 'Unknown';
                       const isItemSelected = selectedItemName === itemName;
+                      const isItemHovered = hoveredItemName === itemName;
                       const pointsStr = item.points || '';
                       if (!pointsStr || pointsStr === 'null') return null;
 
@@ -1315,8 +1332,20 @@ export default function SupersetPluginChartFloorMap(
                           <polygon
                             points={pointsStr}
                             fill="transparent"
-                            stroke={isItemSelected ? '#000' : 'transparent'}
-                            strokeWidth={isItemSelected ? 6 : 0}
+                            stroke={
+                              isItemSelected
+                                ? '#000'
+                                : isItemHovered
+                                  ? 'rgba(0, 0, 0, 0.9)'
+                                  : 'rgba(0, 0, 0, 0.5)'
+                            }
+                            strokeWidth={
+                              isItemSelected ? 6 : isItemHovered ? 3 : 1.25
+                            }
+                            onMouseEnter={e =>
+                              handleItemHoverEnter(itemName, e)
+                            }
+                            onMouseLeave={handleItemHoverLeave}
                           />
                         </g>
                       );
@@ -1326,36 +1355,32 @@ export default function SupersetPluginChartFloorMap(
             </svg>
           </ZoomPanWrapper>
 
-          {/* Show tooltip for hovered item (polygon mode only) */}
-          {viewMode === 'polygon' &&
-            displayedItem &&
-            hoveredItemName !== null && (
-              <TooltipBox isVisible={true} x={tooltipPos.x} y={tooltipPos.y}>
-                <div className="store-name">{displayedItem.name}</div>
-                {displayedItem.category && (
-                  <div className="category-section">
-                    <div className="category-label">Category</div>
-                    <div className="category-name">
-                      {displayedItem.category}
+          {/* Show tooltip for hovered item (polygon + heatmap modes) */}
+          {displayedItem && hoveredItemName !== null && (
+            <TooltipBox isVisible={true} x={tooltipPos.x} y={tooltipPos.y}>
+              <div className="store-name">{displayedItem.name}</div>
+              {displayedItem.category && (
+                <div className="category-section">
+                  <div className="category-label">Category</div>
+                  <div className="category-name">{displayedItem.category}</div>
+                </div>
+              )}
+              {displayedItem.total_footfall !== undefined &&
+                displayedItem.total_footfall !== null && (
+                  <div className="footfall-section">
+                    <div className="footfall-label">Footfall</div>
+                    <div
+                      className="footfall-value"
+                      style={{
+                        color: 'black',
+                      }}
+                    >
+                      {`${displayedItem.total_footfall.toLocaleString()} (${displayedItem.percentage_of_prop}%)`}
                     </div>
                   </div>
                 )}
-                {displayedItem.total_footfall !== undefined &&
-                  displayedItem.total_footfall !== null && (
-                    <div className="footfall-section">
-                      <div className="footfall-label">Footfall</div>
-                      <div
-                        className="footfall-value"
-                        style={{
-                          color: 'black',
-                        }}
-                      >
-                        {`${displayedItem.total_footfall.toLocaleString()} (${displayedItem.percentage_of_prop}%)`}
-                      </div>
-                    </div>
-                  )}
-              </TooltipBox>
-            )}
+            </TooltipBox>
+          )}
 
           {/* Show tooltip for selected item (both modes) */}
           {selectedItemData && !hoveredItemName && (
