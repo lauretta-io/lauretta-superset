@@ -46,6 +46,10 @@ import {
 
 const LAURETTA_IMAGE_API_PREFIX = '/api/v1/lauretta/images/';
 
+/** Produce a valid, deterministic DOM id from a store name. */
+const sanitizeElementId = (name: string): string =>
+  `store-polyline-${name.replace(/[^a-zA-Z0-9_-]/g, '-')}`;
+
 // Floor image URL using the image filename from config.json (e.g., "TRX_floorplan_CF.jpeg")
 const getFloorImageUrl = (imageFilename?: string): string => {
   const value = imageFilename?.trim() || '';
@@ -615,6 +619,7 @@ export default function SupersetPluginChartFloorMap(
   const rootElem = createRef<HTMLDivElement>();
   const mapPanelRef = useRef<HTMLDivElement>(null);
   const zoomPanRef = useRef<ZoomPanWrapperRef>(null);
+  const svgRef = useRef<SVGSVGElement>(null);
 
   // Fetch floors from config.json via backend API (used to resolve image when floor_image is not set)
   useEffect(() => {
@@ -827,6 +832,51 @@ export default function SupersetPluginChartFloorMap(
     sortDirection,
   ]);
 
+  // For each store name, find the index of the first data entry that has valid
+  // polygon points AND matches the current layer filter.  Only that entry
+  // receives the DOM id so getElementById reliably targets the right element.
+  const primaryPolygonIndex = React.useMemo(() => {
+    const map = new Map<string, number>();
+    if (data && Array.isArray(data)) {
+      data.forEach((item: any, index: number) => {
+        const name = item.name || 'Unknown';
+        const layer = item.layer || 'Unknown';
+        // Only consider items that pass the current layer filter and have valid points
+        if (
+          !map.has(name) &&
+          polygonLayerFilters.includes(layer) &&
+          item.points &&
+          item.points !== 'null' &&
+          item.points !== ''
+        ) {
+          map.set(name, index);
+        }
+      });
+    }
+    return map;
+  }, [data, polygonLayerFilters]);
+
+  // Same for unfiltered data (heatmap mode) — no layer filter needed here
+  // since all layers are always visible in heatmap mode
+  const primaryPolygonIndexUnfiltered = React.useMemo(() => {
+    const map = new Map<string, number>();
+    const source = deferredUnfilteredData;
+    if (source && Array.isArray(source)) {
+      source.forEach((item: any, index: number) => {
+        const name = item.name || 'Unknown';
+        if (
+          !map.has(name) &&
+          item.points &&
+          item.points !== 'null' &&
+          item.points !== ''
+        ) {
+          map.set(name, index);
+        }
+      });
+    }
+    return map;
+  }, [deferredUnfilteredData]);
+
   // Calculate max footfall per layer for dynamic color scaling
   const maxFootfallByLayer = React.useMemo(() => {
     if (!data || !Array.isArray(data)) return {};
@@ -943,8 +993,31 @@ export default function SupersetPluginChartFloorMap(
 
     // Otherwise, select and zoom to the item
     setSelectedItemName(itemName);
-    const itemElementId = `store-polyline-${itemName.replace(/\s+/g, '-')}`;
+    const itemElementId = sanitizeElementId(itemName);
     if (zoomPanRef.current) {
+      // Always target the real polygon for zoom, not the wrapper <g>.
+      const polygons = svgRef.current?.querySelectorAll<SVGPolygonElement>(
+        'polygon[data-store-name]',
+      );
+      const polygon =
+        polygons &&
+        Array.from(polygons).find(
+          p => p.getAttribute('data-store-name') === itemName,
+        );
+
+      if (polygon) {
+        const tempZoomId = `${itemElementId}--zoom-target`;
+        polygon.setAttribute('id', tempZoomId);
+        zoomPanRef.current.zoomToElement(tempZoomId, 2.5);
+        requestAnimationFrame(() => {
+          if (polygon.getAttribute('id') === tempZoomId) {
+            polygon.removeAttribute('id');
+          }
+        });
+        return;
+      }
+
+      // Fallback to wrapper id if polygon lookup fails for any reason.
       zoomPanRef.current.zoomToElement(itemElementId, 2.5);
     }
   };
@@ -1044,31 +1117,110 @@ export default function SupersetPluginChartFloorMap(
   // Calculate tooltip position for selected item
   const [selectedTooltipPos, setSelectedTooltipPos] = useState({ x: 0, y: 0 });
 
-  // Update selected tooltip position based on the actual polygon element's screen position
+  // Update selected tooltip position using the top-center of the rendered
+  // polygon so the tooltip always appears above the selected shape.
   useEffect(() => {
     if (selectedItemName) {
       const updatePosition = () => {
-        const itemElementId = `store-polyline-${selectedItemName.replace(/\s+/g, '-')}`;
-        const element = document.getElementById(itemElementId);
+        // Find the store's points string from data to compute centroid
+        const source =
+          viewMode === 'heatmap' &&
+          deferredUnfilteredData &&
+          Array.isArray(deferredUnfilteredData)
+            ? deferredUnfilteredData
+            : data;
+        const storeEntry = (source || []).find(
+          (item: any) =>
+            item.name === selectedItemName &&
+            item.points &&
+            item.points !== 'null',
+        );
+
         const parentRect =
           mapPanelRef.current?.getBoundingClientRect() ||
           rootElem.current?.getBoundingClientRect();
 
+        // Preferred path: measure the actual rendered polygon and anchor at its
+        // top-center so the tooltip appears above the shape.
+        const polygons = svgRef.current?.querySelectorAll<SVGPolygonElement>(
+          'polygon[data-store-name]',
+        );
+        const polygon =
+          polygons &&
+          Array.from(polygons).find(
+            p => p.getAttribute('data-store-name') === selectedItemName,
+          );
+        if (polygon && parentRect) {
+          const rect = polygon.getBoundingClientRect();
+          if (rect.width > 0 && rect.height > 0) {
+            const rawX = rect.left - parentRect.left + rect.width / 2;
+            const rawY = rect.top - parentRect.top;
+            setSelectedTooltipPos({
+              x: Math.max(0, Math.min(rawX, parentRect.width)),
+              y: Math.max(0, Math.min(rawY, parentRect.height)),
+            });
+            return;
+          }
+        }
+
+        // Fallback: use centroid projected through SVG transform
+        if (storeEntry && parentRect && svgRef.current) {
+          const centroid = computeCentroid(storeEntry.points as string);
+          if (centroid) {
+            const ctm = svgRef.current.getScreenCTM();
+            if (ctm) {
+              const pt = svgRef.current.createSVGPoint();
+              pt.x = centroid.x;
+              pt.y = centroid.y;
+              const screenPt = pt.matrixTransform(ctm);
+              // Bug 3 fix: clamp within map panel bounds
+              const rawX = screenPt.x - parentRect.left;
+              const rawY = screenPt.y - parentRect.top;
+              setSelectedTooltipPos({
+                x: Math.max(0, Math.min(rawX, parentRect.width)),
+                y: Math.max(0, Math.min(rawY, parentRect.height)),
+              });
+              return;
+            }
+          }
+        }
+
+        // Fallback: use getBoundingClientRect on the element
+        const itemElementId = sanitizeElementId(selectedItemName);
+        const element = document.getElementById(itemElementId);
         if (element && parentRect) {
           const rect = element.getBoundingClientRect();
-          setSelectedTooltipPos({
-            x: rect.left - parentRect.left + rect.width / 2,
-            y: rect.top - parentRect.top,
-          });
+          if (rect.width > 0 && rect.height > 0) {
+            // Bug 3 fix: clamp within map panel bounds
+            const rawX = rect.left - parentRect.left + rect.width / 2;
+            const rawY = rect.top - parentRect.top;
+            setSelectedTooltipPos({
+              x: Math.max(0, Math.min(rawX, parentRect.width)),
+              y: Math.max(0, Math.min(rawY, parentRect.height)),
+            });
+          }
         }
       };
 
-      // Wait for the zoom animation to finish before measuring position
-      const timer = setTimeout(updatePosition, 600);
-      return () => clearTimeout(timer);
+      // Bug 2 fix: Fire two measurements — a quick one at 50ms so the tooltip
+      // appears promptly, and a second at 500ms after the zoom animation settles.
+      const timerQuick = setTimeout(updatePosition, 50);
+      const timerFinal = setTimeout(updatePosition, 500);
+      return () => {
+        clearTimeout(timerQuick);
+        clearTimeout(timerFinal);
+      };
     }
     return undefined;
-  }, [selectedItemName, height, width, showStorePanel]);
+  }, [
+    selectedItemName,
+    height,
+    width,
+    showStorePanel,
+    viewMode,
+    deferredUnfilteredData,
+    data,
+  ]);
 
   return (
     <Styles
@@ -1249,6 +1401,7 @@ export default function SupersetPluginChartFloorMap(
             }
           >
             <svg
+              ref={svgRef}
               xmlns="http://www.w3.org/2000/svg"
               xmlnsXlink="http://www.w3.org/1999/xlink"
               viewBox={`0 0 ${imgW} ${imgH}`}
@@ -1288,11 +1441,16 @@ export default function SupersetPluginChartFloorMap(
                   return (
                     <g
                       key={index}
-                      id={`store-polyline-${itemName.replace(/\s+/g, '-')}`}
+                      id={
+                        primaryPolygonIndex.get(itemName) === index
+                          ? sanitizeElementId(itemName)
+                          : undefined
+                      }
                     >
                       <StorePolyline
                         store={item}
                         index={index}
+                        storeName={itemName}
                         isHovered={isItemHovered || isItemSelected}
                         onHoverEnter={e => handleItemHoverEnter(itemName, e)}
                         onHoverLeave={handleItemHoverLeave}
@@ -1327,9 +1485,15 @@ export default function SupersetPluginChartFloorMap(
                       return (
                         <g
                           key={index}
-                          id={`store-polyline-${itemName.replace(/\s+/g, '-')}`}
+                          id={
+                            primaryPolygonIndexUnfiltered.get(itemName) ===
+                            index
+                              ? sanitizeElementId(itemName)
+                              : undefined
+                          }
                         >
                           <polygon
+                            data-store-name={itemName}
                             points={pointsStr}
                             fill="transparent"
                             stroke={
@@ -1337,15 +1501,16 @@ export default function SupersetPluginChartFloorMap(
                                 ? '#000'
                                 : isItemHovered
                                   ? 'rgba(0, 0, 0, 0.9)'
-                                  : 'rgba(0, 0, 0, 0.5)'
+                                  : 'rgba(0, 0, 0, 0.65)'
                             }
                             strokeWidth={
-                              isItemSelected ? 6 : isItemHovered ? 3 : 1.25
+                              isItemSelected ? 6 : isItemHovered ? 4 : 2.5
                             }
                             onMouseEnter={e =>
                               handleItemHoverEnter(itemName, e)
                             }
                             onMouseLeave={handleItemHoverLeave}
+                            style={{ cursor: 'pointer' }}
                           />
                         </g>
                       );

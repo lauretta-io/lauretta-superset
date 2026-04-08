@@ -21,6 +21,7 @@ import React from 'react';
 export interface StorePolylineProps {
   store: any;
   index: number;
+  storeName?: string;
   isHovered: boolean;
   layer: string;
   maxFootfall: number;
@@ -114,6 +115,7 @@ export const getColorBins = (
 export function StorePolyline({
   store,
   index,
+  storeName,
   isHovered,
   layer,
   maxFootfall,
@@ -136,6 +138,7 @@ export function StorePolyline({
     <g key={index}>
       {/* Polyline */}
       <polygon
+        data-store-name={storeName || store.name || 'Unknown'}
         onMouseEnter={onHoverEnter}
         onMouseLeave={onHoverLeave}
         onClick={e => {

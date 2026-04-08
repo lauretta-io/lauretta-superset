@@ -23,8 +23,8 @@ export default function transformProps(chartProps: ChartProps) {
   const { boldText, headerFontSize, headerText, floorSelection, floorImage } =
     formData;
 
-  // queriesData[0] → filtered (polygon mode + store list)
-  // queriesData[1] → unit-filter-stripped (heatmap — full floor, same floor_id + time range)
+  // queriesData[0] → for polygon :: unit_name and unit_group_name dashboard filters applied, contains matching unit zones only
+  // queriesData[1] → for heatmap :: unit_name and unit_group_name dashboard filters stripped, contains all zones
   const data = queriesData[0].data as TimeseriesDataRecord[];
   const unfilteredData = (queriesData[1]?.data ??
     queriesData[0].data) as TimeseriesDataRecord[];
