@@ -788,11 +788,16 @@ export default function SupersetPluginChartFloorMap(
         const query = searchQuery.toLowerCase().trim();
         result = result.filter(item => item.name.toLowerCase().includes(query));
       }
-      // Force descending footfall sort in heatmap mode so colors align naturally
       return [...result].sort((a, b) => {
+        if (sortField === 'name') {
+          const nameCompare = a.name.localeCompare(b.name, undefined, {
+            sensitivity: 'base',
+          });
+          return sortDirection === 'asc' ? nameCompare : -nameCompare;
+        }
         const fa = a.total_footfall || 0;
         const fb = b.total_footfall || 0;
-        return fb - fa; // Always descending (high→low)
+        return sortDirection === 'asc' ? fa - fb : fb - fa;
       });
     }
 
@@ -1229,56 +1234,54 @@ export default function SupersetPluginChartFloorMap(
           >
             <div className="widget-header-row">
               <div className="widget-header">Store Footfall</div>
-              {viewMode === 'polygon' && (
-                <div className="sort-controls">
-                  <button
-                    type="button"
-                    className={`sort-btn ${sortField === 'name' ? 'active' : ''}`}
-                    onClick={() => handleSortChange('name')}
-                    title="Sort by name"
-                    aria-label="Sort by name"
-                  >
-                    {sortField === 'name' ? (
-                      sortDirection === 'asc' ? (
-                        <span className="sort-icon-pair">
-                          <FontSizeOutlined />
-                          <SortAscendingOutlined className="direction-icon" />
-                        </span>
-                      ) : (
-                        <span className="sort-icon-pair">
-                          <FontSizeOutlined />
-                          <SortDescendingOutlined className="direction-icon" />
-                        </span>
-                      )
+              <div className="sort-controls">
+                <button
+                  type="button"
+                  className={`sort-btn ${sortField === 'name' ? 'active' : ''}`}
+                  onClick={() => handleSortChange('name')}
+                  title="Sort by name"
+                  aria-label="Sort by name"
+                >
+                  {sortField === 'name' ? (
+                    sortDirection === 'asc' ? (
+                      <span className="sort-icon-pair">
+                        <FontSizeOutlined />
+                        <SortAscendingOutlined className="direction-icon" />
+                      </span>
                     ) : (
-                      <FontSizeOutlined />
-                    )}
-                  </button>
-                  <button
-                    type="button"
-                    className={`sort-btn ${sortField === 'footfall' ? 'active' : ''}`}
-                    onClick={() => handleSortChange('footfall')}
-                    title="Sort by footfall"
-                    aria-label="Sort by footfall"
-                  >
-                    {sortField === 'footfall' ? (
-                      sortDirection === 'asc' ? (
-                        <span className="sort-icon-pair">
-                          <BarChartOutlined />
-                          <SortAscendingOutlined className="direction-icon" />
-                        </span>
-                      ) : (
-                        <span className="sort-icon-pair">
-                          <BarChartOutlined />
-                          <SortDescendingOutlined className="direction-icon" />
-                        </span>
-                      )
+                      <span className="sort-icon-pair">
+                        <FontSizeOutlined />
+                        <SortDescendingOutlined className="direction-icon" />
+                      </span>
+                    )
+                  ) : (
+                    <FontSizeOutlined />
+                  )}
+                </button>
+                <button
+                  type="button"
+                  className={`sort-btn ${sortField === 'footfall' ? 'active' : ''}`}
+                  onClick={() => handleSortChange('footfall')}
+                  title="Sort by footfall"
+                  aria-label="Sort by footfall"
+                >
+                  {sortField === 'footfall' ? (
+                    sortDirection === 'asc' ? (
+                      <span className="sort-icon-pair">
+                        <BarChartOutlined />
+                        <SortAscendingOutlined className="direction-icon" />
+                      </span>
                     ) : (
-                      <BarChartOutlined />
-                    )}
-                  </button>
-                </div>
-              )}
+                      <span className="sort-icon-pair">
+                        <BarChartOutlined />
+                        <SortDescendingOutlined className="direction-icon" />
+                      </span>
+                    )
+                  ) : (
+                    <BarChartOutlined />
+                  )}
+                </button>
+              </div>
             </div>
             <input
               type="text"
