@@ -156,7 +156,6 @@ export function StorePolyline({
           strokeLinejoin: 'round',
           strokeLinecap: 'round',
           color: 'black',
-          opacity: 0.85,
         }}
         points={store.points}
       />
