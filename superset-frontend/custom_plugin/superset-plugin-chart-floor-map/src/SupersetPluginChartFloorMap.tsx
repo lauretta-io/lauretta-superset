@@ -583,13 +583,61 @@ const ColorLegend = styled.div`
   }
 `;
 
+/**
+ * Maps a dashboard filter column name to the corresponding field on a data row.
+ *
+ * The chart's `cols` groupby does NOT include `unit_name` / `unit_group_name`
+ * directly, so those columns are never present on the row objects.  Instead:
+ *   - `unit_name`       is stored as `item.name`      (the unit display name)
+ *   - `unit_group_name` is stored as `item.category`  (= ug.name for Retail rows)
+ */
+function getItemValueForFilterCol(item: any, col: string): string {
+  if (col === 'unit_name') return String(item.name ?? '');
+  if (col === 'unit_group_name') return String(item.category ?? '');
+  // Generic fallback for any other column
+  return String(item[col] ?? '');
+}
+
+/**
+ * Returns true when the given data row passes the active unit-level dashboard
+ * filters.  Only rows on the 'Retail' layer are subject to filtering; all
+ * other layers (Entrances, Circulation, Public) always pass through.
+ *
+ * An empty unitFilterValues map means no filter is active → everything passes.
+ */
+function passesUnitFilter(
+  item: any,
+  unitFilterValues: Record<string, Set<string>>,
+): boolean {
+  const layer: string = item.layer || '';
+  // Non-retail zones are never affected by unit_name / unit_group_name filters
+  if (layer !== 'Retail') return true;
+
+  for (const [col, values] of Object.entries(unitFilterValues)) {
+    if (values.size === 0) continue;
+    const itemVal = getItemValueForFilterCol(item, col);
+    if (!values.has(itemVal)) return false;
+  }
+  return true;
+}
+
 export default function SupersetPluginChartFloorMap(
   props: SupersetPluginChartFloorMapProps,
 ) {
   // height and width are the height and width of the DOM element as it exists in the dashboard.
   // There is also a `data` prop, which is, of course, your DATA 🎉
-  const { data, unfilteredData, height, width, floorImage, floorSelection } =
+  const { data, unitFilterValues, height, width, floorImage, floorSelection } =
     props;
+
+  // Derive filtered data for polygon view: non-Retail layers always shown,
+  // Retail layer filtered client-side by active unit_name/unit_group_name values.
+  const filteredPolygonData = React.useMemo(
+    () =>
+      !data || !Array.isArray(data)
+        ? []
+        : data.filter(item => passesUnitFilter(item, unitFilterValues)),
+    [data, unitFilterValues],
+  );
   const ALL_LAYERS = ['Retail', 'Entrances', 'Circulation', 'Public'];
   const [viewMode, setViewMode] = useState<ViewMode>('polygon');
   const [hoveredItemName, setHoveredItemName] = useState<string | null>(null);
@@ -712,31 +760,28 @@ export default function SupersetPluginChartFloorMap(
   const imgW = imageDimensions?.width ?? 5700;
   const imgH = imageDimensions?.height ?? 3800;
 
-  // React 17-compatible deferred data: update heatmap source on next tick
+  // React 17-compatible deferred data: update heatmap/polygon sources on next tick
   // so the UI (spinner, button state) paints first before the heavy memo runs.
-  const rawHeatmapSource =
-    unfilteredData && Array.isArray(unfilteredData) && unfilteredData.length > 0
-      ? unfilteredData
-      : data;
-  const [deferredUnfilteredData, setDeferredUnfilteredData] =
-    useState(rawHeatmapSource);
+  // data contains ALL zones (unit filters are stripped at query level).
+  const [deferredData, setDeferredData] = useState(data);
 
   useEffect(() => {
     // Push the expensive heatmapPoints recompute to the next event-loop tick
     // so React can flush the pending spinner render first.
     const id = setTimeout(() => {
-      setDeferredUnfilteredData(rawHeatmapSource);
+      setDeferredData(data);
       setIsHeatmapPending(false);
     }, 0);
     return () => clearTimeout(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [unfilteredData, data, viewMode]);
+  }, [data, viewMode]);
 
-  // Get unique items with their total footfall for the list widget
+  // Get unique items with their total footfall for the list widget (polygon mode).
+  // Uses filteredPolygonData so the sidebar reflects the active unit filters.
   const uniqueItems = React.useMemo(() => {
-    if (!data || !Array.isArray(data)) return [];
+    if (!filteredPolygonData || !Array.isArray(filteredPolygonData)) return [];
     const itemMap = new Map();
-    data.forEach((item: any) => {
+    filteredPolygonData.forEach((item: any) => {
       const itemName = item.name || 'Unknown';
       if (itemName === 'No Data') return; // Skip 'No Data' entries
       if (!itemMap.has(itemName)) {
@@ -752,12 +797,12 @@ export default function SupersetPluginChartFloorMap(
     return Array.from(itemMap.values()).sort(
       (a, b) => b.total_footfall - a.total_footfall,
     );
-  }, [data]);
+  }, [filteredPolygonData]);
 
-  // Deduplicated store list from the UNFILTERED dataset — used for the sidebar
-  // in heatmap mode so all stores are shown regardless of active dashboard filters.
+  // Deduplicated store list from the full dataset — used for the sidebar
+  // in heatmap mode so all zones are shown regardless of unit filters.
   const uniqueItemsUnfiltered = React.useMemo(() => {
-    const source = deferredUnfilteredData;
+    const source = deferredData;
     if (!source || !Array.isArray(source)) return [];
     const itemMap = new Map();
     source.forEach((item: any) => {
@@ -776,7 +821,7 @@ export default function SupersetPluginChartFloorMap(
     return Array.from(itemMap.values()).sort(
       (a, b) => b.total_footfall - a.total_footfall,
     );
-  }, [deferredUnfilteredData]);
+  }, [deferredData]);
 
   // Filter items based on search query and layer filter
   const filteredItems = React.useMemo(() => {
@@ -844,10 +889,11 @@ export default function SupersetPluginChartFloorMap(
   // For each store name, find the index of the first data entry that has valid
   // polygon points AND matches the current layer filter.  Only that entry
   // receives the DOM id so getElementById reliably targets the right element.
+  // Uses filteredPolygonData so only client-side-filtered Retail zones are indexed.
   const primaryPolygonIndex = React.useMemo(() => {
     const map = new Map<string, number>();
-    if (data && Array.isArray(data)) {
-      data.forEach((item: any, index: number) => {
+    if (filteredPolygonData && Array.isArray(filteredPolygonData)) {
+      filteredPolygonData.forEach((item: any, index: number) => {
         const name = item.name || 'Unknown';
         const layer = item.layer || 'Unknown';
         // Only consider items that pass the current layer filter and have valid points
@@ -863,13 +909,13 @@ export default function SupersetPluginChartFloorMap(
       });
     }
     return map;
-  }, [data, polygonLayerFilters]);
+  }, [filteredPolygonData, polygonLayerFilters]);
 
   // Same for unfiltered data (heatmap mode) — no layer filter needed here
   // since all layers are always visible in heatmap mode
   const primaryPolygonIndexUnfiltered = React.useMemo(() => {
     const map = new Map<string, number>();
-    const source = deferredUnfilteredData;
+    const source = deferredData;
     if (source && Array.isArray(source)) {
       source.forEach((item: any, index: number) => {
         const name = item.name || 'Unknown';
@@ -884,11 +930,12 @@ export default function SupersetPluginChartFloorMap(
       });
     }
     return map;
-  }, [deferredUnfilteredData]);
+  }, [deferredData]);
 
-  // Calculate max footfall per layer for dynamic color scaling
+  // Calculate max footfall per layer for dynamic color scaling.
+  // Uses filteredPolygonData so the scale reflects only the visible zones.
   const maxFootfallByLayer = React.useMemo(() => {
-    if (!data || !Array.isArray(data)) return {};
+    if (!filteredPolygonData || !Array.isArray(filteredPolygonData)) return {};
     const maxByLayer: Record<string, number> = {
       Retail: 0,
       Entrances: 0,
@@ -896,7 +943,7 @@ export default function SupersetPluginChartFloorMap(
       Public: 0,
     };
 
-    data.forEach((item: any) => {
+    filteredPolygonData.forEach((item: any) => {
       const layer = item.layer || 'Unknown';
       const footfall = item.total_footfall || 0;
       // Only consider items that are in the current filter
@@ -906,12 +953,12 @@ export default function SupersetPluginChartFloorMap(
     });
 
     return maxByLayer;
-  }, [data, layerFilters]);
+  }, [filteredPolygonData, layerFilters]);
 
   // Build heatmap points from the UNFILTERED dataset so the heatmap always
   // renders every zone on the floor regardless of active UI filters.
   const heatmapPoints = React.useMemo(() => {
-    const source = deferredUnfilteredData;
+    const source = deferredData;
     if (!source || !Array.isArray(source)) return [];
 
     const rawPts = source
@@ -973,7 +1020,7 @@ export default function SupersetPluginChartFloorMap(
       y: ((p.y - minY) / rangeY) * imgH,
       polygonArea: p.polygonArea * areaScale,
     }));
-  }, [deferredUnfilteredData, imgW, imgH]);
+  }, [deferredData, imgW, imgH]);
 
   // Handle layer filter change with loading (toggle multiple selections)
   // Works for both polygon and heatmap modes independently
@@ -1082,13 +1129,13 @@ export default function SupersetPluginChartFloorMap(
     if (!hoveredItemName) return null;
     const source =
       viewMode === 'heatmap' &&
-      deferredUnfilteredData &&
-      Array.isArray(deferredUnfilteredData)
-        ? deferredUnfilteredData
+      deferredData &&
+      Array.isArray(deferredData)
+        ? deferredData
         : data;
     if (!source || !Array.isArray(source)) return null;
     return source.find((item: any) => item.name === hoveredItemName) ?? null;
-  }, [hoveredItemName, viewMode, deferredUnfilteredData, data]);
+  }, [hoveredItemName, viewMode, deferredData, data]);
 
   // Get selected item data for tooltip when an item is focused/selected
   const selectedItemData = React.useMemo(() => {
@@ -1097,13 +1144,13 @@ export default function SupersetPluginChartFloorMap(
     // the first query still have tooltip data available.
     const source =
       viewMode === 'heatmap' &&
-      deferredUnfilteredData &&
-      Array.isArray(deferredUnfilteredData)
-        ? deferredUnfilteredData
+      deferredData &&
+      Array.isArray(deferredData)
+        ? deferredData
         : data;
     if (!source || !Array.isArray(source)) return null;
     return source.find((item: any) => item.name === selectedItemName) ?? null;
-  }, [selectedItemName, viewMode, deferredUnfilteredData, data]);
+  }, [selectedItemName, viewMode, deferredData, data]);
 
   // Show store panel only in fullscreen, even if there are no items
   const showStorePanel = isFullScreen;
@@ -1127,9 +1174,9 @@ export default function SupersetPluginChartFloorMap(
         // Find the store's points string from data to compute centroid
         const source =
           viewMode === 'heatmap' &&
-          deferredUnfilteredData &&
-          Array.isArray(deferredUnfilteredData)
-            ? deferredUnfilteredData
+          deferredData &&
+          Array.isArray(deferredData)
+            ? deferredData
             : data;
         const storeEntry = (source || []).find(
           (item: any) =>
@@ -1215,7 +1262,7 @@ export default function SupersetPluginChartFloorMap(
     width,
     showStorePanel,
     viewMode,
-    deferredUnfilteredData,
+    deferredData,
     data,
   ]);
 
@@ -1423,9 +1470,9 @@ export default function SupersetPluginChartFloorMap(
               />
               {/* Polygon mode */}
               {viewMode === 'polygon' &&
-                data &&
-                Array.isArray(data) &&
-                data.map((item: any, index: number) => {
+                filteredPolygonData &&
+                Array.isArray(filteredPolygonData) &&
+                filteredPolygonData.map((item: any, index: number) => {
                   const itemName = item.name || 'Unknown';
                   const itemLayer = item.layer || 'Unknown';
                   const isItemHovered = hoveredItemName === itemName;
@@ -1471,11 +1518,11 @@ export default function SupersetPluginChartFloorMap(
                     layerFilters={heatmapLayerFilters}
                   />
                   {/* Draw transparent polygons in heatmap mode for click/hover */}
-                  {/* Use deferredUnfilteredData so polygons exist for every store
+                  {/* Use deferredData so polygons exist for every store
                       shown in the sidebar, regardless of active dashboard filters */}
-                  {deferredUnfilteredData &&
-                    Array.isArray(deferredUnfilteredData) &&
-                    deferredUnfilteredData.map((item: any, index: number) => {
+                  {deferredData &&
+                    Array.isArray(deferredData) &&
+                    deferredData.map((item: any, index: number) => {
                       const itemName = item.name || 'Unknown';
                       const isItemSelected = selectedItemName === itemName;
                       const isItemHovered = hoveredItemName === itemName;

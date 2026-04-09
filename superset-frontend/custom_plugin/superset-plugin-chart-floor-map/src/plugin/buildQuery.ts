@@ -5,13 +5,15 @@
 import { buildQueryContext, QueryFormData } from '@superset-ui/core';
 
 /**
- * Columns that belong to unit/unit_group filters which should be STRIPPED
- * from query 1 (full-floor heatmap). All other filters (floor_id, time range,
- * temporal adhoc filters) are preserved in both queries.
+ * Columns that are applied as client-side filters in the chart component
+ * (polygon Retail layer only) and must be STRIPPED from the server query so
+ * that the dataset always returns ALL zones for the floor.  Non-unit zones
+ * (Entrances, Circulation, Public) are therefore never excluded by these
+ * filters at the query level.
  */
 const UNIT_FILTER_COLUMNS = new Set(['unit_name', 'unit_group_name']);
 
-/** Strip standard filters */
+/** Strip unit-scoped filters from any filter array. */
 function stripUnitFilters(filters: any[] = []): any[] {
   return filters.filter((f: any) => {
     const col: string = f.col ?? f.column ?? f.subject ?? '';
@@ -39,6 +41,10 @@ export default function buildQuery(formData: QueryFormData) {
   ];
 
   return buildQueryContext(formData, baseQueryObject => {
+    // Strip unit_name / unit_group_name from ALL filter arrays so the single
+    // query always returns every zone on the floor.  The chart component reads
+    // the active filter values from formData.extraFormData and applies them
+    // client-side to the Retail layer only.
     const strippedFilters = stripUnitFilters(baseQueryObject.filters ?? []);
     const adhocRaw = baseQueryObject.adhoc_filters;
     const strippedAdhoc = stripUnitFilters(
@@ -50,14 +56,7 @@ export default function buildQuery(formData: QueryFormData) {
     );
 
     return [
-      // ── Query 0: FULLY FILTERED (polygon mode + store list) ──────────
-      {
-        ...baseQueryObject,
-        groupby: hasGroupby ? groupby : [],
-        metrics: defaultMetrics,
-      },
-
-      // ── Query 1: UNIT-FILTER-STRIPPED (heatmap — full floor) ─────────
+      // ── Single query: unit filters stripped, all other filters preserved ──
       {
         ...baseQueryObject,
         groupby: hasGroupby ? groupby : [],

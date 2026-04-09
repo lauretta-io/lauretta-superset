@@ -18,22 +18,51 @@
  */
 import { ChartProps, TimeseriesDataRecord } from '@superset-ui/core';
 
+/** Columns whose dashboard filter values are applied client-side (polygon Retail layer only). */
+const UNIT_FILTER_COLUMNS = new Set(['unit_name', 'unit_group_name']);
+
+/**
+ * Extract active filter values for unit_name / unit_group_name from the
+ * extraFormData that Superset injects when a dashboard filter is applied.
+ * Returns a map of { column -> Set<string> } for quick look-up.
+ */
+function extractUnitFilterValues(
+  formData: any,
+): Record<string, Set<string>> {
+  const result: Record<string, Set<string>> = {};
+
+  // Dashboard filters land in extraFormData.filters
+  const extraFilters: any[] = formData?.extraFormData?.filters ?? [];
+  extraFilters.forEach((f: any) => {
+    const col: string = f.col ?? f.column ?? f.subject ?? '';
+    if (UNIT_FILTER_COLUMNS.has(col)) {
+      const values: string[] = Array.isArray(f.val) ? f.val : [f.val];
+      if (!result[col]) result[col] = new Set<string>();
+      values.forEach(v => result[col].add(String(v)));
+    }
+  });
+
+  return result;
+}
+
 export default function transformProps(chartProps: ChartProps) {
   const { width, height, formData, queriesData } = chartProps;
   const { boldText, headerFontSize, headerText, floorSelection, floorImage } =
     formData;
 
-  // queriesData[0] → for polygon :: unit_name and unit_group_name dashboard filters applied, contains matching unit zones only
-  // queriesData[1] → for heatmap :: unit_name and unit_group_name dashboard filters stripped, contains all zones
+  // Single query — all zones for the floor (unit filters are stripped at query
+  // level and re-applied client-side for the Retail polygon layer only).
   const data = queriesData[0].data as TimeseriesDataRecord[];
-  const unfilteredData = (queriesData[1]?.data ??
-    queriesData[0].data) as TimeseriesDataRecord[];
+
+  // Extract unit_name / unit_group_name filter values from the dashboard context
+  // so the chart component can apply them client-side to the Retail layer.
+  const unitFilterValues = extractUnitFilterValues(formData);
 
   return {
     width,
     height,
     data,
-    unfilteredData,
+    unitFilterValues,
     boldText,
     headerFontSize,
     headerText,

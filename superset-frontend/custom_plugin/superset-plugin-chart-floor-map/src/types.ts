@@ -44,8 +44,13 @@ export type SupersetPluginChartFloorMapQueryFormData = QueryFormData &
 export type SupersetPluginChartFloorMapProps =
   SupersetPluginChartFloorMapStylesProps &
     SupersetPluginChartFloorMapCustomizeProps & {
-      /** Filtered dataset — respects all UI filters. Drives polygon colors + store list. */
+      /** Full floor dataset — unit filters stripped at query level, all zones included. */
       data: TimeseriesDataRecord[];
-      /** Unit-filter-stripped dataset — same floor + time range, all zones. Drives heatmap. */
-      unfilteredData: TimeseriesDataRecord[];
+      /**
+       * Active dashboard filter values for unit_name / unit_group_name columns.
+       * Applied client-side in polygon mode to the Retail layer only, so
+       * non-unit zones (Entrances, Circulation, Public) are never hidden.
+       * Map of { columnName -> Set<filterValue> }; empty map means no filter active.
+       */
+      unitFilterValues: Record<string, Set<string>>;
     };
