@@ -16,7 +16,7 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import React, { useMemo, useEffect } from 'react';
+import React, { useMemo } from 'react';
 
 /* ═══════════════════════════════════════════════════════════════════════════
  *  FLOOR-PLAN CONCENTRATION HEATMAP
@@ -66,7 +66,6 @@ interface HeatmapLayerProps {
     e: React.MouseEvent<SVGCircleElement>,
   ) => void;
   onHoverLeave?: () => void;
-  onStoreColors?: (colors: Record<string, string>) => void;
 }
 
 interface FootfallSource {
@@ -280,6 +279,9 @@ function pointToSegmentDistance(
   return { dist: Math.sqrt(dx * dx + dy * dy), t };
 }
 
+// Build a more detailed boundary from convex hull by inserting nearby interior
+// vertices along long edges. This keeps the hull tight to polygon boundaries
+// without inflating beyond farthest units.
 function buildDetailedHull(
   inputPts: { x: number; y: number }[],
 ): { x: number; y: number }[] {
@@ -297,15 +299,18 @@ function buildDetailedHull(
   const pool = unique.filter(p => !hullKeys.has(`${p.x}:${p.y}`));
   if (pool.length === 0) return baseHull;
 
-  // Refine long edges by inserting nearby interior vertices.
   const refined = baseHull.slice();
   const edgeLens = refined.map((p, i) =>
     distance(p, refined[(i + 1) % refined.length]),
   );
   const avgEdge =
     edgeLens.reduce((s, d) => s + d, 0) / Math.max(edgeLens.length, 1);
-  const maxEdgeLen = avgEdge * 1.35;
-  const maxInsertions = Math.min(pool.length, 12_000);
+  // Lower threshold gives more edge detail than a coarse convex hull.
+  const maxEdgeLen = avgEdge * 1.2;
+  const maxInsertions = Math.min(
+    pool.length,
+    Math.max(1800, baseHull.length * 12),
+  );
 
   let inserted = 0;
   let changed = true;
@@ -325,10 +330,10 @@ function buildDetailedHull(
       for (let j = 0; j < pool.length; j += 1) {
         const p = pool[j];
         const { dist, t } = pointToSegmentDistance(p, a, b);
-        if (t <= 0.07 || t >= 0.93) continue;
-        if (dist > edgeLen * 0.6) continue;
+        if (t <= 0.04 || t >= 0.96) continue;
+        if (dist > edgeLen * 0.45) continue;
 
-        const score = dist + 0.1 * Math.abs(0.5 - t) * edgeLen;
+        const score = dist + 0.08 * Math.abs(0.5 - t) * edgeLen;
         if (score < bestScore) {
           bestScore = score;
           bestIdx = j;
@@ -361,6 +366,20 @@ function sampleInterior(
     }
   }
   return result;
+}
+
+function downsampleVerticesForHull(
+  pts: { x: number; y: number }[],
+  cell: number,
+): { x: number; y: number }[] {
+  if (pts.length === 0 || cell <= 1) return pts;
+  const grid = new Map<string, { x: number; y: number }>();
+  for (let i = 0; i < pts.length; i += 1) {
+    const p = pts[i];
+    const key = `${Math.round(p.x / cell)}:${Math.round(p.y / cell)}`;
+    if (!grid.has(key)) grid.set(key, p);
+  }
+  return Array.from(grid.values());
 }
 
 /* ─── Color scale ─────────────────────────────────────────────────────────
@@ -428,7 +447,6 @@ export function HeatmapLayer({
   layerFilters,
   onHoverEnter,
   onHoverLeave,
-  onStoreColors,
 }: HeatmapLayerProps) {
   /* ─────────────────────────────────────────────────────────────────────
    *  TUNING PARAMETERS
@@ -453,7 +471,9 @@ export function HeatmapLayer({
   const { retailBBoxes, nonRetailBBoxes, buildingHull, sources } =
     useMemo(() => {
       const retailPolys: { x: number; y: number }[][] = [];
-      const retailVertices: { x: number; y: number }[] = [];
+      // Collect ALL polygon vertices for the hull so separated/distant units
+      // are included regardless of their layer.
+      const allVertices: { x: number; y: number }[] = [];
       const src: FootfallSource[] = [];
       const nonRetailPolys: { x: number; y: number }[][] = [];
 
@@ -467,10 +487,11 @@ export function HeatmapLayer({
 
         if (layer === 'Retail') {
           retailPolys.push(pts);
-          for (let v = 0; v < pts.length; v += 1) retailVertices.push(pts[v]);
         } else {
           nonRetailPolys.push(pts);
         }
+        // Include ALL layers in hull vertex pool
+        for (let v = 0; v < pts.length; v += 1) allVertices.push(pts[v]);
 
         if (p.weight > 0) {
           const cx = pts.reduce((s, q) => s + q.x, 0) / pts.length;
@@ -490,8 +511,16 @@ export function HeatmapLayer({
         }
       }
 
-      const hull =
-        retailVertices.length >= 3 ? buildDetailedHull(retailVertices) : [];
+      // Detailed hull: wrap farther polygons while following nearer edge geometry.
+      // Downsample dense vertex clouds first to keep interactions responsive.
+      const hullInput =
+        allVertices.length > 6000
+          ? downsampleVerticesForHull(
+              allVertices,
+              Math.max(2, Math.min(imgW, imgH) / 700),
+            )
+          : allVertices;
+      const hull = hullInput.length >= 3 ? buildDetailedHull(hullInput) : [];
 
       return {
         retailBBoxes: computeBBoxes(retailPolys),
@@ -499,7 +528,7 @@ export function HeatmapLayer({
         buildingHull: hull,
         sources: src,
       };
-    }, [points, INTERIOR_SPACING]);
+    }, [points, INTERIOR_SPACING, imgW, imgH]);
 
   /* ── STAGE 2 — Walkable dot grid ─────────────────────────────────── */
 
@@ -557,6 +586,12 @@ export function HeatmapLayer({
     }
     return { dotGrid: grid, cellSize: cs };
   }, [buildingHull, retailBBoxes, nonRetailBBoxes, adaptiveDotSpacing]);
+
+  // Debug overlay: serialized points for visualizing the computed building hull.
+  // const buildingHullPointsAttr = useMemo(
+  //   () => buildingHull.map(p => `${p.x},${p.y}`).join(' '),
+  //   [buildingHull],
+  // );
 
   /* ── STAGE 3 — KDE with spatial grid index ────────────────────────── */
 
@@ -708,37 +743,21 @@ export function HeatmapLayer({
       .sort((a, b) => a.norm - b.norm);
   }, [kdeGrid, maxKDE, robustMaxFootfall, PERCENTILE_CLAMP, GAMMA]);
 
-  /* ── STAGE 4b — Per-store peak color (for sidebar sync) ────────────
-   *  For each store, find the cell with the highest footfallNorm that is
-   *  dominated by that store. This is the exact peak color the heatmap
-   *  renders at the store's hottest spot — including spatial decay.
-   * ───────────────────────────────────────────────────────────────────── */
-
-  const storeColors = useMemo(() => {
-    const colorMap: Record<string, string> = {};
-    if (sortedCells.length === 0) return colorMap;
-    const storePeak: Record<string, number> = {};
-    for (let i = 0; i < sortedCells.length; i += 1) {
-      const cell = sortedCells[i];
-      if (!cell.nearestName) continue;
-      if ((storePeak[cell.nearestName] || 0) < cell.footfallNorm) {
-        storePeak[cell.nearestName] = cell.footfallNorm;
-      }
-    }
-    for (const name in storePeak) {
-      colorMap[name] = heatmapColor(storePeak[name]);
-    }
-    return colorMap;
-  }, [sortedCells]);
-
-  useEffect(() => {
-    if (onStoreColors) onStoreColors(storeColors);
-  }, [storeColors, onStoreColors]);
-
   /* ── STAGE 5 — Render ─────────────────────────────────────────────── */
 
   return (
     <g className="heatmap-layer" style={{ mixBlendMode: 'multiply' }}>
+      {/* {buildingHull.length >= 3 && (
+        <polygon
+          points={buildingHullPointsAttr}
+          fill="none"
+          stroke="#ff00ff"
+          strokeWidth={6}
+          strokeDasharray="18 10"
+          opacity={0.9}
+          pointerEvents="none"
+        />
+      )} */}
       {sortedCells.map(cell => {
         const color = heatmapColor(cell.footfallNorm);
 
@@ -896,103 +915,20 @@ export function getHeatmapColorBins(points: HeatmapPoint[]): {
  *   • No label crowding — Zone B has at most one label.
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-function estimateLabelWidth(label: string, fontSize: number): number {
-  return label.length * fontSize * 0.58;
-}
-
 export function HeatmapLegend({ points }: { points: HeatmapPoint[] }) {
-  const { actualMax, robustMax } = useMemo(() => {
-    const footfalls = points
-      .map(p => p.weight)
-      .filter(w => w > 0)
-      .sort((a, b) => a - b);
-    if (footfalls.length === 0) return { actualMax: 1, robustMax: 1 };
-    const aMax = Math.max(...footfalls, 1);
-    const clampIdx = Math.floor(footfalls.length * 0.96);
-    const rMax = Math.max(
-      footfalls[clampIdx] || footfalls[footfalls.length - 1],
-      1,
-    );
-    return { actualMax: aMax, robustMax: rMax };
-  }, [points]);
-
   const BAR_W = 260;
   const BAR_H = 14;
-  const TICK_FONT = 10;
-  const MIN_LABEL_GAP = 6;
 
-  const hasZoneB = actualMax > robustMax * 1.02;
-
-  const ZONE_A_PCT = hasZoneB ? 0.75 : 1.0;
-  const ZONE_A_W = BAR_W * ZONE_A_PCT;
-  const ZONE_B_W = BAR_W - ZONE_A_W;
-
-  const gradientAStops = useMemo(() => {
+  const gradientStops = useMemo(() => {
     const N = 20;
-    // Zone A ends at deep orange (t=0.85), red transition starts in Zone B only
-    const T_MAX_A = hasZoneB ? 0.85 : 1.0;
     return Array.from({ length: N + 1 }, (_, i) => {
-      const t = (i / N) * T_MAX_A;
+      const t = i / N;
       return {
         offset: `${((i / N) * 100).toFixed(1)}%`,
         color: heatmapColor(t),
       };
     });
-  }, [hasZoneB]);
-
-  const zoneATicks = useMemo(() => {
-    if (robustMax <= 0) return [{ label: '0', x: 0 }];
-
-    const rawStep = robustMax / 4;
-    const mag = Math.pow(10, Math.floor(Math.log10(rawStep)));
-    const residual = rawStep / mag;
-    let niceStep: number;
-    if (residual <= 1.5) niceStep = 1 * mag;
-    else if (residual <= 3) niceStep = 2 * mag;
-    else if (residual <= 7) niceStep = 5 * mag;
-    else niceStep = 10 * mag;
-
-    const result: { label: string; x: number }[] = [];
-    for (let v = 0; v < robustMax - niceStep * 0.1; v += niceStep) {
-      const t = Math.pow(v / robustMax, HEATMAP_DYNAMIC_COLOR_GAMMA);
-      result.push({
-        label: Math.round(v).toLocaleString(),
-        x: t * ZONE_A_W,
-      });
-    }
-
-    result.push({
-      label: Math.round(robustMax).toLocaleString(),
-      x: ZONE_A_W,
-    });
-
-    return result;
-  }, [robustMax, ZONE_A_W]);
-
-  const visibleZoneATicks = useMemo(() => {
-    if (zoneATicks.length <= 2) return zoneATicks;
-
-    const kept = [zoneATicks[0]];
-    let prevRight = estimateLabelWidth(zoneATicks[0].label, TICK_FONT);
-
-    for (let i = 1; i < zoneATicks.length - 1; i += 1) {
-      const tick = zoneATicks[i];
-      const hw = estimateLabelWidth(tick.label, TICK_FONT) / 2;
-      const lastTick = zoneATicks[zoneATicks.length - 1];
-      const lastLeft =
-        lastTick.x - estimateLabelWidth(lastTick.label, TICK_FONT);
-
-      if (
-        tick.x - hw > prevRight + MIN_LABEL_GAP &&
-        tick.x + hw < lastLeft - MIN_LABEL_GAP
-      ) {
-        kept.push(tick);
-        prevRight = tick.x + hw;
-      }
-    }
-    kept.push(zoneATicks[zoneATicks.length - 1]);
-    return kept;
-  }, [zoneATicks]);
+  }, [points]);
 
   return (
     <div
@@ -1024,124 +960,38 @@ export function HeatmapLegend({ points }: { points: HeatmapPoint[] }) {
 
       <svg
         width={BAR_W}
-        height={hasZoneB ? 46 : 34}
+        height={34}
         style={{ display: 'block', overflow: 'visible' }}
       >
         <defs>
-          <linearGradient id="heatleg-zone-a" x1="0" x2="1" y1="0" y2="0">
-            {gradientAStops.map((s, i) => (
+          <linearGradient id="heatleg-simple" x1="0" x2="1" y1="0" y2="0">
+            {gradientStops.map((s, i) => (
               <stop key={i} offset={s.offset} stopColor={s.color} />
             ))}
           </linearGradient>
-          {/* Zone B gradient: orange → red (smooth continuation from Zone A) */}
-          <linearGradient id="heatleg-zone-b" x1="0" x2="1" y1="0" y2="0">
-            <stop offset="0%" stopColor={heatmapColor(0.85)} />
-            <stop offset="100%" stopColor={heatmapColor(1.0)} />
-          </linearGradient>
-          {/* Clip paths for rounded corners */}
-          <clipPath id="heatleg-clip-full">
-            <rect x={0} y={0} width={BAR_W} height={BAR_H} rx={3} />
-          </clipPath>
-          <clipPath id="heatleg-clip-a">
-            <rect x={0} y={0} width={ZONE_A_W} height={BAR_H} rx={0} />
-          </clipPath>
         </defs>
 
-        {/* ── Rounded outer shell (clips both zones) ── */}
-        <g clipPath="url(#heatleg-clip-full)">
-          {/* Zone A */}
-          <rect
-            x={0}
-            y={0}
-            width={ZONE_A_W}
-            height={BAR_H}
-            fill="url(#heatleg-zone-a)"
-          />
-          {/* Zone B (orange→red gradient, only if hasZoneB) */}
-          {hasZoneB && (
-            <rect
-              x={ZONE_A_W}
-              y={0}
-              width={ZONE_B_W}
-              height={BAR_H}
-              fill="url(#heatleg-zone-b)"
-            />
-          )}
-        </g>
+        <rect
+          x={0}
+          y={0}
+          width={BAR_W}
+          height={BAR_H}
+          rx={3}
+          fill="url(#heatleg-simple)"
+        />
 
-        {visibleZoneATicks.map((tick, idx) => {
-          const isFirst = idx === 0;
-          const isLast = idx === visibleZoneATicks.length - 1;
-          const isDivider = isLast && hasZoneB;
-          return (
-            <React.Fragment key={idx}>
-              <line
-                x1={tick.x}
-                y1={BAR_H}
-                x2={tick.x}
-                y2={BAR_H + (isDivider ? 6 : 4)}
-                stroke={isDivider ? '#555' : '#aaa'}
-                strokeWidth={isDivider ? 1.2 : 0.8}
-                visibility={isFirst ? 'hidden' : 'visible'}
-              />
-              <text
-                x={tick.x}
-                y={BAR_H + 15}
-                fontSize={TICK_FONT}
-                fill={isDivider ? '#444' : '#666'}
-                fontWeight={isDivider ? 600 : 400}
-                textAnchor={isFirst ? 'start' : isDivider ? 'middle' : 'middle'}
-              >
-                {tick.label}
-              </text>
-              {/* Zone B: actualMax label below right edge */}
-              {isDivider && hasZoneB && (
-                <>
-                  {/* Thin dashed divider line through the bar */}
-                  <line
-                    x1={ZONE_A_W}
-                    y1={0}
-                    x2={ZONE_A_W}
-                    y2={BAR_H}
-                    stroke="rgba(255,255,255,0.7)"
-                    strokeWidth={1.5}
-                    strokeDasharray="2,2"
-                  />
-                  {/* actualMax label at right edge */}
-                  <line
-                    x1={BAR_W}
-                    y1={BAR_H}
-                    x2={BAR_W}
-                    y2={BAR_H + 4}
-                    stroke="#aaa"
-                    strokeWidth={0.8}
-                  />
-                  <text
-                    x={BAR_W}
-                    y={BAR_H + 15}
-                    fontSize={TICK_FONT}
-                    fill="#666"
-                    fontWeight={400}
-                    textAnchor="end"
-                  >
-                    {Math.round(actualMax).toLocaleString()}
-                  </text>
-                  {/* "≥" annotation below Zone B */}
-                  <text
-                    x={BAR_W}
-                    y={BAR_H + 28}
-                    fontSize={9}
-                    fill="#999"
-                    textAnchor="end"
-                  >
-                    ≥ {Math.round(robustMax).toLocaleString()} – High
-                    Concentration
-                  </text>
-                </>
-              )}
-            </React.Fragment>
-          );
-        })}
+        <text x={0} y={BAR_H + 15} fontSize={10} fill="#666" textAnchor="start">
+          Low
+        </text>
+        <text
+          x={BAR_W}
+          y={BAR_H + 15}
+          fontSize={10}
+          fill="#666"
+          textAnchor="end"
+        >
+          High
+        </text>
       </svg>
     </div>
   );

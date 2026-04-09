@@ -50,6 +50,13 @@ const LAURETTA_IMAGE_API_PREFIX = '/api/v1/lauretta/images/';
 const sanitizeElementId = (name: string): string =>
   `store-polyline-${name.replace(/[^a-zA-Z0-9_-]/g, '-')}`;
 
+const escapeAttrValue = (value: string): string => {
+  if (typeof CSS !== 'undefined' && typeof CSS.escape === 'function') {
+    return CSS.escape(value);
+  }
+  return value.replace(/(["\\])/g, '\\$1');
+};
+
 // Floor image URL using the image filename from config.json (e.g., "TRX_floorplan_CF.jpeg")
 const getFloorImageUrl = (imageFilename?: string): string => {
   const value = imageFilename?.trim() || '';
@@ -292,7 +299,7 @@ const StoreListWidget = styled.div`
     overflow-y: auto;
     overflow-x: hidden;
     flex: 1;
-    max-height: 500px;
+    max-height: none;
 
     &::-webkit-scrollbar {
       width: 6px;
@@ -595,6 +602,9 @@ export default function SupersetPluginChartFloorMap(
   // Separate filter states for each view mode
   const [polygonLayerFilters, setPolygonLayerFilters] = useState<string[]>([
     'Retail',
+    'Entrances',
+    'Circulation',
+    'Public',
   ]);
   const [heatmapLayerFilters, setHeatmapLayerFilters] =
     useState<string[]>(ALL_LAYERS);
@@ -605,10 +615,6 @@ export default function SupersetPluginChartFloorMap(
   const [isFilterLoading, setIsFilterLoading] = useState(false);
   // React 17-compatible pending state for heatmap mode switch
   const [isHeatmapPending, setIsHeatmapPending] = useState(false);
-  // Per-store peak colors computed by the heatmap renderer (includes spatial decay)
-  const [heatmapStoreColors, setHeatmapStoreColors] = useState<
-    Record<string, string>
-  >({});
   const [floorsData, setFloorsData] = useState<
     { name: string; image: string }[]
   >([]);
@@ -732,6 +738,7 @@ export default function SupersetPluginChartFloorMap(
     const itemMap = new Map();
     data.forEach((item: any) => {
       const itemName = item.name || 'Unknown';
+      if (itemName === 'No Data') return; // Skip 'No Data' entries
       if (!itemMap.has(itemName)) {
         itemMap.set(itemName, {
           name: itemName,
@@ -755,6 +762,7 @@ export default function SupersetPluginChartFloorMap(
     const itemMap = new Map();
     source.forEach((item: any) => {
       const itemName = item.name || 'Unknown';
+      if (itemName === 'No Data') return; // Skip 'No Data' entries
       if (!itemMap.has(itemName)) {
         itemMap.set(itemName, {
           name: itemName,
@@ -773,22 +781,18 @@ export default function SupersetPluginChartFloorMap(
   // Filter items based on search query and layer filter
   const filteredItems = React.useMemo(() => {
     // In heatmap mode use the unfiltered dataset; all layers are always active.
+    // Always sort by footfall descending (red→orange→yellow→green) for visual clarity.
     if (viewMode === 'heatmap') {
       let result = uniqueItemsUnfiltered;
       if (searchQuery.trim()) {
         const query = searchQuery.toLowerCase().trim();
         result = result.filter(item => item.name.toLowerCase().includes(query));
       }
+      // Force descending footfall sort in heatmap mode so colors align naturally
       return [...result].sort((a, b) => {
-        if (sortField === 'name') {
-          const cmp = a.name.localeCompare(b.name, undefined, {
-            sensitivity: 'base',
-          });
-          return sortDirection === 'asc' ? cmp : -cmp;
-        }
         const fa = a.total_footfall || 0;
         const fb = b.total_footfall || 0;
-        return sortDirection === 'asc' ? fa - fb : fb - fa;
+        return fb - fa; // Always descending (high→low)
       });
     }
 
@@ -996,14 +1000,9 @@ export default function SupersetPluginChartFloorMap(
     const itemElementId = sanitizeElementId(itemName);
     if (zoomPanRef.current) {
       // Always target the real polygon for zoom, not the wrapper <g>.
-      const polygons = svgRef.current?.querySelectorAll<SVGPolygonElement>(
-        'polygon[data-store-name]',
+      const polygon = svgRef.current?.querySelector<SVGPolygonElement>(
+        `polygon[data-store-name="${escapeAttrValue(itemName)}"]`,
       );
-      const polygon =
-        polygons &&
-        Array.from(polygons).find(
-          p => p.getAttribute('data-store-name') === itemName,
-        );
 
       if (polygon) {
         const tempZoomId = `${itemElementId}--zoom-target`;
@@ -1101,10 +1100,8 @@ export default function SupersetPluginChartFloorMap(
     return source.find((item: any) => item.name === selectedItemName) ?? null;
   }, [selectedItemName, viewMode, deferredUnfilteredData, data]);
 
-  // Show store panel only in fullscreen, when there are items
-  const showStorePanel =
-    isFullScreen &&
-    (viewMode === 'heatmap' ? uniqueItemsUnfiltered : uniqueItems).length > 0;
+  // Show store panel only in fullscreen, even if there are no items
+  const showStorePanel = isFullScreen;
 
   // Heatmap colour scale: use the same robustMax that HeatmapLayer computes
   // internally from the raw points array so sidebar colors match the rendered
@@ -1142,14 +1139,9 @@ export default function SupersetPluginChartFloorMap(
 
         // Preferred path: measure the actual rendered polygon and anchor at its
         // top-center so the tooltip appears above the shape.
-        const polygons = svgRef.current?.querySelectorAll<SVGPolygonElement>(
-          'polygon[data-store-name]',
+        const polygon = svgRef.current?.querySelector<SVGPolygonElement>(
+          `polygon[data-store-name="${escapeAttrValue(selectedItemName)}"]`,
         );
-        const polygon =
-          polygons &&
-          Array.from(polygons).find(
-            p => p.getAttribute('data-store-name') === selectedItemName,
-          );
         if (polygon && parentRect) {
           const rect = polygon.getBoundingClientRect();
           if (rect.width > 0 && rect.height > 0) {
@@ -1237,54 +1229,56 @@ export default function SupersetPluginChartFloorMap(
           >
             <div className="widget-header-row">
               <div className="widget-header">Store Footfall</div>
-              <div className="sort-controls">
-                <button
-                  type="button"
-                  className={`sort-btn ${sortField === 'name' ? 'active' : ''}`}
-                  onClick={() => handleSortChange('name')}
-                  title="Sort by name"
-                  aria-label="Sort by name"
-                >
-                  {sortField === 'name' ? (
-                    sortDirection === 'asc' ? (
-                      <span className="sort-icon-pair">
-                        <FontSizeOutlined />
-                        <SortAscendingOutlined className="direction-icon" />
-                      </span>
+              {viewMode === 'polygon' && (
+                <div className="sort-controls">
+                  <button
+                    type="button"
+                    className={`sort-btn ${sortField === 'name' ? 'active' : ''}`}
+                    onClick={() => handleSortChange('name')}
+                    title="Sort by name"
+                    aria-label="Sort by name"
+                  >
+                    {sortField === 'name' ? (
+                      sortDirection === 'asc' ? (
+                        <span className="sort-icon-pair">
+                          <FontSizeOutlined />
+                          <SortAscendingOutlined className="direction-icon" />
+                        </span>
+                      ) : (
+                        <span className="sort-icon-pair">
+                          <FontSizeOutlined />
+                          <SortDescendingOutlined className="direction-icon" />
+                        </span>
+                      )
                     ) : (
-                      <span className="sort-icon-pair">
-                        <FontSizeOutlined />
-                        <SortDescendingOutlined className="direction-icon" />
-                      </span>
-                    )
-                  ) : (
-                    <FontSizeOutlined />
-                  )}
-                </button>
-                <button
-                  type="button"
-                  className={`sort-btn ${sortField === 'footfall' ? 'active' : ''}`}
-                  onClick={() => handleSortChange('footfall')}
-                  title="Sort by footfall"
-                  aria-label="Sort by footfall"
-                >
-                  {sortField === 'footfall' ? (
-                    sortDirection === 'asc' ? (
-                      <span className="sort-icon-pair">
-                        <BarChartOutlined />
-                        <SortAscendingOutlined className="direction-icon" />
-                      </span>
+                      <FontSizeOutlined />
+                    )}
+                  </button>
+                  <button
+                    type="button"
+                    className={`sort-btn ${sortField === 'footfall' ? 'active' : ''}`}
+                    onClick={() => handleSortChange('footfall')}
+                    title="Sort by footfall"
+                    aria-label="Sort by footfall"
+                  >
+                    {sortField === 'footfall' ? (
+                      sortDirection === 'asc' ? (
+                        <span className="sort-icon-pair">
+                          <BarChartOutlined />
+                          <SortAscendingOutlined className="direction-icon" />
+                        </span>
+                      ) : (
+                        <span className="sort-icon-pair">
+                          <BarChartOutlined />
+                          <SortDescendingOutlined className="direction-icon" />
+                        </span>
+                      )
                     ) : (
-                      <span className="sort-icon-pair">
-                        <BarChartOutlined />
-                        <SortDescendingOutlined className="direction-icon" />
-                      </span>
-                    )
-                  ) : (
-                    <BarChartOutlined />
-                  )}
-                </button>
-              </div>
+                      <BarChartOutlined />
+                    )}
+                  </button>
+                </div>
+              )}
             </div>
             <input
               type="text"
@@ -1323,8 +1317,7 @@ export default function SupersetPluginChartFloorMap(
                     style={{
                       borderLeftColor:
                         viewMode === 'heatmap'
-                          ? heatmapStoreColors[item.name] ||
-                            legendColorAtFootfall(
+                          ? legendColorAtFootfall(
                               item.total_footfall,
                               heatmapRobustMax,
                             )
@@ -1344,8 +1337,7 @@ export default function SupersetPluginChartFloorMap(
                         style={{
                           color:
                             viewMode === 'heatmap'
-                              ? heatmapStoreColors[item.name] ||
-                                legendColorAtFootfall(
+                              ? legendColorAtFootfall(
                                   item.total_footfall,
                                   heatmapRobustMax,
                                 )
@@ -1389,10 +1381,16 @@ export default function SupersetPluginChartFloorMap(
                   className={`toggle-btn ${viewMode === 'heatmap' ? 'active' : ''}`}
                   onClick={() => {
                     setHeatmapLayerFilters(ALL_LAYERS);
-                    setIsHeatmapPending(true);
                     zoomPanRef.current?.resetTransform();
-                    // setViewMode on next tick so the spinner renders first
-                    setTimeout(() => setViewMode('heatmap'), 0);
+                    // If already in heatmap mode, just clear the pending flag immediately
+                    if (viewMode === 'heatmap') {
+                      setIsHeatmapPending(false);
+                    } else {
+                      // Switching to heatmap: show spinner during transition
+                      setIsHeatmapPending(true);
+                      // setViewMode on next tick so the spinner renders first
+                      setTimeout(() => setViewMode('heatmap'), 0);
+                    }
                   }}
                 >
                   Heatmap
@@ -1468,7 +1466,6 @@ export default function SupersetPluginChartFloorMap(
                     imgW={imgW}
                     imgH={imgH}
                     layerFilters={heatmapLayerFilters}
-                    onStoreColors={setHeatmapStoreColors}
                   />
                   {/* Draw transparent polygons in heatmap mode for click/hover */}
                   {/* Use deferredUnfilteredData so polygons exist for every store

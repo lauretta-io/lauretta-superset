@@ -136,7 +136,7 @@ export function StorePolyline({
 
   return (
     <g key={index}>
-      {/* Polyline */}
+      {/* Polyline - filled with layer-based footfall color (NOT KDE) */}
       <polygon
         data-store-name={storeName || store.name || 'Unknown'}
         onMouseEnter={onHoverEnter}
@@ -156,6 +156,7 @@ export function StorePolyline({
           strokeLinejoin: 'round',
           strokeLinecap: 'round',
           color: 'black',
+          opacity: 0.85,
         }}
         points={store.points}
       />
