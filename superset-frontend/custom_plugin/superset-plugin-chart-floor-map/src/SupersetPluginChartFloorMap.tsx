@@ -1232,18 +1232,38 @@ export default function SupersetPluginChartFloorMap(
     itemName: string,
     event: React.MouseEvent<SVGPolygonElement>,
   ) => {
-    const rect = event.currentTarget.getBoundingClientRect();
+    const TOOLTIP_OFFSET_X = 14;
+    const TOOLTIP_OFFSET_Y = 14;
     const parentRect =
       mapPanelRef.current?.getBoundingClientRect() ||
       rootElem.current?.getBoundingClientRect();
 
     if (parentRect) {
       setTooltipPos({
-        x: rect.left - parentRect.left + rect.width / 2,
-        y: rect.top - parentRect.top,
+        x: Math.max(
+          0,
+          Math.min(
+            event.clientX - parentRect.left + TOOLTIP_OFFSET_X,
+            parentRect.width,
+          ),
+        ),
+        y: Math.max(
+          0,
+          Math.min(
+            event.clientY - parentRect.top - TOOLTIP_OFFSET_Y,
+            parentRect.height,
+          ),
+        ),
       });
     }
     setHoveredItemName(itemName);
+  };
+
+  const handleItemHoverMove = (
+    itemName: string,
+    event: React.MouseEvent<SVGPolygonElement>,
+  ) => {
+    handleItemHoverEnter(itemName, event);
   };
 
   const handleItemHoverLeave = () => {
@@ -1700,6 +1720,7 @@ export default function SupersetPluginChartFloorMap(
                         storeName={itemName}
                         isHovered={isItemHovered || isItemSelected}
                         onHoverEnter={e => handleItemHoverEnter(itemName, e)}
+                        onHoverMove={e => handleItemHoverMove(itemName, e)}
                         onHoverLeave={handleItemHoverLeave}
                         layer={itemLayer}
                         maxFootfall={maxFootfallByLayer[itemLayer] || 1}
@@ -1755,6 +1776,7 @@ export default function SupersetPluginChartFloorMap(
                             onMouseEnter={e =>
                               handleItemHoverEnter(itemName, e)
                             }
+                            onMouseMove={e => handleItemHoverMove(itemName, e)}
                             onMouseLeave={handleItemHoverLeave}
                             style={{ cursor: 'pointer' }}
                           />

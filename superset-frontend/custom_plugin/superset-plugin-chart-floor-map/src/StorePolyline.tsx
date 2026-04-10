@@ -26,6 +26,7 @@ export interface StorePolylineProps {
   layer: string;
   maxFootfall: number;
   onHoverEnter: (e: React.MouseEvent<SVGPolygonElement>) => void;
+  onHoverMove?: (e: React.MouseEvent<SVGPolygonElement>) => void;
   onHoverLeave: () => void;
   onClick?: (e: React.MouseEvent<SVGPolygonElement>) => void;
 }
@@ -120,6 +121,7 @@ export function StorePolyline({
   layer,
   maxFootfall,
   onHoverEnter,
+  onHoverMove,
   onHoverLeave,
   onClick,
 }: StorePolylineProps) {
@@ -140,6 +142,7 @@ export function StorePolyline({
       <polygon
         data-store-name={storeName || store.name || 'Unknown'}
         onMouseEnter={onHoverEnter}
+        onMouseMove={onHoverMove}
         onMouseLeave={onHoverLeave}
         onClick={e => {
           e.stopPropagation();

@@ -93,9 +93,6 @@ def create_default_dataset_template(db_uuid):
 {% set start_date = from_dttm if from_dttm else "CURRENT_DATE - INTERVAL '1 day'" %}
 {% set end_date = to_dttm if to_dttm else "CURRENT_DATE" %}
 {% set floor_filter = filter_values('floor_id') %}
-{% set un = filter_values('unit_name') %}
-{% set ugn = filter_values('unit_group_name') %}
-{% set name_filter = filter_values('name') %}
 WITH property_footfall AS (
     SELECT
             SUM(pd.footfall_zo) AS prop_footfall
@@ -123,9 +120,7 @@ main_query AS (
             COALESCE(
                 res.event_time,
                 CAST({{ "'" + start_date + "'" if from_dttm else start_date }} AS TIMESTAMP)
-            ) AS event_time,
-            res.unit_name,
-            res.unit_group_name
+            ) AS event_time
     FROM (
             -- Units
             SELECT
@@ -134,9 +129,7 @@ main_query AS (
                     COALESCE(ug.name, 'Uncategorized') AS category,
                     z.points,
                     COALESCE(usd.total_footfall, 0) AS total_footfall,
-                    usd.event_time,
-                    u.name AS unit_name,
-                    ug.name AS unit_group_name
+                        usd.event_time
             FROM property.zones z
             LEFT JOIN property.unit_zone_mappings uzm ON uzm.zone_id = z.id
             LEFT JOIN property.units u ON u.id = uzm.unit_id
@@ -159,9 +152,7 @@ main_query AS (
                     'Public' AS category,
                     z.points,
                     COALESCE(pssd.total_footfall, 0) AS total_footfall,
-                    pssd.event_time,
-                    NULL AS unit_name,
-                    NULL AS unit_group_name
+                        pssd.event_time
             FROM property.public_spaces ps
             LEFT JOIN property.public_space_zone_mappings pszm ON pszm.public_space_id = ps.id
             LEFT JOIN property.zones z ON z.id = pszm.zone_id
@@ -181,9 +172,7 @@ main_query AS (
                     'Entrances' AS category,
                     z.points,
                     COALESCE(esd.total_footfall, 0) AS total_footfall,
-                    esd.event_time,
-                    NULL AS unit_name,
-                    NULL AS unit_group_name
+                        esd.event_time
             FROM property.entrances e
             LEFT JOIN property.entrance_zone_mappings ezm ON ezm.entrance_id = e.id
             LEFT JOIN property.zones z ON z.id = ezm.zone_id
@@ -203,9 +192,7 @@ main_query AS (
                     'Circulation' AS category,
                     z.points,
                     COALESCE(esd.total_footfall, 0) AS total_footfall,
-                    esd.event_time,
-                    NULL AS unit_name,
-                    NULL AS unit_group_name
+                        esd.event_time
             FROM property.escalators e
             LEFT JOIN property.escalator_zone_mappings ezm ON ezm.escalator_id = e.id
             LEFT JOIN property.zones z ON z.id = ezm.zone_id
@@ -225,9 +212,7 @@ main_query AS (
                     'Circulation' AS category,
                     z.points,
                     COALESCE(llsd.total_footfall, 0) AS total_footfall,
-                    llsd.event_time,
-                    NULL AS unit_name,
-                    NULL AS unit_group_name
+                        llsd.event_time
             FROM property.lift_lobbies ll
             LEFT JOIN property.lift_lobby_zone_mappings llzm ON llzm.lift_lobby_id = ll.id
             LEFT JOIN property.zones z ON z.id = llzm.zone_id
@@ -248,9 +233,7 @@ main_query AS (
                     'None'                                                                                                                                 AS category,
                     NULL                                                                                                                                   AS points,
                     0                                                                                                                                      AS total_footfall,
-                    TO_TIMESTAMP('{{ from_str.replace("T", " ") }}', 'YYYY-MM-DD HH24:MI:SS')                     AS event_time,
-                    {{ "'" + un[0] | replace("'", "''") + "'" if un else ("'" + name_filter[0] | replace("'", "''") + "'" if name_filter else 'NULL') }}  AS unit_name,
-                    {{ "'" + ugn[0] | replace("'", "''") + "'" if ugn else 'NULL' }}                                                                      AS unit_group_name
+                    TO_TIMESTAMP('{{ from_str.replace("T", " ") }}', 'YYYY-MM-DD HH24:MI:SS')                     AS event_time
 
     ) res
     CROSS JOIN property_footfall
@@ -416,34 +399,7 @@ SELECT * FROM main_query
                 'python_date_format': None,
                 'extra': {}
             },
-            {
-                'column_name': 'unit_name',
-                'verbose_name': None,
-                'is_dttm': False,
-                'is_active': True,
-                'type': 'STRING',
-                'advanced_data_type': None,
-                'groupby': True,
-                'filterable': True,
-                'expression': None,
-                'description': None,
-                'python_date_format': None,
-                'extra': {}
-            },
-            {
-                'column_name': 'unit_group_name',
-                'verbose_name': None,
-                'is_dttm': False,
-                'is_active': True,
-                'type': 'STRING',
-                'advanced_data_type': None,
-                'groupby': True,
-                'filterable': True,
-                'expression': None,
-                'description': None,
-                'python_date_format': None,
-                'extra': {}
-            }
+
         ],
         'version': '1.0.0',
         'database_uuid': db_uuid
