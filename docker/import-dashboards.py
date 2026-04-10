@@ -143,7 +143,7 @@ main_query AS (
                         {% if to_dttm %} AND {{ t_col }}::timestamp < '{{ to_str.replace("T", " ") }}'::timestamp {% endif %}
                     GROUP BY unit_id
             ) usd ON usd.unit_id = u.id
-            WHERE u.id IS NOT NULL
+            WHERE u.id IS NOT NULL AND ug.deleted_at IS NULL
             UNION ALL
             -- Public Spaces
             SELECT
