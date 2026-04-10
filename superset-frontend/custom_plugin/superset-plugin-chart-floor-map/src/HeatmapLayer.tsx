@@ -496,7 +496,19 @@ export function HeatmapLayer({
         if (p.weight > 0) {
           const cx = pts.reduce((s, q) => s + q.x, 0) / pts.length;
           const cy = pts.reduce((s, q) => s + q.y, 0) / pts.length;
-          const interiorPts = sampleInterior(pts, INTERIOR_SPACING);
+          // Use adaptive spacing so large polygons (e.g. open arena floors)
+          // get enough interior sample points and aren't reduced to one centroid.
+          // Target at least a 10×10 grid; small polygons keep INTERIOR_SPACING.
+          const polyBB = makeBBox(pts);
+          const polyDiag = Math.sqrt(
+            Math.pow(polyBB.maxX - polyBB.minX, 2) +
+              Math.pow(polyBB.maxY - polyBB.minY, 2),
+          );
+          const adaptiveSpacing = Math.min(
+            INTERIOR_SPACING,
+            Math.max(1, polyDiag / 10),
+          );
+          const interiorPts = sampleInterior(pts, adaptiveSpacing);
           const sampledPts =
             interiorPts.length > 0 ? interiorPts : [{ x: cx, y: cy }];
           const wPer = p.weight / sampledPts.length;
@@ -549,6 +561,14 @@ export function HeatmapLayer({
       if (bb.maxX > gMaxX) gMaxX = bb.maxX;
       if (bb.maxY > gMaxY) gMaxY = bb.maxY;
     }
+    // Extend the grid bounds to cover retail polygon extents too,
+    // since retail interiors are now included in dot placement.
+    for (const bb of retailBBoxes) {
+      if (bb.minX < gMinX) gMinX = bb.minX;
+      if (bb.minY < gMinY) gMinY = bb.minY;
+      if (bb.maxX > gMaxX) gMaxX = bb.maxX;
+      if (bb.maxY > gMaxY) gMaxY = bb.maxY;
+    }
 
     let cs = adaptiveDotSpacing;
     const estW = gMaxX - gMinX;
@@ -571,7 +591,12 @@ export function HeatmapLayer({
         const inHull =
           buildingHull.length >= 3 && pointInPolygon(px, py, buildingHull);
         const inNonRetail = isInsideAny(px, py, nonRetailBBoxes);
-        if (!inHull && !inNonRetail) continue;
+        // Also explicitly check retail polygon interiors. retailBBoxes is in
+        // the dependency array but was never used in the condition — meaning
+        // any retail polygon whose interior fell outside the hull (e.g. a large
+        // standalone arena floor) got zero dot coverage. This fallback fixes it.
+        const inRetail = isInsideAny(px, py, retailBBoxes);
+        if (!inHull && !inNonRetail && !inRetail) continue;
 
         grid.push({ col, row, px, py });
       }
@@ -752,9 +777,9 @@ export function HeatmapLayer({
           points={buildingHullPointsAttr}
           fill="none"
           stroke="#ff00ff"
-          strokeWidth={6}
+          strokeWidth={10}
           strokeDasharray="18 10"
-          opacity={0.9}
+          opacity={1}
           pointerEvents="none"
         />
       )} */}

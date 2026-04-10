@@ -42,6 +42,7 @@ import {
   computePolygonArea,
   computeRobustMaxFootfall,
   legendColorAtFootfall,
+  parsePolygonPoints,
 } from './HeatmapLayer';
 
 const LAURETTA_IMAGE_API_PREFIX = '/api/v1/lauretta/images/';
@@ -50,12 +51,20 @@ const LAURETTA_IMAGE_API_PREFIX = '/api/v1/lauretta/images/';
 const sanitizeElementId = (name: string): string =>
   `store-polyline-${name.replace(/[^a-zA-Z0-9_-]/g, '-')}`;
 
-const escapeAttrValue = (value: string): string => {
-  if (typeof CSS !== 'undefined' && typeof CSS.escape === 'function') {
-    return CSS.escape(value);
-  }
-  return value.replace(/(["\\])/g, '\\$1');
-};
+/**
+ * Escape a value for safe use inside a CSS attribute-value selector, e.g.
+ *   [data-store-name="<escaped value>"]
+ *
+ * CSS.escape() is designed for CSS *identifiers*, not quoted string values.
+ * It escapes leading digits (e.g. "1abc" → "\31 abc") which, when placed
+ * inside double-quoted selector strings, does NOT correctly match the literal
+ * attribute value — breaking querySelector for any store name that starts with
+ * a digit or contains certain punctuation.
+ *
+ * Inside a quoted CSS string only `"` and `\` need escaping.
+ */
+const escapeAttrValue = (value: string): string =>
+  value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 
 // Floor image URL using the image filename from config.json (e.g., "TRX_floorplan_CF.jpeg")
 const getFloorImageUrl = (imageFilename?: string): string => {
@@ -1047,30 +1056,166 @@ export default function SupersetPluginChartFloorMap(
       return;
     }
 
-    // Otherwise, select and zoom to the item
     setSelectedItemName(itemName);
-    const itemElementId = sanitizeElementId(itemName);
-    if (zoomPanRef.current) {
-      // Always target the real polygon for zoom, not the wrapper <g>.
-      const polygon = svgRef.current?.querySelector<SVGPolygonElement>(
-        `polygon[data-store-name="${escapeAttrValue(itemName)}"]`,
-      );
 
-      if (polygon) {
-        const tempZoomId = `${itemElementId}--zoom-target`;
-        polygon.setAttribute('id', tempZoomId);
-        zoomPanRef.current.zoomToElement(tempZoomId, 2.5);
-        requestAnimationFrame(() => {
-          if (polygon.getAttribute('id') === tempZoomId) {
-            polygon.removeAttribute('id');
-          }
-        });
-        return;
+    if (!mapPanelRef.current || !zoomPanRef.current) return;
+
+    // Resolve the polygon points from whatever dataset is active.
+    // Search both sources so polygon mode and heatmap mode both work.
+    const sources = [filteredPolygonData, deferredData, data] as any[][];
+    let storePoints: string | null = null;
+    for (const src of sources) {
+      if (!src || !Array.isArray(src)) continue;
+      const entry = src.find(
+        (item: any) =>
+          item.name === itemName &&
+          item.points &&
+          item.points !== 'null' &&
+          item.points !== '',
+      );
+      if (entry) {
+        storePoints = entry.points as string;
+        break;
+      }
+    }
+
+    if (!storePoints) return;
+
+    const pts = parsePolygonPoints(storePoints);
+    if (pts.length === 0) return;
+
+    // ── Compute the zoom transform mathematically ─────────────────────────
+    //
+    // Problem with zoomToElement(): react-zoom-pan-pinch computes the target
+    // transform relative to the CURRENT zoom state. When the map is already
+    // zoomed in (e.g. after a first item click), the second call produces
+    // wrong coordinates and the view snaps to the map centre.
+    //
+    // Fix: bypass zoomToElement entirely. Compute (tx, ty, scale) from the
+    // polygon's SVG bounding box and call setTransform directly. This is
+    // always correct regardless of the current transform state.
+    //
+    // The SVG uses viewBox="0 0 imgW imgH" + preserveAspectRatio="xMidYMid meet".
+    // The SVG element fills the map-panel container (cW × cH).
+    // Fit scale:  f = min(cW/imgW, cH/imgH)
+    // Centering offsets: ox = (cW - imgW*f)/2,  oy = (cH - imgH*f)/2
+    //
+    // A point at SVG (sx, sy) maps to container coords:
+    //   containerX = sx * f + ox
+    //   containerY = sy * f + oy
+    //
+    // To show centroid (svgCx, svgCy) at container centre at zoom ZOOM_SCALE:
+    //   tx = cW/2 - (svgCx * f + ox) * ZOOM_SCALE
+    //   ty = cH/2 - (svgCy * f + oy) * ZOOM_SCALE
+
+    const containerRect = mapPanelRef.current.getBoundingClientRect();
+    const cW = containerRect.width;
+    const cH = containerRect.height;
+
+    // SVG fit-scale (preserveAspectRatio meet)
+    const f = Math.min(cW / imgW, cH / imgH);
+    const ox = (cW - imgW * f) / 2;
+    const oy = (cH - imgH * f) / 2;
+
+    // Polygon bounding box in SVG space
+    const xs = pts.map(p => p.x);
+    const ys = pts.map(p => p.y);
+    const minX = Math.min(...xs);
+    const maxX = Math.max(...xs);
+    const minY = Math.min(...ys);
+    const maxY = Math.max(...ys);
+
+    // Dynamic zoom: scale inversely with the polygon's size relative to the
+    // viewBox. Larger polygons get less zoom, smaller ones get more zoom.
+    // We target having the polygon bbox occupy ~40% of the container after zoom.
+    const bboxW = (maxX - minX) * f; // polygon bbox width in container pixels
+    const bboxH = (maxY - minY) * f; // polygon bbox height in container pixels
+    const bboxMaxDim = Math.max(bboxW, bboxH, 1); // avoid division by zero
+    const targetFraction = 0.4; // polygon should fill ~40% of the container
+    const containerMinDim = Math.min(cW, cH);
+    const ZOOM_SCALE = Math.min(
+      Math.max((containerMinDim * targetFraction) / bboxMaxDim, 1.2),
+      4,
+    );
+
+    const bboxWInSvg = maxX - minX;
+    const bboxHInSvg = maxY - minY;
+    const bboxAreaRatio = (bboxWInSvg * bboxHInSvg) / Math.max(imgW * imgH, 1);
+    const isLargePolygon =
+      bboxWInSvg / Math.max(imgW, 1) > 0.7 ||
+      bboxHInSvg / Math.max(imgH, 1) > 0.7 ||
+      bboxAreaRatio > 0.45;
+
+    // For very large polygons, avoid centering on potentially empty interior.
+    // Pick a side-biased target and snap it to a real polygon point.
+    const polygonTarget = (() => {
+      if (!isLargePolygon) {
+        return {
+          x: (minX + maxX) / 2,
+          y: (minY + maxY) / 2,
+        };
       }
 
-      // Fallback to wrapper id if polygon lookup fails for any reason.
-      zoomPanRef.current.zoomToElement(itemElementId, 2.5);
-    }
+      const isHorizontallyLarge = bboxWInSvg >= bboxHInSvg;
+      const desired = isHorizontallyLarge
+        ? {
+            x: minX + bboxWInSvg * 0.15,
+            y: (minY + maxY) / 2,
+          }
+        : {
+            x: (minX + maxX) / 2,
+            y: minY + bboxHInSvg * 0.15,
+          };
+
+      return pts.reduce(
+        (best, p) => {
+          const d2 = (p.x - desired.x) ** 2 + (p.y - desired.y) ** 2;
+          if (d2 < best.d2) return { point: p, d2 };
+          return best;
+        },
+        { point: pts[0], d2: Number.POSITIVE_INFINITY },
+      ).point;
+    })();
+
+    const svgCx = polygonTarget.x;
+    const svgCy = polygonTarget.y;
+
+    // Container-space centroid (at scale 1)
+    const contCx = svgCx * f + ox;
+    const contCy = svgCy * f + oy;
+
+    // For large polygons, keep the selected side in view instead of dead center.
+    const sideBiasX =
+      isLargePolygon && bboxWInSvg >= bboxHInSvg ? cW * 0.38 : cW / 2;
+    const sideBiasY =
+      isLargePolygon && bboxHInSvg > bboxWInSvg ? cH * 0.38 : cH / 2;
+
+    // Pan values that place the target point at the biased anchor at ZOOM_SCALE
+    const tx = sideBiasX - contCx * ZOOM_SCALE;
+    const ty = sideBiasY - contCy * ZOOM_SCALE;
+
+    zoomPanRef.current.setTransform(tx, ty, ZOOM_SCALE);
+
+    // ── Compute final tooltip position synchronously ───────────────────────
+    //
+    // The tooltip should appear at the TOP-CENTRE of the polygon after zoom.
+    // Because we know the final transform (tx, ty, ZOOM_SCALE) we can compute
+    // the exact screen position without any timers or bounding-rect queries.
+    //
+    // A polygon point at SVG (sx, sy) maps to container coords after transform:
+    //   finalX = (sx * f + ox) * ZOOM_SCALE + tx
+    //   finalY = (sy * f + oy) * ZOOM_SCALE + ty
+
+    const topCenterSvgX = isLargePolygon ? polygonTarget.x : (minX + maxX) / 2;
+    const topCenterSvgY = isLargePolygon ? polygonTarget.y : minY;
+
+    const tooltipX = (topCenterSvgX * f + ox) * ZOOM_SCALE + tx;
+    const tooltipY = (topCenterSvgY * f + oy) * ZOOM_SCALE + ty;
+
+    setSelectedTooltipPos({
+      x: Math.max(0, Math.min(tooltipX, cW)),
+      y: Math.max(0, Math.min(tooltipY, cH)),
+    });
   };
 
   const handleSortChange = (field: 'name' | 'footfall') => {
@@ -1128,9 +1273,7 @@ export default function SupersetPluginChartFloorMap(
   const displayedItem = React.useMemo(() => {
     if (!hoveredItemName) return null;
     const source =
-      viewMode === 'heatmap' &&
-      deferredData &&
-      Array.isArray(deferredData)
+      viewMode === 'heatmap' && deferredData && Array.isArray(deferredData)
         ? deferredData
         : data;
     if (!source || !Array.isArray(source)) return null;
@@ -1143,9 +1286,7 @@ export default function SupersetPluginChartFloorMap(
     // In heatmap mode search the unfiltered dataset so items filtered out of
     // the first query still have tooltip data available.
     const source =
-      viewMode === 'heatmap' &&
-      deferredData &&
-      Array.isArray(deferredData)
+      viewMode === 'heatmap' && deferredData && Array.isArray(deferredData)
         ? deferredData
         : data;
     if (!source || !Array.isArray(source)) return null;
@@ -1155,6 +1296,11 @@ export default function SupersetPluginChartFloorMap(
   // Show store panel only in fullscreen, even if there are no items
   const showStorePanel = isFullScreen;
 
+  // Tooltip position for the currently-selected item.
+  // Set synchronously in handleItemClick from the known final zoom transform,
+  // then corrected once at 350ms after the zoom animation settles.
+  const [selectedTooltipPos, setSelectedTooltipPos] = useState({ x: 0, y: 0 });
+
   // Heatmap colour scale: use the same robustMax that HeatmapLayer computes
   // internally from the raw points array so sidebar colors match the rendered
   // heatmap exactly (same 96th-percentile, same input data).
@@ -1163,99 +1309,152 @@ export default function SupersetPluginChartFloorMap(
     [heatmapPoints],
   );
 
-  // Calculate tooltip position for selected item
-  const [selectedTooltipPos, setSelectedTooltipPos] = useState({ x: 0, y: 0 });
-
-  // Update selected tooltip position using the top-center of the rendered
-  // polygon so the tooltip always appears above the selected shape.
+  // Re-measure tooltip position once after zoom animation completes.
+  // The primary position is set synchronously in handleItemClick using the
+  // known final transform, so this is just a correction for edge cases
+  // (e.g. window resize between click and animation end).
   useEffect(() => {
-    if (selectedItemName) {
-      const updatePosition = () => {
-        // Find the store's points string from data to compute centroid
-        const source =
-          viewMode === 'heatmap' &&
-          deferredData &&
-          Array.isArray(deferredData)
-            ? deferredData
-            : data;
-        const storeEntry = (source || []).find(
-          (item: any) =>
-            item.name === selectedItemName &&
-            item.points &&
-            item.points !== 'null',
-        );
+    if (!selectedItemName) return undefined;
 
-        const parentRect =
-          mapPanelRef.current?.getBoundingClientRect() ||
-          rootElem.current?.getBoundingClientRect();
+    const timer = setTimeout(() => {
+      const parentRect =
+        mapPanelRef.current?.getBoundingClientRect() ||
+        rootElem.current?.getBoundingClientRect();
+      if (!parentRect) return;
 
-        // Preferred path: measure the actual rendered polygon and anchor at its
-        // top-center so the tooltip appears above the shape.
-        const polygon = svgRef.current?.querySelector<SVGPolygonElement>(
-          `polygon[data-store-name="${escapeAttrValue(selectedItemName)}"]`,
-        );
-        if (polygon && parentRect) {
-          const rect = polygon.getBoundingClientRect();
-          if (rect.width > 0 && rect.height > 0) {
-            const rawX = rect.left - parentRect.left + rect.width / 2;
-            const rawY = rect.top - parentRect.top;
+      const source =
+        viewMode === 'heatmap' && deferredData && Array.isArray(deferredData)
+          ? deferredData
+          : data;
+      const storeEntry = (source || []).find(
+        (item: any) =>
+          item.name === selectedItemName &&
+          item.points &&
+          item.points !== 'null' &&
+          item.points !== '',
+      );
+
+      // Keep tooltip on the same side-focused anchor used by zoom logic.
+      if (storeEntry && svgRef.current) {
+        const pts = parsePolygonPoints(storeEntry.points as string);
+        if (pts.length > 0) {
+          const xs = pts.map(p => p.x);
+          const ys = pts.map(p => p.y);
+          const minX = Math.min(...xs);
+          const maxX = Math.max(...xs);
+          const minY = Math.min(...ys);
+          const maxY = Math.max(...ys);
+
+          const bboxWInSvg = maxX - minX;
+          const bboxHInSvg = maxY - minY;
+          const bboxAreaRatio =
+            (bboxWInSvg * bboxHInSvg) / Math.max(imgW * imgH, 1);
+          const isLargePolygon =
+            bboxWInSvg / Math.max(imgW, 1) > 0.7 ||
+            bboxHInSvg / Math.max(imgH, 1) > 0.7 ||
+            bboxAreaRatio > 0.45;
+
+          const target = (() => {
+            if (!isLargePolygon) {
+              return {
+                x: (minX + maxX) / 2,
+                y: minY,
+              };
+            }
+
+            const isHorizontallyLarge = bboxWInSvg >= bboxHInSvg;
+            const desired = isHorizontallyLarge
+              ? {
+                  x: minX + bboxWInSvg * 0.15,
+                  y: (minY + maxY) / 2,
+                }
+              : {
+                  x: (minX + maxX) / 2,
+                  y: minY + bboxHInSvg * 0.15,
+                };
+
+            return pts.reduce(
+              (best, p) => {
+                const d2 = (p.x - desired.x) ** 2 + (p.y - desired.y) ** 2;
+                if (d2 < best.d2) return { point: p, d2 };
+                return best;
+              },
+              { point: pts[0], d2: Number.POSITIVE_INFINITY },
+            ).point;
+          })();
+
+          const ctm = svgRef.current.getScreenCTM();
+          if (ctm) {
+            const pt = svgRef.current.createSVGPoint();
+            pt.x = target.x;
+            pt.y = target.y;
+            const screenPt = pt.matrixTransform(ctm);
             setSelectedTooltipPos({
-              x: Math.max(0, Math.min(rawX, parentRect.width)),
-              y: Math.max(0, Math.min(rawY, parentRect.height)),
+              x: Math.max(
+                0,
+                Math.min(screenPt.x - parentRect.left, parentRect.width),
+              ),
+              y: Math.max(
+                0,
+                Math.min(screenPt.y - parentRect.top, parentRect.height),
+              ),
             });
             return;
           }
         }
+      }
 
-        // Fallback: use centroid projected through SVG transform
-        if (storeEntry && parentRect && svgRef.current) {
-          const centroid = computeCentroid(storeEntry.points as string);
-          if (centroid) {
-            const ctm = svgRef.current.getScreenCTM();
-            if (ctm) {
-              const pt = svgRef.current.createSVGPoint();
-              pt.x = centroid.x;
-              pt.y = centroid.y;
-              const screenPt = pt.matrixTransform(ctm);
-              // Bug 3 fix: clamp within map panel bounds
-              const rawX = screenPt.x - parentRect.left;
-              const rawY = screenPt.y - parentRect.top;
-              setSelectedTooltipPos({
-                x: Math.max(0, Math.min(rawX, parentRect.width)),
-                y: Math.max(0, Math.min(rawY, parentRect.height)),
-              });
-              return;
-            }
-          }
+      // Preferred: measure the rendered polygon directly (post-zoom position)
+      const polygon = svgRef.current?.querySelector<SVGPolygonElement>(
+        `polygon[data-store-name="${escapeAttrValue(selectedItemName)}"]`,
+      );
+      if (polygon) {
+        const rect = polygon.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0) {
+          setSelectedTooltipPos({
+            x: Math.max(
+              0,
+              Math.min(
+                rect.left - parentRect.left + rect.width / 2,
+                parentRect.width,
+              ),
+            ),
+            y: Math.max(
+              0,
+              Math.min(rect.top - parentRect.top, parentRect.height),
+            ),
+          });
+          return;
         }
+      }
 
-        // Fallback: use getBoundingClientRect on the element
-        const itemElementId = sanitizeElementId(selectedItemName);
-        const element = document.getElementById(itemElementId);
-        if (element && parentRect) {
-          const rect = element.getBoundingClientRect();
-          if (rect.width > 0 && rect.height > 0) {
-            // Bug 3 fix: clamp within map panel bounds
-            const rawX = rect.left - parentRect.left + rect.width / 2;
-            const rawY = rect.top - parentRect.top;
+      // Fallback: SVG CTM projection using centroid when side anchor is unavailable.
+      if (storeEntry && svgRef.current) {
+        const centroid = computeCentroid(storeEntry.points as string);
+        if (centroid) {
+          const ctm = svgRef.current.getScreenCTM();
+          if (ctm) {
+            const pt = svgRef.current.createSVGPoint();
+            pt.x = centroid.x;
+            pt.y = centroid.y;
+            const screenPt = pt.matrixTransform(ctm);
             setSelectedTooltipPos({
-              x: Math.max(0, Math.min(rawX, parentRect.width)),
-              y: Math.max(0, Math.min(rawY, parentRect.height)),
+              x: Math.max(
+                0,
+                Math.min(screenPt.x - parentRect.left, parentRect.width),
+              ),
+              y: Math.max(
+                0,
+                Math.min(screenPt.y - parentRect.top, parentRect.height),
+              ),
             });
           }
         }
-      };
+      }
+      // 350ms = default react-zoom-pan-pinch animation duration + small buffer
+    }, 350);
 
-      // Bug 2 fix: Fire two measurements — a quick one at 50ms so the tooltip
-      // appears promptly, and a second at 500ms after the zoom animation settles.
-      const timerQuick = setTimeout(updatePosition, 50);
-      const timerFinal = setTimeout(updatePosition, 500);
-      return () => {
-        clearTimeout(timerQuick);
-        clearTimeout(timerFinal);
-      };
-    }
-    return undefined;
+    return () => clearTimeout(timer);
   }, [
     selectedItemName,
     height,
