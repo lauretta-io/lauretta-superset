@@ -612,12 +612,6 @@ export function HeatmapLayer({
     return { dotGrid: grid, cellSize: cs };
   }, [buildingHull, retailBBoxes, nonRetailBBoxes, adaptiveDotSpacing]);
 
-  // Debug overlay: serialized points for visualizing the computed building hull.
-  // const buildingHullPointsAttr = useMemo(
-  //   () => buildingHull.map(p => `${p.x},${p.y}`).join(' '),
-  //   [buildingHull],
-  // );
-
   /* ── STAGE 3 — KDE with spatial grid index ────────────────────────── */
 
   const { kdeGrid, maxKDE } = useMemo(() => {
@@ -719,20 +713,10 @@ export function HeatmapLayer({
 
   /* ── STAGE 4 — Normalise ──────────────────────────────────────────── */
 
-  const { robustMaxFootfall } = useMemo(() => {
-    if (points.length === 0) return { robustMaxFootfall: 1 };
-
-    const footfalls = points
-      .map(p => p.weight)
-      .filter(w => w > 0)
-      .sort((a, b) => a - b);
-    if (footfalls.length === 0) return { robustMaxFootfall: 1 };
-
-    const clampIdx = Math.floor(footfalls.length * 0.96);
-    const robustMax = footfalls[clampIdx] || footfalls[footfalls.length - 1];
-
-    return { robustMaxFootfall: Math.max(robustMax, 1) };
-  }, [points]);
+  const robustMaxFootfall = useMemo(
+    () => computeRobustMaxFootfall(points),
+    [points],
+  );
 
   const sortedCells = useMemo(() => {
     if (kdeGrid.length === 0) return [];
@@ -772,17 +756,6 @@ export function HeatmapLayer({
 
   return (
     <g className="heatmap-layer" style={{ mixBlendMode: 'multiply' }}>
-      {/* {buildingHull.length >= 3 && (
-        <polygon
-          points={buildingHullPointsAttr}
-          fill="none"
-          stroke="#ff00ff"
-          strokeWidth={10}
-          strokeDasharray="18 10"
-          opacity={1}
-          pointerEvents="none"
-        />
-      )} */}
       {sortedCells.map(cell => {
         const color = heatmapColor(cell.footfallNorm);
 
@@ -953,7 +926,7 @@ export function HeatmapLegend({ points }: { points: HeatmapPoint[] }) {
         color: heatmapColor(t),
       };
     });
-  }, [points]);
+  }, []);
 
   return (
     <div

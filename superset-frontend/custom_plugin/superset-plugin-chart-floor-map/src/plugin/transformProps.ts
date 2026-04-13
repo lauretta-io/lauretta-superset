@@ -24,6 +24,24 @@ import { ChartProps, TimeseriesDataRecord } from '@superset-ui/core';
  */
 const UNIT_FILTER_COLUMNS = new Set(['unit_name', 'unit_group_name']);
 
+interface DashboardFilter {
+  col?: string;
+  column?: string;
+  subject?: string;
+  val?: unknown | unknown[];
+}
+
+interface FloorMapFormData {
+  extraFormData?: {
+    filters?: DashboardFilter[];
+  };
+}
+
+function toStringArray(value: unknown | unknown[]): string[] {
+  const items = Array.isArray(value) ? value : [value];
+  return items.filter(v => v !== null && v !== undefined).map(v => String(v));
+}
+
 /**
  * Extract active filter values for unit_name and unit_group_name from the
  * extraFormData that Superset injects when a dashboard filter is applied.
@@ -32,17 +50,19 @@ const UNIT_FILTER_COLUMNS = new Set(['unit_name', 'unit_group_name']);
  * Note: These filters are applied client-side ONLY in polygon mode to the
  * Retail layer. In heatmap mode, all data is used for density calculation.
  */
-function extractUnitFilterValues(formData: any): Record<string, Set<string>> {
+function extractUnitFilterValues(
+  formData: FloorMapFormData | undefined,
+): Record<string, Set<string>> {
   const result: Record<string, Set<string>> = {};
 
   // Dashboard filters land in extraFormData.filters
-  const extraFilters: any[] = formData?.extraFormData?.filters ?? [];
-  extraFilters.forEach((f: any) => {
+  const extraFilters = formData?.extraFormData?.filters ?? [];
+  extraFilters.forEach(f => {
     const col: string = f.col ?? f.column ?? f.subject ?? '';
     if (UNIT_FILTER_COLUMNS.has(col)) {
-      const values: string[] = Array.isArray(f.val) ? f.val : [f.val];
+      const values = toStringArray(f.val ?? []);
       if (!result[col]) result[col] = new Set<string>();
-      values.forEach(v => result[col].add(String(v)));
+      values.forEach(v => result[col].add(v));
     }
   });
 

@@ -18,8 +18,14 @@
  */
 import React from 'react';
 
+interface StorePolygonData {
+  name?: string;
+  points?: string | null;
+  total_footfall?: number | null;
+}
+
 export interface StorePolylineProps {
-  store: any;
+  store: StorePolygonData;
   index: number;
   storeName?: string;
   isHovered: boolean;
@@ -87,7 +93,10 @@ export const getLayerFootfallColor = (
   const binSize = Math.ceil((maxFootfall - 1) / 6);
 
   // Determine which bin the footfall falls into (0-indexed)
-  const binIndex = Math.min(Math.floor((footfall - 1) / binSize), 5);
+  const binIndex = Math.max(
+    0,
+    Math.min(Math.floor((footfall - 1) / binSize), 5),
+  );
 
   return colors[binIndex];
 };
