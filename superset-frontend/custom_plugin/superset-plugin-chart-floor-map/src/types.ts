@@ -44,7 +44,10 @@ export type SupersetPluginChartFloorMapQueryFormData = QueryFormData &
 export type SupersetPluginChartFloorMapProps =
   SupersetPluginChartFloorMapStylesProps &
     SupersetPluginChartFloorMapCustomizeProps & {
-      /** Full floor dataset — unit filters stripped at query level, all zones included. */
+      /** Full floor dataset with all zones (Retail, Entrances, Circulation, Public).
+       *  In polygon mode, client-side filters apply to Retail layer only.
+       *  In heatmap mode, all data is used for density calculation without filtering.
+       */
       data: TimeseriesDataRecord[];
       /**
        * Active dashboard filter values for unit_name / unit_group_name columns.

@@ -100,7 +100,6 @@ const config: ControlPanelConfig = {
 
   // For control input types, see: superset-frontend/src/explore/components/controls/index.js
   controlPanelSections: [
-    
     {
       label: t('Query'),
       expanded: true,
@@ -125,28 +124,16 @@ const config: ControlPanelConfig = {
               ...sharedControls.groupby,
               label: t('Columns'),
               description: t('Columns to group by'),
-              // default: ['store', 'category', 'color', 'points', 'total_footfall'],
             },
           },
         ],
-        // [
-        //   {
-        //     name: 'metrics',
-        //     config: {
-        //       ...sharedControls.metrics,
-        //       // it's possible to add validators to controls if
-        //       // certain selections/types need to be enforced
-        //       validators: [validateNonEmpty],
-        //     },
-        //   },
-        // ],
         ['adhoc_filters'],
         [
           {
             name: 'row_limit',
             config: sharedControls.row_limit,
           },
-        ]
+        ],
       ],
     },
   ],

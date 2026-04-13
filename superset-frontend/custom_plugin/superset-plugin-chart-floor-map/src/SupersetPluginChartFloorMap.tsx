@@ -47,6 +47,68 @@ import {
 
 const LAURETTA_IMAGE_API_PREFIX = '/api/v1/lauretta/images/';
 
+// ============================================================================
+// Configuration constants for zoom, tooltip, and polygon detection
+// ============================================================================
+
+/** Polygon should occupy this fraction of the container when zoomed (40%). */
+const POLYGON_TARGET_FILL_FRACTION = 0.4;
+
+/** Minimum zoom multiplier for large polygons (1.2x). */
+const POLYGON_ZOOM_MIN = 1.2;
+
+/** Maximum zoom multiplier for tiny polygons (4x). */
+const POLYGON_ZOOM_MAX = 4;
+
+/** When zooming large polygons, center the view on the polygon side (15% bias). */
+const SIDE_BIAS_FRACTION = 0.15;
+
+/** Offset between hint point and tooltip corners (pixels). */
+const TOOLTIP_OFFSET = 14;
+
+/** Polygon is considered "large" if it takes up this fraction of the floor image. */
+const LARGE_POLYGON_RELATIVE_SIZE_THRESHOLD = 0.7;
+
+/** Polygon is considered "large" if its area exceeds this fraction of the image area. */
+const LARGE_POLYGON_AREA_THRESHOLD = 0.45;
+
+// ============================================================================
+// Utility functions
+// ============================================================================
+
+/**
+ * Extract the field value from a data row for comparison against dashboard filter values.
+ * Maps dashboard filter columns to the corresponding row fields:
+ *   - 'unit_name'       → item.name (the unit display name)
+ *   - 'unit_group_name' → item.category (e.g., ug.name for Retail rows)
+ */
+function getItemValueForFilterCol(item: any, col: string): string {
+  if (col === 'unit_name') return String(item.name ?? '');
+  if (col === 'unit_group_name') return String(item.category ?? '');
+  return String(item[col] ?? '');
+}
+
+/**
+ * Check if a data row passes the active unit-level dashboard filters.
+ * Only Retail layer rows are subject to filtering; all other layers always pass.
+ * Empty unitFilterValues map means no filter is active → everything passes.
+ */
+function passesUnitFilter(
+  item: any,
+  unitFilterValues: Record<string, Set<string>>,
+): boolean {
+  const layer: string = item.layer || '';
+  // Non-retail zones are never affected by unit_name / unit_group_name filters
+  if (layer !== 'Retail') return true;
+
+  for (const [col, values] of Object.entries(unitFilterValues)) {
+    if (values.size === 0) continue;
+    const itemVal = getItemValueForFilterCol(item, col);
+    if (!values.has(itemVal)) return false;
+  }
+  return true;
+}
+
 /** Produce a valid, deterministic DOM id from a store name. */
 const sanitizeElementId = (name: string): string =>
   `store-polyline-${name.replace(/[^a-zA-Z0-9_-]/g, '-')}`;
@@ -592,44 +654,6 @@ const ColorLegend = styled.div`
   }
 `;
 
-/**
- * Maps a dashboard filter column name to the corresponding field on a data row.
- *
- * The chart's `cols` groupby does NOT include `unit_name` / `unit_group_name`
- * directly, so those columns are never present on the row objects.  Instead:
- *   - `unit_name`       is stored as `item.name`      (the unit display name)
- *   - `unit_group_name` is stored as `item.category`  (= ug.name for Retail rows)
- */
-function getItemValueForFilterCol(item: any, col: string): string {
-  if (col === 'unit_name') return String(item.name ?? '');
-  if (col === 'unit_group_name') return String(item.category ?? '');
-  // Generic fallback for any other column
-  return String(item[col] ?? '');
-}
-
-/**
- * Returns true when the given data row passes the active unit-level dashboard
- * filters.  Only rows on the 'Retail' layer are subject to filtering; all
- * other layers (Entrances, Circulation, Public) always pass through.
- *
- * An empty unitFilterValues map means no filter is active → everything passes.
- */
-function passesUnitFilter(
-  item: any,
-  unitFilterValues: Record<string, Set<string>>,
-): boolean {
-  const layer: string = item.layer || '';
-  // Non-retail zones are never affected by unit_name / unit_group_name filters
-  if (layer !== 'Retail') return true;
-
-  for (const [col, values] of Object.entries(unitFilterValues)) {
-    if (values.size === 0) continue;
-    const itemVal = getItemValueForFilterCol(item, col);
-    if (!values.has(itemVal)) return false;
-  }
-  return true;
-}
-
 export default function SupersetPluginChartFloorMap(
   props: SupersetPluginChartFloorMapProps,
 ) {
@@ -638,8 +662,8 @@ export default function SupersetPluginChartFloorMap(
   const { data, unitFilterValues, height, width, floorImage, floorSelection } =
     props;
 
-  // Derive filtered data for polygon view: non-Retail layers always shown,
-  // Retail layer filtered client-side by active unit_name/unit_group_name values.
+  // Polygon data: Retail layer filtered by dashboard filters, other layers always shown.
+  // Heatmap mode uses all data from deferredData (unfiltered) for proper density calculation.
   const filteredPolygonData = React.useMemo(
     () =>
       !data || !Array.isArray(data)
@@ -771,7 +795,8 @@ export default function SupersetPluginChartFloorMap(
 
   // React 17-compatible deferred data: update heatmap/polygon sources on next tick
   // so the UI (spinner, button state) paints first before the heavy memo runs.
-  // data contains ALL zones (unit filters are stripped at query level).
+  // deferredData contains ALL zones unfiltered. Client-side unit filters apply
+  // ONLY to Retail layer in polygon mode; heatmap always uses all data.
   const [deferredData, setDeferredData] = useState(data);
 
   useEffect(() => {
@@ -1127,24 +1152,26 @@ export default function SupersetPluginChartFloorMap(
 
     // Dynamic zoom: scale inversely with the polygon's size relative to the
     // viewBox. Larger polygons get less zoom, smaller ones get more zoom.
-    // We target having the polygon bbox occupy ~40% of the container after zoom.
+    // We target having the polygon bbox occupy a target fraction of the container.
     const bboxW = (maxX - minX) * f; // polygon bbox width in container pixels
     const bboxH = (maxY - minY) * f; // polygon bbox height in container pixels
     const bboxMaxDim = Math.max(bboxW, bboxH, 1); // avoid division by zero
-    const targetFraction = 0.4; // polygon should fill ~40% of the container
     const containerMinDim = Math.min(cW, cH);
     const ZOOM_SCALE = Math.min(
-      Math.max((containerMinDim * targetFraction) / bboxMaxDim, 1.2),
-      4,
+      Math.max(
+        (containerMinDim * POLYGON_TARGET_FILL_FRACTION) / bboxMaxDim,
+        POLYGON_ZOOM_MIN,
+      ),
+      POLYGON_ZOOM_MAX,
     );
 
     const bboxWInSvg = maxX - minX;
     const bboxHInSvg = maxY - minY;
     const bboxAreaRatio = (bboxWInSvg * bboxHInSvg) / Math.max(imgW * imgH, 1);
     const isLargePolygon =
-      bboxWInSvg / Math.max(imgW, 1) > 0.7 ||
-      bboxHInSvg / Math.max(imgH, 1) > 0.7 ||
-      bboxAreaRatio > 0.45;
+      bboxWInSvg / Math.max(imgW, 1) > LARGE_POLYGON_RELATIVE_SIZE_THRESHOLD ||
+      bboxHInSvg / Math.max(imgH, 1) > LARGE_POLYGON_RELATIVE_SIZE_THRESHOLD ||
+      bboxAreaRatio > LARGE_POLYGON_AREA_THRESHOLD;
 
     // For very large polygons, avoid centering on potentially empty interior.
     // Pick a side-biased target and snap it to a real polygon point.
@@ -1159,12 +1186,12 @@ export default function SupersetPluginChartFloorMap(
       const isHorizontallyLarge = bboxWInSvg >= bboxHInSvg;
       const desired = isHorizontallyLarge
         ? {
-            x: minX + bboxWInSvg * 0.15,
+            x: minX + bboxWInSvg * SIDE_BIAS_FRACTION,
             y: (minY + maxY) / 2,
           }
         : {
             x: (minX + maxX) / 2,
-            y: minY + bboxHInSvg * 0.15,
+            y: minY + bboxHInSvg * SIDE_BIAS_FRACTION,
           };
 
       return pts.reduce(
@@ -1232,8 +1259,6 @@ export default function SupersetPluginChartFloorMap(
     itemName: string,
     event: React.MouseEvent<SVGPolygonElement>,
   ) => {
-    const TOOLTIP_OFFSET_X = 14;
-    const TOOLTIP_OFFSET_Y = 14;
     const parentRect =
       mapPanelRef.current?.getBoundingClientRect() ||
       rootElem.current?.getBoundingClientRect();
@@ -1243,14 +1268,14 @@ export default function SupersetPluginChartFloorMap(
         x: Math.max(
           0,
           Math.min(
-            event.clientX - parentRect.left + TOOLTIP_OFFSET_X,
+            event.clientX - parentRect.left + TOOLTIP_OFFSET,
             parentRect.width,
           ),
         ),
         y: Math.max(
           0,
           Math.min(
-            event.clientY - parentRect.top - TOOLTIP_OFFSET_Y,
+            event.clientY - parentRect.top - TOOLTIP_OFFSET,
             parentRect.height,
           ),
         ),

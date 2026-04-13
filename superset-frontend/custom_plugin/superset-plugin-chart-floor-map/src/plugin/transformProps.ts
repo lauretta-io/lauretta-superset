@@ -18,17 +18,21 @@
  */
 import { ChartProps, TimeseriesDataRecord } from '@superset-ui/core';
 
-/** Columns whose dashboard filter values are applied client-side (polygon Retail layer only). */
+/**
+ * Dashboard filter columns that can be applied to Retail layer in polygon mode.
+ * In heatmap mode, all data is used without client-side filters.
+ */
 const UNIT_FILTER_COLUMNS = new Set(['unit_name', 'unit_group_name']);
 
 /**
- * Extract active filter values for unit_name / unit_group_name from the
+ * Extract active filter values for unit_name and unit_group_name from the
  * extraFormData that Superset injects when a dashboard filter is applied.
- * Returns a map of { column -> Set<string> } for quick look-up.
+ * Returns a map of { column -> Set<string> } for quick lookup.
+ *
+ * Note: These filters are applied client-side ONLY in polygon mode to the
+ * Retail layer. In heatmap mode, all data is used for density calculation.
  */
-function extractUnitFilterValues(
-  formData: any,
-): Record<string, Set<string>> {
+function extractUnitFilterValues(formData: any): Record<string, Set<string>> {
   const result: Record<string, Set<string>> = {};
 
   // Dashboard filters land in extraFormData.filters
@@ -50,12 +54,10 @@ export default function transformProps(chartProps: ChartProps) {
   const { boldText, headerFontSize, headerText, floorSelection, floorImage } =
     formData;
 
-  // Single query — all zones for the floor (unit filters are stripped at query
-  // level and re-applied client-side for the Retail polygon layer only).
+  // Single query — all zones for the floor. In polygon mode, Retail layer is
+  // filtered client-side by unit_name/unit_group_name dashboard filters.
+  // In heatmap mode, all data is used without client-side filtering.
   const data = queriesData[0].data as TimeseriesDataRecord[];
-
-  // Extract unit_name / unit_group_name filter values from the dashboard context
-  // so the chart component can apply them client-side to the Retail layer.
   const unitFilterValues = extractUnitFilterValues(formData);
 
   return {
