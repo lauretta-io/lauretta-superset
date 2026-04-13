@@ -16,7 +16,7 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import React, { useEffect, createRef, useState, useRef } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import {
   BarChartOutlined,
   FontSizeOutlined,
@@ -26,7 +26,6 @@ import {
 import { styled, SupersetClient } from '@superset-ui/core';
 import {
   SupersetPluginChartFloorMapProps,
-  SupersetPluginChartFloorMapStylesProps,
   ViewMode,
 } from './types';
 import {
@@ -44,6 +43,10 @@ import {
   legendColorAtFootfall,
   parsePolygonPoints,
 } from './HeatmapLayer';
+import layerEntrances from './images/entrances-layers.png';
+import layerCirculation from './images/circulation-layers.png';
+import layerPublic from './images/public-layers.png';
+import layerShops from './images/shops-layers.png';
 
 const LAURETTA_IMAGE_API_PREFIX = '/api/v1/lauretta/images/';
 
@@ -145,18 +148,7 @@ const getFloorImageUrl = (imageFilename?: string): string => {
   return `${LAURETTA_IMAGE_API_PREFIX}${encodeURIComponent(value)}`;
 };
 
-import layerEntrances from './images/entrances-layers.png';
-import layerCirculation from './images/circulation-layers.png';
-import layerPublic from './images/public-layers.png';
-import layerShops from './images/shops-layers.png';
-// The following Styles component is a <div> element, which has been styled using Emotion
-// For docs, visit https://emotion.sh/docs/styled
-
-// Theming variables are provided for your use via a ThemeProvider
-// imported from @superset-ui/core. For variables available, please visit
-// https://github.com/apache-superset/superset-ui/blob/master/packages/superset-ui-core/src/style/index.ts
-
-const Styles = styled.div<SupersetPluginChartFloorMapStylesProps>`
+const Styles = styled.div<{ height: number; width: number }>`
   padding: 0;
   border-radius: ${({ theme }) => theme.gridUnit * 2}px;
   height: ${({ height }) => height}px;
@@ -196,21 +188,6 @@ const Styles = styled.div<SupersetPluginChartFloorMapStylesProps>`
       image-rendering: crisp-edges;
       image-rendering: pixelated;
     }
-  }
-
-  h3 {
-    /* You can use your props to control CSS! */
-    margin-top: 0;
-    margin-bottom: ${({ theme }) => theme.gridUnit * 3}px;
-    font-size: ${({ theme, headerFontSize }) =>
-      theme.typography.sizes[headerFontSize]}px;
-    font-weight: ${({ theme, boldText }) =>
-      theme.typography.weights[boldText ? 'bold' : 'normal']};
-  }
-
-  pre {
-    height: ${({ theme, headerFontSize, height }) =>
-      height - theme.gridUnit * 12 - theme.typography.sizes[headerFontSize]}px;
   }
 `;
 
@@ -388,12 +365,6 @@ const StoreListWidget = styled.div`
 
     &::-webkit-scrollbar-thumb:hover {
       background: #555;
-    }
-  }
-
-  &.heatmap-mode {
-    .store-list {
-      max-height: none;
     }
   }
 
@@ -577,26 +548,6 @@ const ColorLegend = styled.div`
   border: 1px solid #ddd;
   max-width: 90%;
 
-  .no-data-item {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 4px;
-
-    .color-box {
-      width: 40px;
-      height: 12px;
-      background: #fff;
-      border: 1px solid #949494;
-      border-radius: 2px;
-    }
-
-    span {
-      font-size: 10px;
-      color: #666;
-    }
-  }
-
   .layer-legend {
     display: flex;
     flex-direction: column;
@@ -657,8 +608,6 @@ const ColorLegend = styled.div`
 export default function SupersetPluginChartFloorMap(
   props: SupersetPluginChartFloorMapProps,
 ) {
-  // height and width are the height and width of the DOM element as it exists in the dashboard.
-  // There is also a `data` prop, which is, of course, your DATA 🎉
   const { data, unitFilterValues, height, width, floorImage, floorSelection } =
     props;
 
@@ -703,7 +652,7 @@ export default function SupersetPluginChartFloorMap(
     width: number;
     height: number;
   } | null>(null);
-  const rootElem = createRef<HTMLDivElement>();
+  const rootElem = useRef<HTMLDivElement>(null);
   const mapPanelRef = useRef<HTMLDivElement>(null);
   const zoomPanRef = useRef<ZoomPanWrapperRef>(null);
   const svgRef = useRef<SVGSVGElement>(null);
@@ -1513,8 +1462,6 @@ export default function SupersetPluginChartFloorMap(
   return (
     <Styles
       ref={rootElem}
-      boldText={props.boldText}
-      headerFontSize={props.headerFontSize}
       height={height}
       width={width}
     >
@@ -1760,7 +1707,6 @@ export default function SupersetPluginChartFloorMap(
                     points={heatmapPoints}
                     imgW={imgW}
                     imgH={imgH}
-                    layerFilters={heatmapLayerFilters}
                   />
                   {/* Draw transparent polygons in heatmap mode for click/hover */}
                   {/* Use deferredData so polygons exist for every store
@@ -1875,7 +1821,7 @@ export default function SupersetPluginChartFloorMap(
 
           {/* Heatmap legend (fullscreen + heatmap mode only) */}
           {viewMode === 'heatmap' && isFullScreen && (
-            <HeatmapLegend points={heatmapPoints} />
+            <HeatmapLegend />
           )}
 
           {/* Color Legend (polygon mode only) */}

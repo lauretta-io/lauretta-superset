@@ -22,23 +22,22 @@ import React, { useMemo } from 'react';
  *  FLOOR-PLAN CONCENTRATION HEATMAP
  *
  *  Design:
- *   • Walkable space  = convex hull of ALL polygons MINUS retail store interiors.
- *     This correctly models "the corridors between stores" without needing
- *     explicit corridor polygons.
+ *   • Walkable space  = convex hull of ALL polygons ∪ individual polygon
+ *     interiors.  Any point inside the hull or inside any polygon receives
+ *     a heatmap dot.
  *
- *   • Heat sources    = retail polygon EDGES, weighted by each store's footfall.
- *     A high-footfall store radiates heat outward into the adjacent corridor.
- *     Explicit Circulation / Entrance / Public polygons also contribute heat
- *     (sampled from their interiors) but do NOT define walkable space — they
- *     are treated as bonus heat boosts on top of the corridor field.
+ *   • Heat sources    = polygon interiors, weighted by each store's footfall.
+ *     Large polygons are sampled with adaptive interior grids; small ones
+ *     fall back to a single centroid point.
  *
- *   • KDE bandwidth σ = SIGMA SVG units. Sized so heat from a store edge
- *     reaches the middle of the corridor (~half corridor width) but does not
- *     cross into the opposite store.
+ *   • KDE bandwidth σ = SIGMA SVG units.  Sized so heat from a store
+ *     reaches the middle of the corridor (~half corridor width) but does
+ *     not cross into the opposite store.
  *
- *   • Rendering: uniform dot grid on the walkable space. Each dot's color and
- *     opacity is driven by its KDE value. Low-KDE dots are nearly invisible
- *     (the floor-plan image shows through); high-KDE dots are vivid and opaque.
+ *   • Rendering: uniform dot grid on the walkable space.  Each dot's color
+ *     and opacity is driven by its KDE value.  Low-KDE dots are nearly
+ *     invisible (the floor-plan image shows through); high-KDE dots are
+ *     vivid and opaque.
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 /* ─── Types ─────────────────────────────────────────────────────────────── */
@@ -57,15 +56,6 @@ interface HeatmapLayerProps {
   points: HeatmapPoint[];
   imgW: number;
   imgH: number;
-  layerFilters: string[];
-  onHoverEnter?: (
-    name: string,
-    footfall: number,
-    svgX: number,
-    svgY: number,
-    e: React.MouseEvent<SVGCircleElement>,
-  ) => void;
-  onHoverLeave?: () => void;
 }
 
 interface FootfallSource {
@@ -117,10 +107,6 @@ export function computePolygonArea(pointsStr: string): number {
     area += pts[i].x * pts[j].y - pts[j].x * pts[i].y;
   }
   return Math.abs(area) / 2;
-}
-
-export function areaToRadius(area: number): number {
-  return area <= 0 ? 0 : Math.sqrt(area / Math.PI);
 }
 
 /* ─── Point-in-Polygon (ray-casting) ────────────────────────────────────── */
@@ -177,43 +163,6 @@ function isInsideAny(px: number, py: number, bboxes: BBox[]): boolean {
     if (pointInPolygon(px, py, bb.pts)) return true;
   }
   return false;
-}
-
-/* ─── Category → Layer ──────────────────────────────────────────────────── */
-
-function getCategoryLayer(category: string | undefined | null): string {
-  if (!category) return 'Retail';
-  const cat = category.toLowerCase().trim();
-  if (
-    cat.includes('entrance') ||
-    cat.includes('gate') ||
-    cat.includes('door') ||
-    cat.includes('entry')
-  )
-    return 'Entrances';
-  if (
-    cat.includes('circulation') ||
-    cat.includes('corridor') ||
-    cat.includes('walkway') ||
-    cat.includes('hallway') ||
-    cat.includes('lift') ||
-    cat.includes('elevator') ||
-    cat.includes('escalator') ||
-    cat.includes('stair')
-  )
-    return 'Circulation';
-  if (
-    cat.includes('public') ||
-    cat.includes('common') ||
-    cat.includes('amenity') ||
-    cat.includes('toilet') ||
-    cat.includes('restroom') ||
-    cat.includes('prayer') ||
-    cat.includes('atm') ||
-    cat.includes('info')
-  )
-    return 'Public';
-  return 'Retail';
 }
 
 /* ─── Hull helpers (convex + refined detailed hull) ─────────────────────── */
@@ -444,9 +393,6 @@ export function HeatmapLayer({
   points,
   imgW,
   imgH,
-  layerFilters,
-  onHoverEnter,
-  onHoverLeave,
 }: HeatmapLayerProps) {
   /* ─────────────────────────────────────────────────────────────────────
    *  TUNING PARAMETERS
@@ -468,14 +414,11 @@ export function HeatmapLayer({
 
   /* ── STAGE 1 — Classify & build heat sources ──────────────────────── */
 
-  const { retailBBoxes, nonRetailBBoxes, buildingHull, sources } =
+  const { allBBoxes, buildingHull, sources } =
     useMemo(() => {
-      const retailPolys: { x: number; y: number }[][] = [];
-      // Collect ALL polygon vertices for the hull so separated/distant units
-      // are included regardless of their layer.
+      const allPolys: { x: number; y: number }[][] = [];
       const allVertices: { x: number; y: number }[] = [];
       const src: FootfallSource[] = [];
-      const nonRetailPolys: { x: number; y: number }[][] = [];
 
       for (let i = 0; i < points.length; i += 1) {
         const p = points[i];
@@ -483,14 +426,7 @@ export function HeatmapLayer({
         const pts = parsePolygonPoints(p.rawPoints);
         if (pts.length < 3) continue;
 
-        const layer = getCategoryLayer(p.category);
-
-        if (layer === 'Retail') {
-          retailPolys.push(pts);
-        } else {
-          nonRetailPolys.push(pts);
-        }
-        // Include ALL layers in hull vertex pool
+        allPolys.push(pts);
         for (let v = 0; v < pts.length; v += 1) allVertices.push(pts[v]);
 
         if (p.weight > 0) {
@@ -535,8 +471,7 @@ export function HeatmapLayer({
       const hull = hullInput.length >= 3 ? buildDetailedHull(hullInput) : [];
 
       return {
-        retailBBoxes: computeBBoxes(retailPolys),
-        nonRetailBBoxes: computeBBoxes(nonRetailPolys),
+        allBBoxes: computeBBoxes(allPolys),
         buildingHull: hull,
         sources: src,
       };
@@ -547,7 +482,7 @@ export function HeatmapLayer({
   const MAX_DOT_CELLS = 80_000;
 
   const { dotGrid, cellSize } = useMemo(() => {
-    if (buildingHull.length < 3 && nonRetailBBoxes.length === 0)
+    if (buildingHull.length < 3 && allBBoxes.length === 0)
       return { dotGrid: [], cellSize: adaptiveDotSpacing };
 
     const hullBB = buildingHull.length >= 3 ? makeBBox(buildingHull) : null;
@@ -555,15 +490,7 @@ export function HeatmapLayer({
     let gMinY = hullBB?.minY ?? Infinity;
     let gMaxX = hullBB?.maxX ?? -Infinity;
     let gMaxY = hullBB?.maxY ?? -Infinity;
-    for (const bb of nonRetailBBoxes) {
-      if (bb.minX < gMinX) gMinX = bb.minX;
-      if (bb.minY < gMinY) gMinY = bb.minY;
-      if (bb.maxX > gMaxX) gMaxX = bb.maxX;
-      if (bb.maxY > gMaxY) gMaxY = bb.maxY;
-    }
-    // Extend the grid bounds to cover retail polygon extents too,
-    // since retail interiors are now included in dot placement.
-    for (const bb of retailBBoxes) {
+    for (const bb of allBBoxes) {
       if (bb.minX < gMinX) gMinX = bb.minX;
       if (bb.minY < gMinY) gMinY = bb.minY;
       if (bb.maxX > gMaxX) gMaxX = bb.maxX;
@@ -590,13 +517,8 @@ export function HeatmapLayer({
 
         const inHull =
           buildingHull.length >= 3 && pointInPolygon(px, py, buildingHull);
-        const inNonRetail = isInsideAny(px, py, nonRetailBBoxes);
-        // Also explicitly check retail polygon interiors. retailBBoxes is in
-        // the dependency array but was never used in the condition — meaning
-        // any retail polygon whose interior fell outside the hull (e.g. a large
-        // standalone arena floor) got zero dot coverage. This fallback fixes it.
-        const inRetail = isInsideAny(px, py, retailBBoxes);
-        if (!inHull && !inNonRetail && !inRetail) continue;
+        const inAnyPolygon = isInsideAny(px, py, allBBoxes);
+        if (!inHull && !inAnyPolygon) continue;
 
         grid.push({ col, row, px, py });
       }
@@ -610,7 +532,7 @@ export function HeatmapLayer({
       };
     }
     return { dotGrid: grid, cellSize: cs };
-  }, [buildingHull, retailBBoxes, nonRetailBBoxes, adaptiveDotSpacing]);
+  }, [buildingHull, allBBoxes, adaptiveDotSpacing]);
 
   /* ── STAGE 3 — KDE with spatial grid index ────────────────────────── */
 
@@ -828,8 +750,8 @@ export function computeRobustMaxFootfall(points: HeatmapPoint[]): number {
  * Uses the same formula as the heatmap renderer at norm=1:
  *   t = (footfall / robustMax) ^ GAMMA_COLOR
  *
- * This is the canonical color lookup used by both getHeatmapColorBins and
- * the HeatmapLegend gradient bar so they are always in sync.
+ * This is the canonical color lookup used by the HeatmapLegend gradient bar
+ * and the sidebar store list so they are always in sync with the heatmap.
  */
 export function legendColorAtFootfall(
   footfall: number,
@@ -840,80 +762,14 @@ export function legendColorAtFootfall(
   return heatmapColor(t);
 }
 
-/**
- * Generate discrete colour bins for the heatmap legend.
- *
- * Bins are evenly spaced across [0, robustMax] in footfall space (linear).
- * Colors are forward-computed via legendColorAtFootfall() — identical to
- * what the heatmap renders at a store's spatial peak — so the legend
- * faithfully represents the color a given footfall level actually shows.
- *
- * Why not use HEATMAP_COLOR_STOPS for bin boundaries?
- *   The color stops are in 't' space (post-gamma), not footfall space.
- *   Inverting them back to footfall (old approach) bunches the high-footfall
- *   bins into a tiny footfall range, making similar stores appear very
- *   differently colored on the legend.  Linear bins in footfall space
- *   distribute the bins proportionally to the actual data distribution.
- */
-export function getHeatmapColorBins(points: HeatmapPoint[]): {
-  min: number;
-  max: number;
-  fromColor: string;
-  toColor: string;
-  label: string;
-}[] {
-  const robustMax = computeRobustMaxFootfall(points);
-
-  // Use 5 evenly-spaced bins across the footfall range.
-  // More bins = finer legend detail, but the bar becomes crowded.
-  const NUM_BINS = 5;
-  const bins: {
-    min: number;
-    max: number;
-    fromColor: string;
-    toColor: string;
-    label: string;
-  }[] = [];
-
-  for (let i = 0; i < NUM_BINS; i += 1) {
-    const loFootfall = (i / NUM_BINS) * robustMax;
-    const hiFootfall = ((i + 1) / NUM_BINS) * robustMax;
-
-    bins.push({
-      min: Math.round(loFootfall),
-      max: Math.round(hiFootfall),
-      fromColor: legendColorAtFootfall(loFootfall, robustMax),
-      toColor: legendColorAtFootfall(hiFootfall, robustMax),
-      label: Math.round(loFootfall).toLocaleString(),
-    });
-  }
-
-  return bins;
-}
-
 /* ═══════════════════════════════════════════════════════════════════════════
  *  HEATMAP LEGEND
  *
- *  Layout — two-zone bar:
- *
- *   Zone A  [0 … robustMax]   — occupies LEFT_PCT% of bar width.
- *     Gradient: full blue→red spectrum in t-space (matches the renderer).
- *     Ticks: nice footfall values from 0 up to robustMax, placed at their
- *       t-position  t = (footfall/robustMax)^GAMMA  within Zone A.
- *
- *   Divider at robustMax — a thin dashed white line + "▲" marker.
- *
- *   Zone B  [robustMax … actualMax]  — occupies remaining (1-LEFT_PCT)% of bar.
- *     Solid red (t=1). Only one label: actualMax at the right edge.
- *     This zone only appears if actualMax > robustMax by a meaningful margin.
- *
- *  This design ensures:
- *   • Colors in Zone A match what the map shows (gamma-correct placement).
- *   • The full footfall range is communicated, including outlier stores.
- *   • No label crowding — Zone B has at most one label.
+ *  Simple gradient bar from Low (blue) → High (red).
+ *  The gradient is sampled from heatmapColor(t) for t ∈ [0, 1].
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-export function HeatmapLegend({ points }: { points: HeatmapPoint[] }) {
+export function HeatmapLegend() {
   const BAR_W = 260;
   const BAR_H = 14;
 

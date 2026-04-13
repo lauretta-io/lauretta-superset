@@ -16,30 +16,19 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import {
-  QueryFormData,
-  supersetTheme,
-  TimeseriesDataRecord,
-} from '@superset-ui/core';
+import { TimeseriesDataRecord } from '@superset-ui/core';
 
 export interface SupersetPluginChartFloorMapStylesProps {
   height: number;
   width: number;
-  headerFontSize: keyof typeof supersetTheme.typography.sizes;
-  boldText: boolean;
 }
 
 export type ViewMode = 'polygon' | 'heatmap';
 
 interface SupersetPluginChartFloorMapCustomizeProps {
-  headerText: string;
   floorSelection: string;
   floorImage: string;
 }
-
-export type SupersetPluginChartFloorMapQueryFormData = QueryFormData &
-  SupersetPluginChartFloorMapStylesProps &
-  SupersetPluginChartFloorMapCustomizeProps;
 
 export type SupersetPluginChartFloorMapProps =
   SupersetPluginChartFloorMapStylesProps &

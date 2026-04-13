@@ -38,7 +38,7 @@ export interface StorePolylineProps {
 }
 
 // Color scales for each layer (6 bins from light to dark)
-export const layerColorScales: Record<string, string[]> = {
+const layerColorScales: Record<string, string[]> = {
   Retail: [
     'rgb(220, 242, 195)', // lightest
     'rgb(175, 218, 120)',

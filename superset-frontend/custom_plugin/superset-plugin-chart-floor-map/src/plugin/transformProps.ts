@@ -71,8 +71,7 @@ function extractUnitFilterValues(
 
 export default function transformProps(chartProps: ChartProps) {
   const { width, height, formData, queriesData } = chartProps;
-  const { boldText, headerFontSize, headerText, floorSelection, floorImage } =
-    formData;
+  const { floorSelection, floorImage } = formData;
 
   // Single query — all zones for the floor. In polygon mode, Retail layer is
   // filtered client-side by unit_name/unit_group_name dashboard filters.
@@ -85,9 +84,6 @@ export default function transformProps(chartProps: ChartProps) {
     height,
     data,
     unitFilterValues,
-    boldText,
-    headerFontSize,
-    headerText,
     floorSelection,
     floorImage: floorImage || floorSelection || '',
   };
