@@ -137,7 +137,6 @@ const config: ControlPanelConfig = {
       ],
     },
     {
-      label: t('Customize'),
       tabOverride: 'customize',
       expanded: true,
       controlSetRows: [
@@ -150,6 +149,7 @@ const config: ControlPanelConfig = {
               description: t(
                 'Percentile threshold for highlighting high-traffic areas (0–1).',
               ),
+              renderTrigger: true,
               min: 0,
               max: 1,
               step: 0.01,

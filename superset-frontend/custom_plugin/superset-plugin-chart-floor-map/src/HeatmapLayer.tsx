@@ -16,7 +16,7 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import React, { useMemo } from 'react';
+import React, { useMemo, useState, useEffect } from 'react';
 
 /* ═══════════════════════════════════════════════════════════════════════════
  *  FLOOR-PLAN CONCENTRATION HEATMAP
@@ -568,7 +568,6 @@ export function HeatmapLayer({
       px: number;
       py: number;
       kde: number;
-      nearestName: string;
       nearestFootfall: number;
     }[] = [];
 
@@ -577,7 +576,6 @@ export function HeatmapLayer({
       let kdeVal = 0;
       let totalFairContrib = 0;
       let weightedFootfall = 0;
-      const storeEnergy: Record<string, number> = {};
 
       const bColCenter = Math.floor(px / bucketSize);
       const bRowCenter = Math.floor(py / bucketSize);
@@ -603,18 +601,7 @@ export function HeatmapLayer({
             const fairWeight = rawContrib * (s.weight / s.totalWeight);
             totalFairContrib += fairWeight;
             weightedFootfall += contrib;
-
-            storeEnergy[s.name] = (storeEnergy[s.name] || 0) + contrib;
           }
-        }
-      }
-
-      let dominantName = '';
-      let maxEnergy = -1;
-      for (const name in storeEnergy) {
-        if (storeEnergy[name] > maxEnergy) {
-          maxEnergy = storeEnergy[name];
-          dominantName = name;
         }
       }
 
@@ -625,7 +612,6 @@ export function HeatmapLayer({
         px,
         py,
         kde: kdeVal,
-        nearestName: dominantName,
         nearestFootfall:
           totalFairContrib > 0 ? weightedFootfall / totalFairContrib : 0,
       });
@@ -634,76 +620,100 @@ export function HeatmapLayer({
     return { kdeGrid: result, maxKDE: globalMax || 1 };
   }, [dotGrid, sources, SIGMA]);
 
-  /* ── STAGE 4 — Normalise ──────────────────────────────────────────── */
+  /* ── STAGE 4 — Normalise KDE (independent of hotThreshold) ─────── */
 
-  const effectiveThreshold = hotThreshold;
-
-  const robustMaxFootfall = useMemo(
-    () => computeRobustMaxFootfallWithThreshold(points, effectiveThreshold),
-    [points, effectiveThreshold],
-  );
-
-  const sortedCells = useMemo(() => {
+  // This memo only re-runs when kdeGrid/maxKDE changes (new data), NOT when
+  // the slider moves. It pre-computes norm and footfall for every cell.
+  const normalizedCells = useMemo(() => {
     if (kdeGrid.length === 0) return [];
     const logMax = Math.log1p(maxKDE);
 
-    const withLog = kdeGrid.map(c => ({
-      ...c,
+    const cells = kdeGrid.map(c => ({
+      col: c.col,
+      row: c.row,
+      px: c.px,
+      py: c.py,
       logNorm: logMax > 0 ? Math.log1p(c.kde) / logMax : 0,
+      nearestFootfall: c.nearestFootfall,
     }));
 
-    const vals = withLog.map(c => c.logNorm).sort((a, b) => a - b);
-    const clampIdx = Math.floor(vals.length * PERCENTILE_CLAMP);
-    const clampVal = Math.max(vals[clampIdx] ?? 1, 0.01);
+    const clampIdx = Math.floor(cells.length * PERCENTILE_CLAMP);
+    const clampVal = Math.max(
+      cells
+        .map(c => c.logNorm)
+        .sort((a, b) => a - b)[clampIdx] ?? 1,
+      0.01,
+    );
 
-    return withLog
+    return cells.map(c => ({
+      col: c.col,
+      row: c.row,
+      px: c.px,
+      py: c.py,
+      norm: Math.pow(Math.min(c.logNorm / clampVal, 1.0), GAMMA),
+      nearestFootfall: c.nearestFootfall,
+    }));
+  }, [kdeGrid, maxKDE, PERCENTILE_CLAMP, GAMMA]);
+
+  /* ── STAGE 4b — Apply threshold & compute colors (debounced) ─────── */
+
+  // Debounce hotThreshold so the color recompute only fires
+  // after the user stops dragging the slider (300 ms of inactivity).
+  const [debouncedThreshold, setDebouncedThreshold] = useState(hotThreshold);
+  useEffect(() => {
+    const id = setTimeout(() => setDebouncedThreshold(hotThreshold), 300);
+    return () => clearTimeout(id);
+  }, [hotThreshold]);
+
+  const robustMaxFootfall = useMemo(
+    () => computeRobustMaxFootfallWithThreshold(points, debouncedThreshold),
+    [points, debouncedThreshold],
+  );
+
+  // Pre-compute fill color and opacity for every cell so Stage 5 render
+  // is a pure array read — no per-cell math during React reconciliation.
+  const renderedCells = useMemo(() => {
+    if (normalizedCells.length === 0) return [];
+    const baseOpacity = 0.15;
+    const maxOpacity = 0.85;
+    const opacityRange = maxOpacity - baseOpacity;
+
+    return normalizedCells
       .map(c => {
-        const norm = Math.pow(Math.min(c.logNorm / clampVal, 1.0), GAMMA);
-
         const clampedFootfall = Math.min(c.nearestFootfall, robustMaxFootfall);
         const footfallRatio = clampedFootfall / robustMaxFootfall;
-
-        const baseColorStrength = Math.pow(
-          footfallRatio,
-          HEATMAP_DYNAMIC_COLOR_GAMMA,
-        );
-
-        const spatialDecay = Math.pow(norm, HEATMAP_SPATIAL_DECAY_GAMMA);
-
+        const baseColorStrength = Math.pow(footfallRatio, HEATMAP_DYNAMIC_COLOR_GAMMA);
+        const spatialDecay = Math.pow(c.norm, HEATMAP_SPATIAL_DECAY_GAMMA);
         const footfallNorm = baseColorStrength * spatialDecay;
-
-        return { ...c, norm, footfallNorm };
+        return {
+          col: c.col,
+          row: c.row,
+          px: c.px,
+          py: c.py,
+          fill: heatmapColor(footfallNorm),
+          fillOpacity: baseOpacity + opacityRange * Math.pow(c.norm, 1.2),
+        };
       })
-      .sort((a, b) => a.norm - b.norm);
-  }, [kdeGrid, maxKDE, robustMaxFootfall, PERCENTILE_CLAMP, GAMMA]);
+      .sort((a, b) => a.fillOpacity - b.fillOpacity);
+  }, [normalizedCells, robustMaxFootfall]);
 
   /* ── STAGE 5 — Render ─────────────────────────────────────────────── */
 
   return (
     <g className="heatmap-layer" style={{ mixBlendMode: 'multiply' }}>
-      {sortedCells.map(cell => {
-        const color = heatmapColor(cell.footfallNorm);
-
-        const baseOpacity = 0.15;
-        const maxOpacity = 0.85;
-
-        const fillOpacity =
-          baseOpacity + (maxOpacity - baseOpacity) * Math.pow(cell.norm, 1.2);
-
-        return (
+      {renderedCells.map(cell => (
           <rect
             key={`h-${cell.col}-${cell.row}`}
             x={cell.px - cellSize / 2}
             y={cell.py - cellSize / 2}
             width={cellSize + 0.75}
             height={cellSize + 0.75}
-            fill={color}
-            fillOpacity={fillOpacity}
+            fill={cell.fill}
+            fillOpacity={cell.fillOpacity}
             stroke="none"
             strokeWidth={0}
           />
-        );
-      })}
+        ))}
     </g>
   );
 }
@@ -736,11 +746,7 @@ export function HeatmapLayer({
  *    matches the same footfall value on the legend bar exactly.
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-/** Compute robustMaxFootfall from the points array — same logic as Stage 4. */
-export function computeRobustMaxFootfall(points: HeatmapPoint[]): number {
-  return computeRobustMaxFootfallWithThreshold(points, 1);
-}
-
+/** Compute robustMaxFootfall from the points array, clamped at the given percentile threshold. */
 export function computeRobustMaxFootfallWithThreshold(
   points: HeatmapPoint[],
   threshold: number,
