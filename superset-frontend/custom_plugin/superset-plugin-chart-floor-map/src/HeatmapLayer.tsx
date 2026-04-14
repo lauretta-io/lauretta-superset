@@ -56,6 +56,7 @@ interface HeatmapLayerProps {
   points: HeatmapPoint[];
   imgW: number;
   imgH: number;
+  hotThreshold: number;
 }
 
 interface FootfallSource {
@@ -393,6 +394,7 @@ export function HeatmapLayer({
   points,
   imgW,
   imgH,
+  hotThreshold,
 }: HeatmapLayerProps) {
   /* ─────────────────────────────────────────────────────────────────────
    *  TUNING PARAMETERS
@@ -414,68 +416,67 @@ export function HeatmapLayer({
 
   /* ── STAGE 1 — Classify & build heat sources ──────────────────────── */
 
-  const { allBBoxes, buildingHull, sources } =
-    useMemo(() => {
-      const allPolys: { x: number; y: number }[][] = [];
-      const allVertices: { x: number; y: number }[] = [];
-      const src: FootfallSource[] = [];
+  const { allBBoxes, buildingHull, sources } = useMemo(() => {
+    const allPolys: { x: number; y: number }[][] = [];
+    const allVertices: { x: number; y: number }[] = [];
+    const src: FootfallSource[] = [];
 
-      for (let i = 0; i < points.length; i += 1) {
-        const p = points[i];
-        if (!p.rawPoints) continue;
-        const pts = parsePolygonPoints(p.rawPoints);
-        if (pts.length < 3) continue;
+    for (let i = 0; i < points.length; i += 1) {
+      const p = points[i];
+      if (!p.rawPoints) continue;
+      const pts = parsePolygonPoints(p.rawPoints);
+      if (pts.length < 3) continue;
 
-        allPolys.push(pts);
-        for (let v = 0; v < pts.length; v += 1) allVertices.push(pts[v]);
+      allPolys.push(pts);
+      for (let v = 0; v < pts.length; v += 1) allVertices.push(pts[v]);
 
-        if (p.weight > 0) {
-          const cx = pts.reduce((s, q) => s + q.x, 0) / pts.length;
-          const cy = pts.reduce((s, q) => s + q.y, 0) / pts.length;
-          // Use adaptive spacing so large polygons (e.g. open arena floors)
-          // get enough interior sample points and aren't reduced to one centroid.
-          // Target at least a 10×10 grid; small polygons keep INTERIOR_SPACING.
-          const polyBB = makeBBox(pts);
-          const polyDiag = Math.sqrt(
-            Math.pow(polyBB.maxX - polyBB.minX, 2) +
-              Math.pow(polyBB.maxY - polyBB.minY, 2),
-          );
-          const adaptiveSpacing = Math.min(
-            INTERIOR_SPACING,
-            Math.max(1, polyDiag / 10),
-          );
-          const interiorPts = sampleInterior(pts, adaptiveSpacing);
-          const sampledPts =
-            interiorPts.length > 0 ? interiorPts : [{ x: cx, y: cy }];
-          const wPer = p.weight / sampledPts.length;
-          for (let j = 0; j < sampledPts.length; j += 1)
-            src.push({
-              x: sampledPts[j].x,
-              y: sampledPts[j].y,
-              weight: wPer,
-              totalWeight: p.weight,
-              name: p.name,
-            });
-        }
+      if (p.weight > 0) {
+        const cx = pts.reduce((s, q) => s + q.x, 0) / pts.length;
+        const cy = pts.reduce((s, q) => s + q.y, 0) / pts.length;
+        // Use adaptive spacing so large polygons (e.g. open arena floors)
+        // get enough interior sample points and aren't reduced to one centroid.
+        // Target at least a 10×10 grid; small polygons keep INTERIOR_SPACING.
+        const polyBB = makeBBox(pts);
+        const polyDiag = Math.sqrt(
+          Math.pow(polyBB.maxX - polyBB.minX, 2) +
+            Math.pow(polyBB.maxY - polyBB.minY, 2),
+        );
+        const adaptiveSpacing = Math.min(
+          INTERIOR_SPACING,
+          Math.max(1, polyDiag / 10),
+        );
+        const interiorPts = sampleInterior(pts, adaptiveSpacing);
+        const sampledPts =
+          interiorPts.length > 0 ? interiorPts : [{ x: cx, y: cy }];
+        const wPer = p.weight / sampledPts.length;
+        for (let j = 0; j < sampledPts.length; j += 1)
+          src.push({
+            x: sampledPts[j].x,
+            y: sampledPts[j].y,
+            weight: wPer,
+            totalWeight: p.weight,
+            name: p.name,
+          });
       }
+    }
 
-      // Detailed hull: wrap farther polygons while following nearer edge geometry.
-      // Downsample dense vertex clouds first to keep interactions responsive.
-      const hullInput =
-        allVertices.length > 6000
-          ? downsampleVerticesForHull(
-              allVertices,
-              Math.max(2, Math.min(imgW, imgH) / 700),
-            )
-          : allVertices;
-      const hull = hullInput.length >= 3 ? buildDetailedHull(hullInput) : [];
+    // Detailed hull: wrap farther polygons while following nearer edge geometry.
+    // Downsample dense vertex clouds first to keep interactions responsive.
+    const hullInput =
+      allVertices.length > 6000
+        ? downsampleVerticesForHull(
+            allVertices,
+            Math.max(2, Math.min(imgW, imgH) / 700),
+          )
+        : allVertices;
+    const hull = hullInput.length >= 3 ? buildDetailedHull(hullInput) : [];
 
-      return {
-        allBBoxes: computeBBoxes(allPolys),
-        buildingHull: hull,
-        sources: src,
-      };
-    }, [points, INTERIOR_SPACING, imgW, imgH]);
+    return {
+      allBBoxes: computeBBoxes(allPolys),
+      buildingHull: hull,
+      sources: src,
+    };
+  }, [points, INTERIOR_SPACING, imgW, imgH]);
 
   /* ── STAGE 2 — Walkable dot grid ─────────────────────────────────── */
 
@@ -635,9 +636,11 @@ export function HeatmapLayer({
 
   /* ── STAGE 4 — Normalise ──────────────────────────────────────────── */
 
+  const effectiveThreshold = hotThreshold;
+
   const robustMaxFootfall = useMemo(
-    () => computeRobustMaxFootfall(points),
-    [points],
+    () => computeRobustMaxFootfallWithThreshold(points, effectiveThreshold),
+    [points, effectiveThreshold],
   );
 
   const sortedCells = useMemo(() => {
@@ -735,12 +738,20 @@ export function HeatmapLayer({
 
 /** Compute robustMaxFootfall from the points array — same logic as Stage 4. */
 export function computeRobustMaxFootfall(points: HeatmapPoint[]): number {
+  return computeRobustMaxFootfallWithThreshold(points, 1);
+}
+
+export function computeRobustMaxFootfallWithThreshold(
+  points: HeatmapPoint[],
+  threshold: number,
+): number {
   const footfalls = points
     .map(p => p.weight)
     .filter(w => w > 0)
     .sort((a, b) => a - b);
   if (footfalls.length === 0) return 1;
-  const clampIdx = Math.floor(footfalls.length * 0.96);
+  const clampedThreshold = Math.min(Math.max(threshold, 0), 1);
+  const clampIdx = Math.floor(footfalls.length * clampedThreshold);
   return Math.max(footfalls[clampIdx] || footfalls[footfalls.length - 1], 1);
 }
 

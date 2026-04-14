@@ -35,13 +35,19 @@ interface DashboardFilter {
 }
 
 interface FloorMapFormData {
+  hot_threshold?: unknown;
+  hotThreshold?: unknown;
   adhoc_filters?: AdhocFilter[];
   adhocFilters?: AdhocFilter[];
   extra_form_data?: {
     filters?: DashboardFilter[];
+    hot_threshold?: unknown;
+    hotThreshold?: unknown;
   };
   extraFormData?: {
     filters?: DashboardFilter[];
+    hot_threshold?: unknown;
+    hotThreshold?: unknown;
   };
 }
 
@@ -106,6 +112,29 @@ function getAdhocOperator(filter: AdhocFilter): string {
   return String(filter.operator ?? filter.operatorId ?? '').toUpperCase();
 }
 
+function toFiniteNumber(value: unknown): number | null {
+  const n = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function resolveHotThreshold(formData: FloorMapFormData | undefined): number {
+  const candidates: unknown[] = [
+    formData?.hot_threshold,
+    formData?.hotThreshold,
+    formData?.extraFormData?.hot_threshold,
+    formData?.extraFormData?.hotThreshold,
+    formData?.extra_form_data?.hot_threshold,
+    formData?.extra_form_data?.hotThreshold,
+  ];
+
+  for (const value of candidates) {
+    const parsed = toFiniteNumber(value);
+    if (parsed !== null) return Math.min(Math.max(parsed, 0), 1);
+  }
+
+  return 0.96;
+}
+
 /**
  * Extract active filter values for unit_name and unit_group_name from the
  * extraFormData that Superset injects when a dashboard filter is applied,
@@ -159,5 +188,6 @@ export default function transformProps(chartProps: ChartProps) {
     unitFilterValues,
     floorSelection,
     floorImage: floorImage || floorSelection || '',
+    hotThreshold: resolveHotThreshold(formData as FloorMapFormData),
   };
 }

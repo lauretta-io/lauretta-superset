@@ -23,11 +23,12 @@ import {
   SortAscendingOutlined,
   SortDescendingOutlined,
 } from '@ant-design/icons';
-import { styled, SupersetClient } from '@superset-ui/core';
 import {
-  SupersetPluginChartFloorMapProps,
-  ViewMode,
-} from './types';
+  styled,
+  SupersetClient,
+  TimeseriesDataRecord,
+} from '@superset-ui/core';
+import { SupersetPluginChartFloorMapProps, ViewMode } from './types';
 import {
   StorePolyline,
   getLayerFootfallColor,
@@ -39,7 +40,7 @@ import {
   HeatmapLegend,
   computeCentroid,
   computePolygonArea,
-  computeRobustMaxFootfall,
+  computeRobustMaxFootfallWithThreshold,
   legendColorAtFootfall,
   parsePolygonPoints,
 } from './HeatmapLayer';
@@ -49,6 +50,17 @@ import layerPublic from './images/public-layers.png';
 import layerShops from './images/shops-layers.png';
 
 const LAURETTA_IMAGE_API_PREFIX = '/api/v1/lauretta/images/';
+
+function getPersistedViewMode(key: string): ViewMode {
+  if (typeof window === 'undefined') return 'polygon';
+  const value = window.sessionStorage.getItem(key);
+  return value === 'heatmap' || value === 'polygon' ? value : 'polygon';
+}
+
+function setPersistedViewMode(key: string, mode: ViewMode) {
+  if (typeof window === 'undefined') return;
+  window.sessionStorage.setItem(key, mode);
+}
 
 // ============================================================================
 // Configuration constants for zoom, tooltip, and polygon detection
@@ -115,6 +127,10 @@ function passesUnitFilter(
 /** Produce a valid, deterministic DOM id from a store name. */
 const sanitizeElementId = (name: string): string =>
   `store-polyline-${name.replace(/[^a-zA-Z0-9_-]/g, '-')}`;
+
+/** Unique key per rendered polygon instance (handles duplicate store names). */
+const polygonHoverKey = (name: string, index: number): string =>
+  `${name}::${index}`;
 
 /**
  * Escape a value for safe use inside a CSS attribute-value selector, e.g.
@@ -608,8 +624,22 @@ const ColorLegend = styled.div`
 export default function SupersetPluginChartFloorMap(
   props: SupersetPluginChartFloorMapProps,
 ) {
-  const { data, unitFilterValues, height, width, floorImage, floorSelection } =
-    props;
+  const {
+    data,
+    unitFilterValues,
+    height,
+    width,
+    floorImage,
+    floorSelection,
+    hotThreshold,
+  } = props;
+
+  const viewModeStorageKey = React.useMemo(() => {
+    if (typeof window === 'undefined') return 'floor-map:view-mode';
+    const params = new URLSearchParams(window.location.search);
+    const exploreId = params.get('slice_id') || params.get('id') || 'default';
+    return `floor-map:view-mode:${exploreId}`;
+  }, []);
 
   // Polygon data: Retail layer filtered by dashboard filters, other layers always shown.
   // Heatmap mode uses all data from deferredData (unfiltered) for proper density calculation.
@@ -621,8 +651,18 @@ export default function SupersetPluginChartFloorMap(
     [data, unitFilterValues],
   );
   const ALL_LAYERS = ['Retail', 'Entrances', 'Circulation', 'Public'];
-  const [viewMode, setViewMode] = useState<ViewMode>('polygon');
-  const [hoveredItemName, setHoveredItemName] = useState<string | null>(null);
+  const [viewMode, setViewModeState] = useState<ViewMode>(() =>
+    getPersistedViewMode(viewModeStorageKey),
+  );
+  const setViewMode = (mode: ViewMode) => {
+    setPersistedViewMode(viewModeStorageKey, mode);
+    setViewModeState(mode);
+  };
+  const [hoveredPolygonKey, setHoveredPolygonKey] = useState<string | null>(
+    null,
+  );
+  const [hoveredItemData, setHoveredItemData] =
+    useState<TimeseriesDataRecord | null>(null);
   const [tooltipPos, setTooltipPos] = useState({ x: 0, y: 0 });
   const [isFullScreen, setIsFullScreen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -1205,7 +1245,8 @@ export default function SupersetPluginChartFloorMap(
   };
 
   const handleItemHoverEnter = (
-    itemName: string,
+    item: TimeseriesDataRecord,
+    index: number,
     event: React.MouseEvent<SVGPolygonElement>,
   ) => {
     const parentRect =
@@ -1230,49 +1271,51 @@ export default function SupersetPluginChartFloorMap(
         ),
       });
     }
-    setHoveredItemName(itemName);
+
+    const itemName = String(item?.name ?? 'Unknown');
+    const key = polygonHoverKey(itemName, index);
+    setHoveredPolygonKey(prev => (prev === key ? prev : key));
+    setHoveredItemData(prev => (prev === item ? prev : item));
   };
 
   const handleItemHoverMove = (
-    itemName: string,
+    item: TimeseriesDataRecord,
+    index: number,
     event: React.MouseEvent<SVGPolygonElement>,
   ) => {
-    handleItemHoverEnter(itemName, event);
+    handleItemHoverEnter(item, index, event);
   };
 
   const handleItemHoverLeave = () => {
-    setHoveredItemName(null);
+    setHoveredPolygonKey(null);
+    setHoveredItemData(null);
   };
 
   const handleMapClick = () => {
-    setHoveredItemName(null);
+    setHoveredPolygonKey(null);
+    setHoveredItemData(null);
     setSelectedItemName(null);
   };
 
   // Reset transient UI state when switching map modes so previous tooltip/selection
   // does not carry over between polygon and heatmap views.
   useEffect(() => {
-    setHoveredItemName(null);
+    setHoveredPolygonKey(null);
+    setHoveredItemData(null);
     setSelectedItemName(null);
   }, [viewMode]);
 
   // Reset transient UI state when entering/exiting fullscreen so tooltip/selection
   // from a previous fullscreen session does not bleed through.
   useEffect(() => {
-    setHoveredItemName(null);
+    setHoveredPolygonKey(null);
+    setHoveredItemData(null);
     setSelectedItemName(null);
   }, [isFullScreen]);
 
-  // Get the first item data for the hovered item name (to show only one tooltip)
-  const displayedItem = React.useMemo(() => {
-    if (!hoveredItemName) return null;
-    const source =
-      viewMode === 'heatmap' && deferredData && Array.isArray(deferredData)
-        ? deferredData
-        : data;
-    if (!source || !Array.isArray(source)) return null;
-    return source.find((item: any) => item.name === hoveredItemName) ?? null;
-  }, [hoveredItemName, viewMode, deferredData, data]);
+  // Exact hovered polygon payload (no name-based dedupe), avoids highlighting
+  // all duplicate-name rows and keeps tooltip data aligned with pointer target.
+  const displayedItem = hoveredItemData;
 
   // Get selected item data for tooltip when an item is focused/selected
   const selectedItemData = React.useMemo(() => {
@@ -1298,9 +1341,15 @@ export default function SupersetPluginChartFloorMap(
   // Heatmap colour scale: use the same robustMax that HeatmapLayer computes
   // internally from the raw points array so sidebar colors match the rendered
   // heatmap exactly (same 96th-percentile, same input data).
+  const effectiveHotThreshold = hotThreshold;
+
   const heatmapRobustMax = React.useMemo(
-    () => computeRobustMaxFootfall(heatmapPoints),
-    [heatmapPoints],
+    () =>
+      computeRobustMaxFootfallWithThreshold(
+        heatmapPoints,
+        effectiveHotThreshold,
+      ),
+    [heatmapPoints, effectiveHotThreshold],
   );
 
   // Re-measure tooltip position once after zoom animation completes.
@@ -1460,11 +1509,7 @@ export default function SupersetPluginChartFloorMap(
   ]);
 
   return (
-    <Styles
-      ref={rootElem}
-      height={height}
-      width={width}
-    >
+    <Styles ref={rootElem} height={height} width={width}>
       <div className={`content-layout ${showStorePanel ? 'split-view' : ''}`}>
         {showStorePanel && (
           <StoreListWidget
@@ -1666,7 +1711,8 @@ export default function SupersetPluginChartFloorMap(
                 filteredPolygonData.map((item: any, index: number) => {
                   const itemName = item.name || 'Unknown';
                   const itemLayer = item.layer || 'Unknown';
-                  const isItemHovered = hoveredItemName === itemName;
+                  const isItemHovered =
+                    hoveredPolygonKey === polygonHoverKey(itemName, index);
                   const isItemSelected = selectedItemName === itemName;
 
                   // Filter polylines based on layer selection (multiple)
@@ -1691,8 +1737,8 @@ export default function SupersetPluginChartFloorMap(
                         index={index}
                         storeName={itemName}
                         isHovered={isItemHovered || isItemSelected}
-                        onHoverEnter={e => handleItemHoverEnter(itemName, e)}
-                        onHoverMove={e => handleItemHoverMove(itemName, e)}
+                        onHoverEnter={e => handleItemHoverEnter(item, index, e)}
+                        onHoverMove={e => handleItemHoverMove(item, index, e)}
                         onHoverLeave={handleItemHoverLeave}
                         layer={itemLayer}
                         maxFootfall={maxFootfallByLayer[itemLayer] || 1}
@@ -1707,6 +1753,7 @@ export default function SupersetPluginChartFloorMap(
                     points={heatmapPoints}
                     imgW={imgW}
                     imgH={imgH}
+                    hotThreshold={hotThreshold}
                   />
                   {/* Draw transparent polygons in heatmap mode for click/hover */}
                   {/* Use deferredData so polygons exist for every store
@@ -1716,7 +1763,8 @@ export default function SupersetPluginChartFloorMap(
                     deferredData.map((item: any, index: number) => {
                       const itemName = item.name || 'Unknown';
                       const isItemSelected = selectedItemName === itemName;
-                      const isItemHovered = hoveredItemName === itemName;
+                      const isItemHovered =
+                        hoveredPolygonKey === polygonHoverKey(itemName, index);
                       const pointsStr = item.points || '';
                       if (!pointsStr || pointsStr === 'null') return null;
 
@@ -1745,9 +1793,11 @@ export default function SupersetPluginChartFloorMap(
                               isItemSelected ? 6 : isItemHovered ? 4 : 2.5
                             }
                             onMouseEnter={e =>
-                              handleItemHoverEnter(itemName, e)
+                              handleItemHoverEnter(item, index, e)
                             }
-                            onMouseMove={e => handleItemHoverMove(itemName, e)}
+                            onMouseMove={e =>
+                              handleItemHoverMove(item, index, e)
+                            }
                             onMouseLeave={handleItemHoverLeave}
                             style={{ cursor: 'pointer' }}
                           />
@@ -1760,7 +1810,7 @@ export default function SupersetPluginChartFloorMap(
           </ZoomPanWrapper>
 
           {/* Show tooltip for hovered item (polygon + heatmap modes) */}
-          {displayedItem && hoveredItemName !== null && (
+          {displayedItem && hoveredPolygonKey !== null && (
             <TooltipBox isVisible={true} x={tooltipPos.x} y={tooltipPos.y}>
               <div className="store-name">{displayedItem.name}</div>
               {displayedItem.category && (
@@ -1787,7 +1837,7 @@ export default function SupersetPluginChartFloorMap(
           )}
 
           {/* Show tooltip for selected item (both modes) */}
-          {selectedItemData && !hoveredItemName && (
+          {selectedItemData && !hoveredPolygonKey && (
             <TooltipBox
               isVisible={true}
               x={selectedTooltipPos.x}
@@ -1820,9 +1870,7 @@ export default function SupersetPluginChartFloorMap(
           )}
 
           {/* Heatmap legend (fullscreen + heatmap mode only) */}
-          {viewMode === 'heatmap' && isFullScreen && (
-            <HeatmapLegend />
-          )}
+          {viewMode === 'heatmap' && isFullScreen && <HeatmapLegend />}
 
           {/* Color Legend (polygon mode only) */}
           {viewMode === 'polygon' &&

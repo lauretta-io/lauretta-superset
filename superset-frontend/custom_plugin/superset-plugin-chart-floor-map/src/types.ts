@@ -28,6 +28,7 @@ export type ViewMode = 'polygon' | 'heatmap';
 interface SupersetPluginChartFloorMapCustomizeProps {
   floorSelection: string;
   floorImage: string;
+  hotThreshold: number;
 }
 
 export type SupersetPluginChartFloorMapProps =

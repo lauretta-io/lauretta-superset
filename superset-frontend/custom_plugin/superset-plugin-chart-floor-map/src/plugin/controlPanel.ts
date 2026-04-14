@@ -136,6 +136,29 @@ const config: ControlPanelConfig = {
         ],
       ],
     },
+    {
+      label: t('Customize'),
+      tabOverride: 'customize',
+      expanded: true,
+      controlSetRows: [
+        [
+          {
+            name: 'hot_threshold',
+            config: {
+              type: 'SliderControl',
+              label: t('Hot Threshold'),
+              description: t(
+                'Percentile threshold for highlighting high-traffic areas (0–1).',
+              ),
+              min: 0,
+              max: 1,
+              step: 0.01,
+              default: 0.96,
+            },
+          },
+        ],
+      ],
+    },
   ],
 };
 
