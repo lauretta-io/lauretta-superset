@@ -233,7 +233,11 @@ main_query AS (
                     'None'                                                                                                                                 AS category,
                     NULL                                                                                                                                   AS points,
                     0                                                                                                                                      AS total_footfall,
-                    TO_TIMESTAMP('{{ from_str.replace("T", " ") }}', 'YYYY-MM-DD HH24:MI:SS')                     AS event_time
+                    {% if from_str %}
+                        TO_TIMESTAMP('{{ from_str.replace("T", " ") }}', 'YYYY-MM-DD HH24:MI:SS')
+                    {% else %}
+                        CURRENT_TIMESTAMP
+                    {% endif %}                                   AS event_time
 
     ) res
     CROSS JOIN property_footfall
