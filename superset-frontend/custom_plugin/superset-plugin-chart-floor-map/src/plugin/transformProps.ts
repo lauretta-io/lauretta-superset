@@ -18,48 +18,176 @@
  */
 import { ChartProps, TimeseriesDataRecord } from '@superset-ui/core';
 
+/**
+ * Dashboard filter columns that can be applied to Retail layer in polygon mode.
+ * In heatmap mode, all data is used without client-side filters.
+ */
+const UNIT_FILTER_COLUMNS = new Set(['unit_name', 'unit_group_name']);
+const INCLUSIVE_OPERATORS = new Set(['IN', '=', '==', 'EQ', 'IS']);
+
+type UnitFilterValues = Record<string, Set<string>>;
+
+interface DashboardFilter {
+  col?: string;
+  column?: string;
+  subject?: string;
+  val?: unknown | unknown[];
+}
+
+interface FloorMapFormData {
+  hot_threshold?: unknown;
+  hotThreshold?: unknown;
+  adhoc_filters?: AdhocFilter[];
+  adhocFilters?: AdhocFilter[];
+  extra_form_data?: {
+    filters?: DashboardFilter[];
+    hot_threshold?: unknown;
+    hotThreshold?: unknown;
+  };
+  extraFormData?: {
+    filters?: DashboardFilter[];
+    hot_threshold?: unknown;
+    hotThreshold?: unknown;
+  };
+}
+
+interface AdhocFilter {
+  clause?: string;
+  isExtra?: boolean;
+  expressionType?: string;
+  subject?: string;
+  operator?: string;
+  operatorId?: string;
+  comparator?: unknown | unknown[];
+}
+
+function toStringArray(value: unknown | unknown[]): string[] {
+  const items = Array.isArray(value) ? value : [value];
+  return items
+    .flatMap(v => {
+      if (v === null || v === undefined) return [];
+      if (typeof v === 'object') {
+        const maybeObj = v as Record<string, unknown>;
+        if (maybeObj.value !== undefined && maybeObj.value !== null) {
+          return [String(maybeObj.value)];
+        }
+        if (maybeObj.label !== undefined && maybeObj.label !== null) {
+          return [String(maybeObj.label)];
+        }
+      }
+      return [String(v)];
+    })
+    .map(s => s.trim())
+    .filter(Boolean);
+}
+
+function addFilterValues(
+  result: UnitFilterValues,
+  rawCol: string,
+  rawValues: unknown | unknown[],
+) {
+  const col = String(rawCol || '').trim();
+  if (!UNIT_FILTER_COLUMNS.has(col)) {
+    return;
+  }
+
+  const values = toStringArray(rawValues);
+  if (!values.length) return;
+
+  if (!result[col]) result[col] = new Set<string>();
+  values.forEach(v => result[col].add(v));
+}
+
+function getDashboardFilters(formData?: FloorMapFormData): DashboardFilter[] {
+  return (
+    formData?.extraFormData?.filters ?? formData?.extra_form_data?.filters ?? []
+  );
+}
+
+function getAdhocFilters(formData?: FloorMapFormData): AdhocFilter[] {
+  return formData?.adhoc_filters ?? formData?.adhocFilters ?? [];
+}
+
+function getAdhocOperator(filter: AdhocFilter): string {
+  return String(filter.operator ?? filter.operatorId ?? '').toUpperCase();
+}
+
+function toFiniteNumber(value: unknown): number | null {
+  const n = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function resolveHotThreshold(formData: FloorMapFormData | undefined): number {
+  const candidates: unknown[] = [
+    formData?.hot_threshold,
+    formData?.hotThreshold,
+    formData?.extraFormData?.hot_threshold,
+    formData?.extraFormData?.hotThreshold,
+    formData?.extra_form_data?.hot_threshold,
+    formData?.extra_form_data?.hotThreshold,
+  ];
+
+  for (const value of candidates) {
+    const parsed = toFiniteNumber(value);
+    if (parsed !== null) return Math.min(Math.max(parsed, 0), 1);
+  }
+
+  return 0.96;
+}
+
+/**
+ * Extract active filter values for unit_name and unit_group_name from the
+ * extraFormData that Superset injects when a dashboard filter is applied,
+ * and also from Explore adhoc_filters when viewing the chart in Explore.
+ * Returns a map of { column -> Set<string> } for quick lookup.
+ *
+ * Note: These filters are applied client-side ONLY in polygon mode to the
+ * Retail layer. In heatmap mode, all data is used for density calculation.
+ */
+function extractUnitFilterValues(
+  formData: FloorMapFormData | undefined,
+): UnitFilterValues {
+  const result: UnitFilterValues = {};
+
+  // Dashboard filters land in extraFormData.filters
+  getDashboardFilters(formData).forEach(f => {
+    const col: string = f.col ?? f.column ?? f.subject ?? '';
+    addFilterValues(result, col, f.val ?? []);
+  });
+
+  // Explore adhoc filters live in formData.adhoc_filters.
+  // Only include SIMPLE filters with inclusive operators, because this
+  // client-side logic supports exact-value matching semantics.
+  getAdhocFilters(formData).forEach(f => {
+    if ((f.expressionType ?? '').toUpperCase() !== 'SIMPLE') return;
+
+    const col = String(f.subject ?? '');
+    const operator = getAdhocOperator(f);
+    if (!INCLUSIVE_OPERATORS.has(operator)) return;
+
+    addFilterValues(result, col, f.comparator ?? []);
+  });
+
+  return result;
+}
+
 export default function transformProps(chartProps: ChartProps) {
-  /**
-   * This function is called after a successful response has been
-   * received from the chart data endpoint, and is used to transform
-   * the incoming data prior to being sent to the Visualization.
-   *
-   * The transformProps function is also quite useful to return
-   * additional/modified props to your data viz component. The formData
-   * can also be accessed from your SupersetPluginChartFloorMap.tsx file, but
-   * doing supplying custom props here is often handy for integrating third
-   * party libraries that rely on specific props.
-   *
-   * A description of properties in `chartProps`:
-   * - `height`, `width`: the height/width of the DOM element in which
-   *   the chart is located
-   * - `formData`: the chart data request payload that was sent to the
-   *   backend.
-   * - `queriesData`: the chart data response payload that was received
-   *   from the backend. Some notable properties of `queriesData`:
-   *   - `data`: an array with data, each row with an object mapping
-   *     the column/alias to its value. Example:
-   *     `[{ col1: 'abc', metric1: 10 }, { col1: 'xyz', metric1: 20 }]`
-   *   - `rowcount`: the number of rows in `data`
-   *   - `query`: the query that was issued.
-   *
-   * Please note: the transformProps function gets cached when the
-   * application loads. When making changes to the `transformProps`
-   * function during development with hot reloading, changes won't
-   * be seen until restarting the development server.
-   */
   const { width, height, formData, queriesData } = chartProps;
-  const { boldText, headerFontSize, headerText, floorSelection, floorImage } = formData;
+  const { floorSelection, floorImage } = formData;
+
+  // Single query — all zones for the floor. In polygon mode, Retail layer is
+  // filtered client-side by unit_name/unit_group_name dashboard filters.
+  // In heatmap mode, all data is used without client-side filtering.
   const data = queriesData[0].data as TimeseriesDataRecord[];
+  const unitFilterValues = extractUnitFilterValues(formData);
 
   return {
     width,
     height,
     data,
-    boldText,
-    headerFontSize,
-    headerText,
+    unitFilterValues,
     floorSelection,
     floorImage: floorImage || floorSelection || '',
+    hotThreshold: resolveHotThreshold(formData as FloorMapFormData),
   };
 }

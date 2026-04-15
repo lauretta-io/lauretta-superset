@@ -16,31 +16,34 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import {
-  QueryFormData,
-  supersetTheme,
-  TimeseriesDataRecord,
-} from '@superset-ui/core';
+import { TimeseriesDataRecord } from '@superset-ui/core';
 
 export interface SupersetPluginChartFloorMapStylesProps {
   height: number;
   width: number;
-  headerFontSize: keyof typeof supersetTheme.typography.sizes;
-  boldText: boolean;
 }
+
+export type ViewMode = 'polygon' | 'heatmap';
 
 interface SupersetPluginChartFloorMapCustomizeProps {
-  headerText: string;
   floorSelection: string;
   floorImage: string;
+  hotThreshold: number;
 }
 
-export type SupersetPluginChartFloorMapQueryFormData = QueryFormData &
+export type SupersetPluginChartFloorMapProps =
   SupersetPluginChartFloorMapStylesProps &
-  SupersetPluginChartFloorMapCustomizeProps;
-
-export type SupersetPluginChartFloorMapProps = SupersetPluginChartFloorMapStylesProps &
-  SupersetPluginChartFloorMapCustomizeProps & {
-    data: TimeseriesDataRecord[];
-    // add typing here for the props you pass in from transformProps.ts!
-  };
+    SupersetPluginChartFloorMapCustomizeProps & {
+      /** Full floor dataset with all zones (Retail, Entrances, Circulation, Public).
+       *  In polygon mode, client-side filters apply to Retail layer only.
+       *  In heatmap mode, all data is used for density calculation without filtering.
+       */
+      data: TimeseriesDataRecord[];
+      /**
+       * Active dashboard filter values for unit_name / unit_group_name columns.
+       * Applied client-side in polygon mode to the Retail layer only, so
+       * non-unit zones (Entrances, Circulation, Public) are never hidden.
+       * Map of { columnName -> Set<filterValue> }; empty map means no filter active.
+       */
+      unitFilterValues: Record<string, Set<string>>;
+    };

@@ -61,7 +61,7 @@ const ZoomPanContainer = styled.div`
     position: absolute;
     top: 10px;
     right: 10px;
-    z-index: 100;
+    z-index: 20;
     display: flex;
     gap: 4px;
     background: white;
@@ -112,6 +112,7 @@ const ZoomPanContainer = styled.div`
 
 interface ZoomPanWrapperProps {
   children: ReactNode;
+  extraControls?: ReactNode;
 }
 
 export interface ZoomPanWrapperRef {
@@ -123,7 +124,7 @@ export interface ZoomPanWrapperRef {
 export const ZoomPanWrapper = forwardRef<
   ZoomPanWrapperRef,
   ZoomPanWrapperProps
->(({ children }, ref) => {
+>(({ children, extraControls }, ref) => {
   const transformRef = useRef<ReactZoomPanPinchRef>(null);
 
   useImperativeHandle(ref, () => ({
@@ -175,6 +176,7 @@ export const ZoomPanWrapper = forwardRef<
               >
                 ⟲
               </button>
+              {extraControls}
             </div>
             <TransformComponent>{children}</TransformComponent>
           </>

@@ -18,19 +18,27 @@
  */
 import React from 'react';
 
+interface StorePolygonData {
+  name?: string;
+  points?: string | null;
+  total_footfall?: number | null;
+}
+
 export interface StorePolylineProps {
-  store: any;
+  store: StorePolygonData;
   index: number;
+  storeName?: string;
   isHovered: boolean;
   layer: string;
   maxFootfall: number;
   onHoverEnter: (e: React.MouseEvent<SVGPolygonElement>) => void;
+  onHoverMove?: (e: React.MouseEvent<SVGPolygonElement>) => void;
   onHoverLeave: () => void;
   onClick?: (e: React.MouseEvent<SVGPolygonElement>) => void;
 }
 
 // Color scales for each layer (6 bins from light to dark)
-export const layerColorScales: Record<string, string[]> = {
+const layerColorScales: Record<string, string[]> = {
   Retail: [
     'rgb(220, 242, 195)', // lightest
     'rgb(175, 218, 120)',
@@ -85,7 +93,10 @@ export const getLayerFootfallColor = (
   const binSize = Math.ceil((maxFootfall - 1) / 6);
 
   // Determine which bin the footfall falls into (0-indexed)
-  const binIndex = Math.min(Math.floor((footfall - 1) / binSize), 5);
+  const binIndex = Math.max(
+    0,
+    Math.min(Math.floor((footfall - 1) / binSize), 5),
+  );
 
   return colors[binIndex];
 };
@@ -114,10 +125,12 @@ export const getColorBins = (
 export function StorePolyline({
   store,
   index,
+  storeName,
   isHovered,
   layer,
   maxFootfall,
   onHoverEnter,
+  onHoverMove,
   onHoverLeave,
   onClick,
 }: StorePolylineProps) {
@@ -134,9 +147,11 @@ export function StorePolyline({
 
   return (
     <g key={index}>
-      {/* Polyline */}
+      {/* Polyline - filled with layer-based footfall color (NOT KDE) */}
       <polygon
+        data-store-name={storeName || store.name || 'Unknown'}
         onMouseEnter={onHoverEnter}
+        onMouseMove={onHoverMove}
         onMouseLeave={onHoverLeave}
         onClick={e => {
           e.stopPropagation();
