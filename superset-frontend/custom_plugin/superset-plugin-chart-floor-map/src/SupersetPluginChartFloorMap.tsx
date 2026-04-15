@@ -618,10 +618,13 @@ const ColorLegend = styled.div`
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
   z-index: 500;
   display: flex;
+  flex-wrap: nowrap;
   align-items: flex-start;
-  gap: 20px;
+  gap: 12px 20px;
   border: 1px solid #ddd;
-  max-width: 90%;
+  max-width: 92%;
+  box-sizing: border-box;
+  overflow-x: auto;
 
   .layer-legend {
     display: flex;
@@ -733,7 +736,6 @@ export default function SupersetPluginChartFloorMap(
   const [polygonLayerFilters, setPolygonLayerFilters] = useState<string[]>([
     ...ALL_LAYERS,
   ]);
-  const layerFilters = polygonLayerFilters;
   const [isFilterLoading, setIsFilterLoading] = useState(false);
   // React 17-compatible pending state for heatmap mode switch
   const [isHeatmapPending, setIsHeatmapPending] = useState(false);
@@ -888,12 +890,12 @@ export default function SupersetPluginChartFloorMap(
     }
 
     // If no layers selected, return empty array
-    if (layerFilters.length === 0) return [];
+    if (polygonLayerFilters.length === 0) return [];
 
     let result = uniqueItems;
 
     // Apply layer filter (multiple selections)
-    result = result.filter(item => layerFilters.includes(item.layer));
+    result = result.filter(item => polygonLayerFilters.includes(item.layer));
 
     // Apply search filter
     if (searchQuery.trim()) {
@@ -906,7 +908,7 @@ export default function SupersetPluginChartFloorMap(
     uniqueItems,
     uniqueItemsUnfiltered,
     searchQuery,
-    layerFilters,
+    polygonLayerFilters,
     sortField,
     sortDirection,
   ]);
@@ -970,7 +972,7 @@ export default function SupersetPluginChartFloorMap(
       const footfall = item.total_footfall || 0;
       // Only consider items that are in the current filter
       if (
-        layerFilters.includes(layer) &&
+        polygonLayerFilters.includes(layer) &&
         layer in maxByLayer &&
         footfall > maxByLayer[layer]
       ) {
@@ -979,7 +981,7 @@ export default function SupersetPluginChartFloorMap(
     });
 
     return maxByLayer;
-  }, [filteredPolygonData, layerFilters]);
+  }, [filteredPolygonData, polygonLayerFilters]);
 
   // Build heatmap points from the UNFILTERED dataset so the heatmap always
   // renders every zone on the floor regardless of active UI filters.
@@ -1578,7 +1580,7 @@ export default function SupersetPluginChartFloorMap(
                 {ALL_LAYERS.map(layer => (
                   <button
                     key={layer}
-                    className={`layer-btn ${layerFilters.includes(layer) ? 'active' : ''}`}
+                    className={`layer-btn ${polygonLayerFilters.includes(layer) ? 'active' : ''}`}
                     onClick={() => handleLayerChange(layer)}
                   >
                     {layerImages[layer] && (
@@ -1716,8 +1718,8 @@ export default function SupersetPluginChartFloorMap(
 
                   // Filter polylines based on layer selection (multiple)
                   if (
-                    layerFilters.length === 0 ||
-                    !layerFilters.includes(itemLayer)
+                    polygonLayerFilters.length === 0 ||
+                    !polygonLayerFilters.includes(itemLayer)
                   ) {
                     return null;
                   }
@@ -1874,9 +1876,9 @@ export default function SupersetPluginChartFloorMap(
           {/* Color Legend (polygon mode only) */}
           {viewMode === 'polygon' &&
             isFullScreen &&
-            layerFilters.length > 0 && (
+            polygonLayerFilters.length > 0 && (
               <ColorLegend>
-                {layerFilters.map(layer => {
+                {polygonLayerFilters.map(layer => {
                   const maxVal = maxFootfallByLayer[layer] || 0;
                   const bins = getColorBins(maxVal, layer);
                   return (
