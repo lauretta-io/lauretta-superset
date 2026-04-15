@@ -670,12 +670,7 @@ export default function SupersetPluginChartFloorMap(
   const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc');
   const [selectedItemName, setSelectedItemName] = useState<string | null>(null);
   // Separate filter states for each view mode
-  const [polygonLayerFilters, setPolygonLayerFilters] = useState<string[]>([
-    'Retail',
-    'Entrances',
-    'Circulation',
-    'Public',
-  ]);
+  const [polygonLayerFilters, setPolygonLayerFilters] = useState<string[]>(ALL_LAYERS);
   const [heatmapLayerFilters, setHeatmapLayerFilters] =
     useState<string[]>(ALL_LAYERS);
 
@@ -1575,7 +1570,7 @@ export default function SupersetPluginChartFloorMap(
             />
             {viewMode === 'polygon' && (
               <div className="layer-filter">
-                {['Retail', 'Entrances', 'Circulation', 'Public'].map(layer => (
+                {ALL_LAYERS.map(layer => (
                   <button
                     key={layer}
                     className={`layer-btn ${layerFilters.includes(layer) ? 'active' : ''}`}
