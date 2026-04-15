@@ -50,6 +50,27 @@ import layerPublic from './images/public-layers.png';
 import layerShops from './images/shops-layers.png';
 
 const LAURETTA_IMAGE_API_PREFIX = '/api/v1/lauretta/images/';
+const ALL_LAYERS = ['Retail', 'Entrances', 'Circulation', 'Public'] as const;
+
+type FloorMapRow = TimeseriesDataRecord & {
+  name?: string;
+  total_footfall?: number;
+  percentage_of_prop?: number;
+  category?: string;
+  layer?: string;
+  points?: string;
+};
+
+type StoreSortField = 'name' | 'footfall';
+type SortDirection = 'asc' | 'desc';
+
+interface StoreListItem {
+  name: string;
+  total_footfall: number;
+  percentage_of_prop: number;
+  category: string;
+  layer: string;
+}
 
 function getPersistedViewMode(key: string): ViewMode {
   if (typeof window === 'undefined') return 'polygon';
@@ -97,7 +118,7 @@ const LARGE_POLYGON_AREA_THRESHOLD = 0.45;
  *   - 'unit_name'       → item.name (the unit display name)
  *   - 'unit_group_name' → item.category (e.g., ug.name for Retail rows)
  */
-function getItemValueForFilterCol(item: any, col: string): string {
+function getItemValueForFilterCol(item: FloorMapRow, col: string): string {
   if (col === 'unit_name') return String(item.name ?? '');
   if (col === 'unit_group_name') return String(item.category ?? '');
   return String(item[col] ?? '');
@@ -109,7 +130,7 @@ function getItemValueForFilterCol(item: any, col: string): string {
  * Empty unitFilterValues map means no filter is active → everything passes.
  */
 function passesUnitFilter(
-  item: any,
+  item: FloorMapRow,
   unitFilterValues: Record<string, Set<string>>,
 ): boolean {
   const layer: string = item.layer || '';
@@ -146,6 +167,44 @@ const polygonHoverKey = (name: string, index: number): string =>
  */
 const escapeAttrValue = (value: string): string =>
   value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+
+const buildUniqueItems = (source: FloorMapRow[]): StoreListItem[] => {
+  if (!source.length) return [];
+  const itemMap = new Map<string, StoreListItem>();
+
+  source.forEach(item => {
+    const itemName = item.name || 'Unknown';
+    if (itemName === 'No Data' || itemMap.has(itemName)) return;
+    itemMap.set(itemName, {
+      name: itemName,
+      total_footfall: item.total_footfall || 0,
+      percentage_of_prop: item.percentage_of_prop || 0,
+      category: item.category || '',
+      layer: item.layer || 'Unknown',
+    });
+  });
+
+  return Array.from(itemMap.values());
+};
+
+const sortStoreItems = (
+  items: StoreListItem[],
+  sortField: StoreSortField,
+  sortDirection: SortDirection,
+): StoreListItem[] =>
+  [...items].sort((a, b) => {
+    if (sortField === 'name') {
+      const nameCompare = a.name.localeCompare(b.name, undefined, {
+        sensitivity: 'base',
+      });
+      return sortDirection === 'asc' ? nameCompare : -nameCompare;
+    }
+    const footfallA = a.total_footfall || 0;
+    const footfallB = b.total_footfall || 0;
+    return sortDirection === 'asc'
+      ? footfallA - footfallB
+      : footfallB - footfallA;
+  });
 
 // Floor image URL using the image filename from config.json (e.g., "TRX_floorplan_CF.jpeg")
 const getFloorImageUrl = (imageFilename?: string): string => {
@@ -559,10 +618,13 @@ const ColorLegend = styled.div`
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
   z-index: 500;
   display: flex;
+  flex-wrap: nowrap;
   align-items: flex-start;
-  gap: 20px;
+  gap: 12px 20px;
   border: 1px solid #ddd;
-  max-width: 90%;
+  max-width: 92%;
+  box-sizing: border-box;
+  overflow-x: auto;
 
   .layer-legend {
     display: flex;
@@ -647,10 +709,11 @@ export default function SupersetPluginChartFloorMap(
     () =>
       !data || !Array.isArray(data)
         ? []
-        : data.filter(item => passesUnitFilter(item, unitFilterValues)),
+        : data.filter(item =>
+            passesUnitFilter(item as FloorMapRow, unitFilterValues),
+          ),
     [data, unitFilterValues],
   );
-  const ALL_LAYERS = ['Retail', 'Entrances', 'Circulation', 'Public'];
   const [viewMode, setViewModeState] = useState<ViewMode>(() =>
     getPersistedViewMode(viewModeStorageKey),
   );
@@ -666,22 +729,13 @@ export default function SupersetPluginChartFloorMap(
   const [tooltipPos, setTooltipPos] = useState({ x: 0, y: 0 });
   const [isFullScreen, setIsFullScreen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
-  const [sortField, setSortField] = useState<'name' | 'footfall'>('footfall');
-  const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc');
+  const [sortField, setSortField] = useState<StoreSortField>('footfall');
+  const [sortDirection, setSortDirection] = useState<SortDirection>('desc');
   const [selectedItemName, setSelectedItemName] = useState<string | null>(null);
-  // Separate filter states for each view mode
+  // Layer filter is used by polygon mode only.
   const [polygonLayerFilters, setPolygonLayerFilters] = useState<string[]>([
-    'Retail',
-    'Entrances',
-    'Circulation',
-    'Public',
+    ...ALL_LAYERS,
   ]);
-  const [heatmapLayerFilters, setHeatmapLayerFilters] =
-    useState<string[]>(ALL_LAYERS);
-
-  // Active filters depend on current view mode
-  const layerFilters =
-    viewMode === 'heatmap' ? heatmapLayerFilters : polygonLayerFilters;
   const [isFilterLoading, setIsFilterLoading] = useState(false);
   // React 17-compatible pending state for heatmap mode switch
   const [isHeatmapPending, setIsHeatmapPending] = useState(false);
@@ -801,48 +855,24 @@ export default function SupersetPluginChartFloorMap(
 
   // Get unique items with their total footfall for the list widget (polygon mode).
   // Uses filteredPolygonData so the sidebar reflects the active unit filters.
-  const uniqueItems = React.useMemo(() => {
+  const uniqueItems = React.useMemo<StoreListItem[]>(() => {
     if (!filteredPolygonData || !Array.isArray(filteredPolygonData)) return [];
-    const itemMap = new Map();
-    filteredPolygonData.forEach((item: any) => {
-      const itemName = item.name || 'Unknown';
-      if (itemName === 'No Data') return; // Skip 'No Data' entries
-      if (!itemMap.has(itemName)) {
-        itemMap.set(itemName, {
-          name: itemName,
-          total_footfall: item.total_footfall || 0,
-          percentage_of_prop: item.percentage_of_prop || 0,
-          category: item.category || '',
-          layer: item.layer || 'Unknown',
-        });
-      }
-    });
-    return Array.from(itemMap.values()).sort(
-      (a, b) => b.total_footfall - a.total_footfall,
+    return sortStoreItems(
+      buildUniqueItems(filteredPolygonData as FloorMapRow[]),
+      'footfall',
+      'desc',
     );
   }, [filteredPolygonData]);
 
   // Deduplicated store list from the full dataset — used for the sidebar
   // in heatmap mode so all zones are shown regardless of unit filters.
-  const uniqueItemsUnfiltered = React.useMemo(() => {
+  const uniqueItemsUnfiltered = React.useMemo<StoreListItem[]>(() => {
     const source = deferredData;
     if (!source || !Array.isArray(source)) return [];
-    const itemMap = new Map();
-    source.forEach((item: any) => {
-      const itemName = item.name || 'Unknown';
-      if (itemName === 'No Data') return; // Skip 'No Data' entries
-      if (!itemMap.has(itemName)) {
-        itemMap.set(itemName, {
-          name: itemName,
-          total_footfall: item.total_footfall || 0,
-          percentage_of_prop: item.percentage_of_prop || 0,
-          category: item.category || '',
-          layer: item.layer || 'Unknown',
-        });
-      }
-    });
-    return Array.from(itemMap.values()).sort(
-      (a, b) => b.total_footfall - a.total_footfall,
+    return sortStoreItems(
+      buildUniqueItems(source as FloorMapRow[]),
+      'footfall',
+      'desc',
     );
   }, [deferredData]);
 
@@ -856,55 +886,29 @@ export default function SupersetPluginChartFloorMap(
         const query = searchQuery.toLowerCase().trim();
         result = result.filter(item => item.name.toLowerCase().includes(query));
       }
-      return [...result].sort((a, b) => {
-        if (sortField === 'name') {
-          const nameCompare = a.name.localeCompare(b.name, undefined, {
-            sensitivity: 'base',
-          });
-          return sortDirection === 'asc' ? nameCompare : -nameCompare;
-        }
-        const fa = a.total_footfall || 0;
-        const fb = b.total_footfall || 0;
-        return sortDirection === 'asc' ? fa - fb : fb - fa;
-      });
+      return sortStoreItems(result, sortField, sortDirection);
     }
 
     // If no layers selected, return empty array
-    if (layerFilters.length === 0) return [];
+    if (polygonLayerFilters.length === 0) return [];
 
     let result = uniqueItems;
 
     // Apply layer filter (multiple selections)
-    result = result.filter(item => layerFilters.includes(item.layer));
+    result = result.filter(item => polygonLayerFilters.includes(item.layer));
 
     // Apply search filter
     if (searchQuery.trim()) {
       const query = searchQuery.toLowerCase().trim();
       result = result.filter(item => item.name.toLowerCase().includes(query));
     }
-
-    result = [...result].sort((a, b) => {
-      if (sortField === 'name') {
-        const nameCompare = a.name.localeCompare(b.name, undefined, {
-          sensitivity: 'base',
-        });
-        return sortDirection === 'asc' ? nameCompare : -nameCompare;
-      }
-
-      const footfallA = a.total_footfall || 0;
-      const footfallB = b.total_footfall || 0;
-      return sortDirection === 'asc'
-        ? footfallA - footfallB
-        : footfallB - footfallA;
-    });
-
-    return result;
+    return sortStoreItems(result, sortField, sortDirection);
   }, [
     viewMode,
     uniqueItems,
     uniqueItemsUnfiltered,
     searchQuery,
-    layerFilters,
+    polygonLayerFilters,
     sortField,
     sortDirection,
   ]);
@@ -959,24 +963,25 @@ export default function SupersetPluginChartFloorMap(
   // Uses filteredPolygonData so the scale reflects only the visible zones.
   const maxFootfallByLayer = React.useMemo(() => {
     if (!filteredPolygonData || !Array.isArray(filteredPolygonData)) return {};
-    const maxByLayer: Record<string, number> = {
-      Retail: 0,
-      Entrances: 0,
-      Circulation: 0,
-      Public: 0,
-    };
+    const maxByLayer = Object.fromEntries(
+      ALL_LAYERS.map(layer => [layer, 0]),
+    ) as Record<string, number>;
 
     filteredPolygonData.forEach((item: any) => {
       const layer = item.layer || 'Unknown';
       const footfall = item.total_footfall || 0;
       // Only consider items that are in the current filter
-      if (layerFilters.includes(layer) && footfall > maxByLayer[layer]) {
+      if (
+        polygonLayerFilters.includes(layer) &&
+        layer in maxByLayer &&
+        footfall > maxByLayer[layer]
+      ) {
         maxByLayer[layer] = footfall;
       }
     });
 
     return maxByLayer;
-  }, [filteredPolygonData, layerFilters]);
+  }, [filteredPolygonData, polygonLayerFilters]);
 
   // Build heatmap points from the UNFILTERED dataset so the heatmap always
   // renders every zone on the floor regardless of active UI filters.
@@ -1045,13 +1050,10 @@ export default function SupersetPluginChartFloorMap(
     }));
   }, [deferredData, imgW, imgH]);
 
-  // Handle layer filter change with loading (toggle multiple selections)
-  // Works for both polygon and heatmap modes independently
+  // Handle polygon-layer filter change with loading (toggle multiple selections)
   const handleLayerChange = (layer: string) => {
     setIsFilterLoading(true);
-    const setter =
-      viewMode === 'heatmap' ? setHeatmapLayerFilters : setPolygonLayerFilters;
-    setter((prev: string[]) => {
+    setPolygonLayerFilters((prev: string[]) => {
       if (prev.includes(layer)) {
         return prev.filter((l: string) => l !== layer);
       }
@@ -1575,10 +1577,10 @@ export default function SupersetPluginChartFloorMap(
             />
             {viewMode === 'polygon' && (
               <div className="layer-filter">
-                {['Retail', 'Entrances', 'Circulation', 'Public'].map(layer => (
+                {ALL_LAYERS.map(layer => (
                   <button
                     key={layer}
-                    className={`layer-btn ${layerFilters.includes(layer) ? 'active' : ''}`}
+                    className={`layer-btn ${polygonLayerFilters.includes(layer) ? 'active' : ''}`}
                     onClick={() => handleLayerChange(layer)}
                   >
                     {layerImages[layer] && (
@@ -1666,7 +1668,6 @@ export default function SupersetPluginChartFloorMap(
                   type="button"
                   className={`toggle-btn ${viewMode === 'heatmap' ? 'active' : ''}`}
                   onClick={() => {
-                    setHeatmapLayerFilters(ALL_LAYERS);
                     zoomPanRef.current?.resetTransform();
                     // If already in heatmap mode, just clear the pending flag immediately
                     if (viewMode === 'heatmap') {
@@ -1717,8 +1718,8 @@ export default function SupersetPluginChartFloorMap(
 
                   // Filter polylines based on layer selection (multiple)
                   if (
-                    layerFilters.length === 0 ||
-                    !layerFilters.includes(itemLayer)
+                    polygonLayerFilters.length === 0 ||
+                    !polygonLayerFilters.includes(itemLayer)
                   ) {
                     return null;
                   }
@@ -1875,9 +1876,9 @@ export default function SupersetPluginChartFloorMap(
           {/* Color Legend (polygon mode only) */}
           {viewMode === 'polygon' &&
             isFullScreen &&
-            layerFilters.length > 0 && (
+            polygonLayerFilters.length > 0 && (
               <ColorLegend>
-                {layerFilters.map(layer => {
+                {polygonLayerFilters.map(layer => {
                   const maxVal = maxFootfallByLayer[layer] || 0;
                   const bins = getColorBins(maxVal, layer);
                   return (
