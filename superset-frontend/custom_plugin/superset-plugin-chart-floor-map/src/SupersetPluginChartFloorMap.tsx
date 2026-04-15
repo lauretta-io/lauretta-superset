@@ -50,7 +50,7 @@ import layerPublic from './images/public-layers.png';
 import layerShops from './images/shops-layers.png';
 
 const LAURETTA_IMAGE_API_PREFIX = '/api/v1/lauretta/images/';
-const ALL_LAYERS = ['Retail', 'Entrances'] as const;
+const ALL_LAYERS = ['Retail', 'Entrances', 'Circulation', 'Public'] as const;
 
 type FloorMapRow = TimeseriesDataRecord & {
   name?: string;
