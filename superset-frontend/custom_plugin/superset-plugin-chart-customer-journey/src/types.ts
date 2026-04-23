@@ -49,6 +49,13 @@ export interface RawJourneyRecord {
   entry_count?: number; // Footfall count for this journey record
 }
 
+// Individual cluster journey detail
+export interface ClusterJourneyDetail {
+  clusterId: number;
+  dwellMins: number[];
+  entryCount: number;
+}
+
 // Processed journey with aggregated data
 export interface ProcessedJourney {
   journeyNodes: string;
@@ -56,6 +63,7 @@ export interface ProcessedJourney {
   totalFootfall: number;
   avgDwellMins: number[];
   clusterIds: number[];
+  clusterDetails: ClusterJourneyDetail[];
 }
 
 // Flow pair for source-target analysis
@@ -76,6 +84,11 @@ export interface NodeStats {
   incomingFlows: { source: string; count: number; percentage: number }[];
   outgoingFlows: { target: string; count: number; percentage: number }[];
   avgDwellTime: number;
+  // Unique customer statistics
+  uniqueCustomers: number;
+  avgDwellTimePerCustomer: number;
+  uniqueIncomingFlows: { source: string; count: number; percentage: number }[];
+  uniqueOutgoingFlows: { target: string; count: number; percentage: number }[];
 }
 
 // All processed data passed to the component

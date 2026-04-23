@@ -16,14 +16,16 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import React, { useMemo } from 'react';
+import React, { useMemo, useState } from 'react';
 import { css, styled, useTheme } from '@superset-ui/core';
 import { TransformWrapper, TransformComponent } from 'react-zoom-pan-pinch';
 import { NodeStats } from './types';
 
 interface FlowGraphProps {
   selectedNode: NodeStats;
+  nodeStatsMap: Map<string, NodeStats>;
   formatDwellTime: (mins: number) => string;
+  isUniqueCustomerView?: boolean;
 }
 
 interface GraphNode {
@@ -217,9 +219,12 @@ function splitLabelToLines(label: string, maxCharsPerLine: number): string[] {
 
 export default function FlowGraph({
   selectedNode,
+  nodeStatsMap,
   formatDwellTime,
+  isUniqueCustomerView = false,
 }: FlowGraphProps) {
   const theme = useTheme();
+  const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
 
   // Build a three-column layout (incoming -> center -> outgoing) and matching edges.
   const { nodes, edges } = useMemo(() => {
@@ -335,18 +340,6 @@ export default function FlowGraph({
     return `M ${startX} ${startY} C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${endX} ${endY}`;
   };
 
-  // Place percentage labels near the center of each edge.
-  const getEdgeMidpoint = (edge: GraphEdge) => {
-    const source = getNodeById(edge.source);
-    const target = getNodeById(edge.target);
-    if (!source || !target) return { x: 0, y: 0 };
-
-    return {
-      x: (source.x + target.x) / 2,
-      y: (source.y + target.y) / 2 - 12,
-    };
-  };
-
   // Get fill color based on node type
   const getNodeGradientId = (type: string) => {
     switch (type) {
@@ -362,6 +355,27 @@ export default function FlowGraph({
   // Get stroke color based on edge type
   const getEdgeColor = (type: string) => {
     return type === 'incoming' ? '#34d399' : '#fbbf24';
+  };
+
+  const isEdgeConnectedToHoveredNode = (edge: GraphEdge) => {
+    if (!hoveredNodeId) {
+      return true;
+    }
+    return edge.source === hoveredNodeId || edge.target === hoveredNodeId;
+  };
+
+  const isNodeConnectedToHoveredNode = (nodeId: string) => {
+    if (!hoveredNodeId) {
+      return true;
+    }
+    if (nodeId === hoveredNodeId) {
+      return true;
+    }
+    return edges.some(
+      edge =>
+        (edge.source === hoveredNodeId && edge.target === nodeId) ||
+        (edge.target === hoveredNodeId && edge.source === nodeId),
+    );
   };
 
   return (
@@ -488,47 +502,22 @@ export default function FlowGraph({
 
                 {/* Render edges first so nodes always stay on top and readable. */}
                 {edges.map((edge, idx) => {
-                  const midpoint = getEdgeMidpoint(edge);
-                  const edgeLabel = `${edge.count.toLocaleString()} (${edge.percentage.toFixed(0)}%)`;
-                  const labelWidth = Math.max(56, edgeLabel.length * 7 + 14);
+                  const isConnected = isEdgeConnectedToHoveredNode(edge);
                   return (
                     <g key={`edge-${idx}`}>
-                      {/* Edge path */}
                       <path
                         d={generatePath(edge)}
                         fill="none"
                         stroke={getEdgeColor(edge.type)}
-                        strokeWidth="3.5"
+                        strokeWidth={isConnected ? 4.8 : 2.2}
                         strokeLinecap="round"
                         markerEnd={
                           edge.type === 'incoming'
                             ? 'url(#arrowIncoming)'
                             : 'url(#arrowOutgoing)'
                         }
-                        opacity="0.8"
+                        opacity={hoveredNodeId ? (isConnected ? 1 : 0.12) : 0.8}
                       />
-                      {/* Edge label background */}
-                      <rect
-                        x={midpoint.x - labelWidth / 2}
-                        y={midpoint.y - 12}
-                        width={labelWidth}
-                        height="24"
-                        rx="12"
-                        fill="rgba(255,255,255,0.94)"
-                        stroke={getEdgeColor(edge.type)}
-                        strokeWidth="1"
-                      />
-                      {/* Edge label text */}
-                      <text
-                        x={midpoint.x}
-                        y={midpoint.y + 5}
-                        textAnchor="middle"
-                        fontSize="11.5"
-                        fontWeight="600"
-                        fill={edge.type === 'incoming' ? '#059669' : '#d97706'}
-                      >
-                        {edgeLabel}
-                      </text>
                     </g>
                   );
                 })}
@@ -541,8 +530,17 @@ export default function FlowGraph({
                     node.label,
                     node.type === 'center' ? 16 : 12,
                   );
+                  const isConnected = isNodeConnectedToHoveredNode(node.id);
+                  const isHovered = hoveredNodeId === node.id;
                   return (
-                    <g key={node.id} style={{ cursor: 'pointer' }}>
+                    <g
+                      key={node.id}
+                      style={{
+                        cursor: 'pointer',
+                      }}
+                      onMouseEnter={() => setHoveredNodeId(node.id)}
+                      onMouseLeave={() => setHoveredNodeId(null)}
+                    >
                       {/* Node circle */}
                       <circle
                         cx={node.x}
@@ -550,7 +548,25 @@ export default function FlowGraph({
                         r={radius}
                         fill={getNodeGradientId(node.type)}
                         filter="url(#dropShadow)"
+                        opacity={hoveredNodeId ? (isConnected ? 1 : 0.3) : 1}
                       />
+                      {isHovered && (
+                        <circle
+                          cx={node.x}
+                          cy={node.y}
+                          r={radius + 8}
+                          fill="none"
+                          stroke={
+                            node.type === 'incoming'
+                              ? '#34d399'
+                              : node.type === 'outgoing'
+                                ? '#f59e0b'
+                                : theme.colors.primary.dark1
+                          }
+                          strokeWidth="3"
+                          opacity="0.9"
+                        />
+                      )}
                       {/* Node label */}
                       <text
                         x={node.x}
@@ -565,6 +581,7 @@ export default function FlowGraph({
                         fontSize={node.type === 'center' ? '11.5' : '10'}
                         fontWeight="600"
                         fill="white"
+                        opacity={hoveredNodeId ? (isConnected ? 1 : 0.45) : 1}
                       >
                         {nameLines.map((line, idx) => (
                           <tspan
@@ -581,6 +598,221 @@ export default function FlowGraph({
                     </g>
                   );
                 })}
+
+                {/* Hover tooltip for non-center nodes */}
+                {(() => {
+                  const hoveredNode = nodes.find(
+                    n => n.id === hoveredNodeId && n.type !== 'center',
+                  );
+                  if (!hoveredNode) {
+                    return null;
+                  }
+
+                  const flowCount = hoveredNode.count || 0;
+                  const isFromNode = hoveredNode.type === 'incoming';
+                  const middleNodeName = selectedNode.nodeName;
+
+                  // Use unique customer data when in unique customer view mode
+                  const fromNodeStats = nodeStatsMap.get(hoveredNode.label);
+                  const fromNodeTotal = isFromNode
+                    ? (isUniqueCustomerView
+                        ? fromNodeStats?.uniqueCustomers
+                        : fromNodeStats?.totalVisits) || flowCount
+                    : 0;
+                  const fromNodeToMiddleShare =
+                    isFromNode && fromNodeTotal > 0
+                      ? (flowCount / fromNodeTotal) * 100
+                      : 0;
+                  const middleTotal = selectedNode.totalVisits;
+                  const middleShare =
+                    middleTotal > 0 ? (flowCount / middleTotal) * 100 : 0;
+
+                  // Terminology changes based on view mode
+                  const entityLabel = isUniqueCustomerView
+                    ? 'Unique customers'
+                    : 'Customers';
+                  const totalLabel = isUniqueCustomerView
+                    ? 'Unique customers'
+                    : 'Total visits';
+
+                  const pathCountLabel = isFromNode
+                    ? `${entityLabel} from ${hoveredNode.label} to ${middleNodeName}`
+                    : `${entityLabel} from ${middleNodeName} to ${hoveredNode.label}`;
+                  const secondaryLabel = isFromNode
+                    ? totalLabel
+                    : `Share of ${middleNodeName} ${isUniqueCustomerView ? 'unique customers' : 'total visits'}`;
+                  const secondaryValue = isFromNode
+                    ? fromNodeTotal.toLocaleString()
+                    : `${middleShare.toFixed(1)}%`;
+                  const pathValue = isFromNode
+                    ? `${flowCount.toLocaleString()} (${fromNodeToMiddleShare.toFixed(1)}%)`
+                    : flowCount.toLocaleString();
+                  const tooltipWidth = 330;
+
+                  // Break long strings into lines for each text area
+                  // Header label shares row with the type badge (~80px), so ~20 chars max
+                  const headerLines = splitLabelToLines(hoveredNode.label, 20);
+                  // Row labels occupy left side only; value is right-anchored; ~38 chars
+                  const secondaryLabelLines = splitLabelToLines(
+                    secondaryLabel,
+                    38,
+                  );
+                  const pathLabelLines = splitLabelToLines(pathCountLabel, 38);
+
+                  const LINE_H = 13; // px between wrapped label lines
+                  const ROW_GAP = 22; // px between distinct rows
+
+                  const headerExtraH = (headerLines.length - 1) * LINE_H;
+                  // Header block: base 34px tall, grows with extra label lines
+                  const headerBlockH = 34 + headerExtraH;
+
+                  const dividerOffsetY = headerBlockH + 10;
+                  const row1OffsetY = dividerOffsetY + ROW_GAP;
+                  const row1ExtraH = (secondaryLabelLines.length - 1) * LINE_H;
+                  const row2OffsetY = row1OffsetY + ROW_GAP + row1ExtraH;
+                  const row2ExtraH = (pathLabelLines.length - 1) * LINE_H;
+
+                  const tooltipHeight = row2OffsetY + row2ExtraH + 18;
+
+                  const preferredX = isFromNode
+                    ? hoveredNode.x + 24
+                    : hoveredNode.x - tooltipWidth - 24;
+                  const tooltipX = Math.min(
+                    Math.max(12, preferredX),
+                    GRAPH_WIDTH - tooltipWidth - 12,
+                  );
+                  const tooltipY = Math.min(
+                    Math.max(12, hoveredNode.y - tooltipHeight / 2),
+                    GRAPH_HEIGHT - tooltipHeight - 12,
+                  );
+
+                  return (
+                    <g pointerEvents="none">
+                      <rect
+                        x={tooltipX}
+                        y={tooltipY}
+                        width={tooltipWidth}
+                        height={tooltipHeight}
+                        rx="12"
+                        fill="rgba(255,255,255,0.98)"
+                        stroke={
+                          hoveredNode.type === 'incoming'
+                            ? '#34d399'
+                            : '#fbbf24'
+                        }
+                        strokeWidth="1.5"
+                        filter="url(#dropShadow)"
+                      />
+                      {/* Tinted header strip — height matches wrapped label */}
+                      <rect
+                        x={tooltipX}
+                        y={tooltipY}
+                        width={tooltipWidth}
+                        height={headerBlockH}
+                        rx="12"
+                        fill={
+                          hoveredNode.type === 'incoming'
+                            ? 'rgba(16,185,129,0.14)'
+                            : 'rgba(245,158,11,0.16)'
+                        }
+                      />
+                      {/* Node name — wrapped into multiple tspan lines */}
+                      <text
+                        x={tooltipX + 12}
+                        y={tooltipY + 22}
+                        fontSize="12.5"
+                        fontWeight="700"
+                        fill="#111827"
+                      >
+                        {headerLines.map((line, i) => (
+                          <tspan
+                            key={`hl-${i}`}
+                            x={tooltipX + 12}
+                            dy={i === 0 ? 0 : LINE_H}
+                          >
+                            {line}
+                          </tspan>
+                        ))}
+                      </text>
+                      {/* Type badge pinned to top-right of header */}
+                      <text
+                        x={tooltipX + tooltipWidth - 12}
+                        y={tooltipY + 22}
+                        textAnchor="end"
+                        fontSize="10.5"
+                        fontWeight="600"
+                        fill={
+                          hoveredNode.type === 'incoming'
+                            ? '#047857'
+                            : '#b45309'
+                        }
+                      >
+                        {isFromNode ? 'From Node' : 'Next Node'}
+                      </text>
+                      <line
+                        x1={tooltipX + 12}
+                        y1={tooltipY + dividerOffsetY}
+                        x2={tooltipX + tooltipWidth - 12}
+                        y2={tooltipY + dividerOffsetY}
+                        stroke="rgba(148,163,184,0.35)"
+                      />
+                      {/* Row 1 label (may wrap) + right-anchored value on first line */}
+                      <text
+                        x={tooltipX + 12}
+                        y={tooltipY + row1OffsetY}
+                        fontSize="10.5"
+                        fill="#6b7280"
+                      >
+                        {secondaryLabelLines.map((line, i) => (
+                          <tspan
+                            key={`sl-${i}`}
+                            x={tooltipX + 12}
+                            dy={i === 0 ? 0 : LINE_H}
+                          >
+                            {line}
+                          </tspan>
+                        ))}
+                      </text>
+                      <text
+                        x={tooltipX + tooltipWidth - 12}
+                        y={tooltipY + row1OffsetY}
+                        textAnchor="end"
+                        fontSize="11"
+                        fontWeight="700"
+                        fill="#111827"
+                      >
+                        {secondaryValue}
+                      </text>
+                      {/* Row 2 label (may wrap) + right-anchored value on first line */}
+                      <text
+                        x={tooltipX + 12}
+                        y={tooltipY + row2OffsetY}
+                        fontSize="10.5"
+                        fill="#6b7280"
+                      >
+                        {pathLabelLines.map((line, i) => (
+                          <tspan
+                            key={`pl-${i}`}
+                            x={tooltipX + 12}
+                            dy={i === 0 ? 0 : LINE_H}
+                          >
+                            {line}
+                          </tspan>
+                        ))}
+                      </text>
+                      <text
+                        x={tooltipX + tooltipWidth - 12}
+                        y={tooltipY + row2OffsetY}
+                        textAnchor="end"
+                        fontSize="11"
+                        fontWeight="700"
+                        fill="#111827"
+                      >
+                        {pathValue}
+                      </text>
+                    </g>
+                  );
+                })()}
 
                 {/* Empty state indicators */}
                 {selectedNode.incomingFlows.length === 0 && (

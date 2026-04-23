@@ -201,6 +201,11 @@ function processJourneyData(
       clusterIds: Set<number>;
       dwellArrays: { dwell: number[]; count: number }[]; // Include entry count with each dwell array
       nodesList: string[]; // Store the collapsed nodes list
+      clusterDetails: {
+        clusterId: number;
+        dwellMins: number[];
+        entryCount: number;
+      }[]; // Individual cluster details
     }
   >();
 
@@ -212,12 +217,19 @@ function processJourneyData(
           clusterIds: new Set(),
           dwellArrays: [],
           nodesList: nodes,
+          clusterDetails: [],
         });
       }
 
       const entry = journeyMap.get(journeyKey)!;
       entry.totalFootfall += entryCount; // Sum entry counts, don't just count records
       entry.clusterIds.add(clusterId);
+      // Store individual cluster detail
+      entry.clusterDetails.push({
+        clusterId,
+        dwellMins: dwellMins.length > 0 ? dwellMins : nodes.map(() => 0),
+        entryCount,
+      });
       if (dwellMins.length > 0) {
         entry.dwellArrays.push({ dwell: dwellMins, count: entryCount });
       }
@@ -254,6 +266,7 @@ function processJourneyData(
       totalFootfall,
       avgDwellMins,
       clusterIds: Array.from(value.clusterIds),
+      clusterDetails: value.clusterDetails,
     });
   });
 
@@ -267,7 +280,13 @@ function processJourneyData(
   const nodeVisitCount = new Map<string, number>();
   const nodeDwellTimes = new Map<string, number[]>();
 
-  recordsToProcess.forEach(({ nodes, dwellMins, entryCount }) => {
+  // Unique customer tracking: cluster_id -> summed dwell time per node
+  // Key: nodeName, Value: Map<clusterId, totalDwellAtNode>
+  const nodeUniqueCustomerDwell = new Map<string, Map<number, number>>();
+  // Unique customer flow tracking: "source|||target" -> Set<clusterId>
+  const uniqueFlowCustomers = new Map<string, Set<number>>();
+
+  recordsToProcess.forEach(({ clusterId, nodes, dwellMins, entryCount }) => {
     // Track first and last nodes (weighted by entry count)
     if (nodes.length > 0) {
       nodeFirstCount.set(
@@ -281,6 +300,8 @@ function processJourneyData(
     }
 
     // Track visits and dwell times per node (weighted by entry count)
+    // Also track unique customer dwell times (summed per customer per node)
+    const customerNodeDwell = new Map<string, number>(); // node -> summed dwell for this journey
     nodes.forEach((node, idx) => {
       nodeVisitCount.set(node, (nodeVisitCount.get(node) || 0) + entryCount);
       if (!nodeDwellTimes.has(node)) {
@@ -291,8 +312,39 @@ function processJourneyData(
         for (let i = 0; i < entryCount; i++) {
           nodeDwellTimes.get(node)!.push(dwellMins[idx]);
         }
+        // Sum dwell time for this customer at this node in this journey
+        customerNodeDwell.set(
+          node,
+          (customerNodeDwell.get(node) || 0) + dwellMins[idx],
+        );
       }
     });
+
+    // Update unique customer tracking per node
+    customerNodeDwell.forEach((totalDwell, node) => {
+      if (!nodeUniqueCustomerDwell.has(node)) {
+        nodeUniqueCustomerDwell.set(node, new Map());
+      }
+      const customerMap = nodeUniqueCustomerDwell.get(node)!;
+      // Sum dwell times for the same customer across different journeys
+      customerMap.set(
+        clusterId,
+        (customerMap.get(clusterId) || 0) + totalDwell,
+      );
+    });
+
+    // Track unique customer flows between nodes
+    for (let i = 0; i < nodes.length - 1; i++) {
+      const source = nodes[i];
+      const target = nodes[i + 1];
+      if (source !== target) {
+        const key = `${source}|||${target}`;
+        if (!uniqueFlowCustomers.has(key)) {
+          uniqueFlowCustomers.set(key, new Set());
+        }
+        uniqueFlowCustomers.get(key)!.add(clusterId);
+      }
+    }
 
     // Generate pairs for flow analysis (consecutive different nodes after collapse)
     for (let i = 0; i < nodes.length - 1; i++) {
@@ -328,6 +380,25 @@ function processJourneyData(
       incomingFlows.set(target, new Map());
     }
     incomingFlows.get(target)!.set(source, count);
+  });
+
+  // Calculate unique customer incoming/outgoing flows per node
+  const uniqueIncomingFlows = new Map<string, Map<string, number>>();
+  const uniqueOutgoingFlows = new Map<string, Map<string, number>>();
+
+  uniqueFlowCustomers.forEach((customerSet, key) => {
+    const [source, target] = key.split('|||');
+    const uniqueCount = customerSet.size;
+
+    if (!uniqueOutgoingFlows.has(source)) {
+      uniqueOutgoingFlows.set(source, new Map());
+    }
+    uniqueOutgoingFlows.get(source)!.set(target, uniqueCount);
+
+    if (!uniqueIncomingFlows.has(target)) {
+      uniqueIncomingFlows.set(target, new Map());
+    }
+    uniqueIncomingFlows.get(target)!.set(source, uniqueCount);
   });
 
   // Build node stats
@@ -372,6 +443,46 @@ function processJourneyData(
       }))
       .sort((a, b) => b.count - a.count);
 
+    // Unique customer stats
+    const customerDwellMap = nodeUniqueCustomerDwell.get(nodeName) || new Map();
+    const uniqueCustomers = customerDwellMap.size;
+    const customerDwellValues = Array.from(customerDwellMap.values());
+    const avgDwellTimePerCustomer =
+      customerDwellValues.length > 0
+        ? customerDwellValues.reduce((a, b) => a + b, 0) /
+          customerDwellValues.length
+        : 0;
+
+    // Unique customer incoming flows
+    const uniqueIncoming = uniqueIncomingFlows.get(nodeName) || new Map();
+    const totalUniqueIncoming = Array.from(uniqueIncoming.values()).reduce(
+      (a, b) => a + b,
+      0,
+    );
+    const uniqueIncomingArr = Array.from(uniqueIncoming.entries())
+      .map(([source, count]) => ({
+        source,
+        count,
+        percentage:
+          totalUniqueIncoming > 0 ? (count / totalUniqueIncoming) * 100 : 0,
+      }))
+      .sort((a, b) => b.count - a.count);
+
+    // Unique customer outgoing flows
+    const uniqueOutgoing = uniqueOutgoingFlows.get(nodeName) || new Map();
+    const totalUniqueOutgoing = Array.from(uniqueOutgoing.values()).reduce(
+      (a, b) => a + b,
+      0,
+    );
+    const uniqueOutgoingArr = Array.from(uniqueOutgoing.entries())
+      .map(([target, count]) => ({
+        target,
+        count,
+        percentage:
+          totalUniqueOutgoing > 0 ? (count / totalUniqueOutgoing) * 100 : 0,
+      }))
+      .sort((a, b) => b.count - a.count);
+
     nodeStats.set(nodeName, {
       nodeName,
       totalVisits: visits,
@@ -384,6 +495,10 @@ function processJourneyData(
       incomingFlows: incomingArr,
       outgoingFlows: outgoingArr,
       avgDwellTime,
+      uniqueCustomers,
+      avgDwellTimePerCustomer,
+      uniqueIncomingFlows: uniqueIncomingArr,
+      uniqueOutgoingFlows: uniqueOutgoingArr,
     });
   });
 

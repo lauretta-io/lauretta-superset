@@ -11,6 +11,7 @@
         "db": "your_database_name",
         "timezone": "UTC"
       },
+      "dwell_time_threshold": 5,
       "floors": [
         {
           "id": 1,

@@ -2,7 +2,6 @@ import json, os, zipfile, yaml, subprocess, uuid, shutil, re, glob, string, rand
 
 CONFIG_PATH = "/app/lauretta/dashboards/config.json"
 
-
 def check_dashboard_exists(zip_path):
     """Check if the dashboard from the given ZIP has already been imported into Superset.
     Reads the dashboard UUID from the zip then queries the Dashboard model.
@@ -525,6 +524,377 @@ def create_default_chart_template(floor_name, floor_id, chart_id, dataset_uuid, 
         'dataset_uuid': dataset_uuid
     }
 
+
+def create_customer_journey_dataset_template(db_uuid, dwell_time_threshold=5):
+    """Create the Customer Journey Raw Data dataset template with configurable dwell time threshold."""
+    sql_template = f"""{{%set from_str = from_dttm | string if from_dttm else '' %}}
+{{%set to_str   = to_dttm   | string if to_dttm   else '' %}}
+{{%set f  = filter_values('floor_name') %}}
+{{%set p  = filter_values('property_name') %}}
+
+WITH pjs_filtered AS (
+    SELECT
+        pjs.cluster_id,
+        pjs.unit_id,
+        pjs.zone_id,
+        pjs.property_id,
+        pjs.travel_order,
+        pjs.dwell_mins
+    FROM person_journey_summary pjs
+    WHERE
+        pjs.unit_id IS NOT NULL
+        AND pjs.dwell_mins >= {dwell_time_threshold}
+        {{%if from_dttm %}}
+          AND pjs.journey_node_first_seen >= '{{{{ from_str.replace("T"," ") }}}}'::timestamptz
+        {{%else %}}
+          AND pjs.journey_node_first_seen >= (CURRENT_DATE - INTERVAL '1 month')::timestamptz
+        {{%endif %}}
+        {{%if to_dttm %}}
+          AND pjs.journey_node_last_seen  <  '{{{{ to_str.replace("T"," ") }}}}'::timestamptz
+        {{%else %}}
+          AND pjs.journey_node_last_seen  <  CURRENT_DATE::timestamptz
+        {{%endif %}}
+),
+clusters_qualified AS (
+    SELECT cluster_id
+    FROM pjs_filtered
+    GROUP BY cluster_id
+    HAVING COUNT(*) >= 3
+)
+SELECT
+    pf.cluster_id,
+    STRING_AGG(u.name,  ',' ORDER BY pf.travel_order) AS journey_nodes_unit,
+    STRING_AGG(ug.name, ',' ORDER BY pf.travel_order) AS journey_nodes_unit_group,
+    ARRAY_AGG(pf.dwell_mins ORDER BY pf.travel_order) AS dwell_mins_per_node
+FROM pjs_filtered pf
+JOIN clusters_qualified cq  ON cq.cluster_id        = pf.cluster_id
+JOIN units u                ON u.id                 = pf.unit_id
+JOIN unit_unit_group_mappings uugm ON uugm.unit_id  = u.id
+                                   AND uugm.deleted_at IS NULL
+JOIN unit_groups ug         ON ug.id                = uugm.unit_group_id
+JOIN zones z                ON z.id                 = pf.zone_id
+JOIN floors fl              ON fl.id                = z.floor_id
+JOIN properties pr          ON pr.id                = pf.property_id
+WHERE 1=1
+    {{%if f %}}
+      AND fl.name IN {{{{ f | where_in }}}}
+    {{%endif %}}
+    {{%if p %}}
+      AND pr.name IN {{{{ p | where_in }}}}
+    {{%endif %}}
+GROUP BY pf.cluster_id
+HAVING COUNT(*) >= 3"""
+
+    return {
+        'table_name': 'Customer Journey Raw Data',
+        'main_dttm_col': None,
+        'description': None,
+        'default_endpoint': None,
+        'offset': 0,
+        'cache_timeout': None,
+        'catalog': 'property',
+        'schema': 'property',
+        'sql': sql_template,
+        'params': None,
+        'template_params': None,
+        'filter_select_enabled': True,
+        'fetch_values_predicate': None,
+        'extra': None,
+        'normalize_columns': False,
+        'always_filter_main_dttm': False,
+        'uuid': generate_uuid(),
+        'metrics': [
+            {
+                'metric_name': 'count',
+                'verbose_name': 'COUNT(*)',
+                'metric_type': 'count',
+                'expression': 'COUNT(*)',
+                'description': None,
+                'd3format': None,
+                'currency': None,
+                'extra': {'warning_markdown': ''},
+                'warning_text': None
+            }
+        ],
+        'columns': [
+            {
+                'column_name': 'dwell_mins_per_node',
+                'verbose_name': None,
+                'is_dttm': False,
+                'is_active': True,
+                'type': 'FLOATARRAY',
+                'advanced_data_type': None,
+                'groupby': True,
+                'filterable': True,
+                'expression': None,
+                'description': None,
+                'python_date_format': None,
+                'extra': {}
+            },
+            {
+                'column_name': 'cluster_id',
+                'verbose_name': None,
+                'is_dttm': False,
+                'is_active': True,
+                'type': 'LONGINTEGER',
+                'advanced_data_type': None,
+                'groupby': True,
+                'filterable': True,
+                'expression': None,
+                'description': None,
+                'python_date_format': None,
+                'extra': {}
+            },
+            {
+                'column_name': 'journey_nodes_unit_group',
+                'verbose_name': None,
+                'is_dttm': False,
+                'is_active': True,
+                'type': 'STRING',
+                'advanced_data_type': None,
+                'groupby': True,
+                'filterable': True,
+                'expression': None,
+                'description': None,
+                'python_date_format': None,
+                'extra': {}
+            },
+            {
+                'column_name': 'journey_nodes_unit',
+                'verbose_name': None,
+                'is_dttm': False,
+                'is_active': True,
+                'type': 'STRING',
+                'advanced_data_type': None,
+                'groupby': True,
+                'filterable': True,
+                'expression': None,
+                'description': None,
+                'python_date_format': None,
+                'extra': {}
+            }
+        ],
+        'version': '1.0.0',
+        'database_uuid': db_uuid
+    }
+
+
+def create_store_journey_chart_template(chart_id, dataset_uuid):
+    """Create the Store Journey chart template."""
+    params = {
+        'datasource': '16__table',
+        'viz_type': 'ext-customer-journey',
+        'slice_id': chart_id,
+        'cols': ['cluster_id', 'dwell_mins_per_node', 'journey_nodes_unit', 'journey_nodes_unit_group'],
+        'journey_mode': 'unit',
+        'row_limit': 10000,
+        'extra_form_data': {},
+        'dashboards': []
+    }
+    
+    query_context = {
+        'datasource': {'type': 'table'},
+        'force': False,
+        'queries': [
+            {
+                'filters': [],
+                'extras': {'having': '', 'where': ''},
+                'applied_time_extras': {},
+                'columns': [],
+                'metrics': [],
+                'annotation_layers': [],
+                'row_limit': 10000,
+                'series_limit': 0,
+                'order_desc': True,
+                'url_params': {},
+                'custom_params': {},
+                'custom_form_data': {},
+                'groupby': ['cluster_id', 'dwell_mins_per_node', 'journey_nodes_unit', 'journey_nodes_unit_group']
+            }
+        ],
+        'form_data': {
+            'viz_type': 'ext-customer-journey',
+            'slice_id': chart_id,
+            'cols': ['cluster_id', 'dwell_mins_per_node', 'journey_nodes_unit', 'journey_nodes_unit_group'],
+            'journey_mode': 'unit',
+            'row_limit': 10000,
+            'extra_form_data': {},
+            'dashboards': [],
+            'force': False,
+            'result_format': 'json',
+            'result_type': 'full'
+        },
+        'result_format': 'json',
+        'result_type': 'full'
+    }
+    
+    return {
+        'slice_name': 'Store Journey',
+        'description': None,
+        'certified_by': None,
+        'certification_details': None,
+        'viz_type': 'ext-customer-journey',
+        'params': params,
+        'query_context': json.dumps(query_context),
+        'cache_timeout': None,
+        'uuid': generate_uuid(),
+        'version': '1.0.0',
+        'dataset_uuid': dataset_uuid
+    }
+
+
+def create_category_journey_chart_template(chart_id, dataset_uuid):
+    """Create the Category Journey chart template."""
+    params = {
+        'datasource': '16__table',
+        'viz_type': 'ext-customer-journey',
+        'slice_id': chart_id,
+        'cols': ['cluster_id', 'journey_nodes_unit_group', 'journey_nodes_unit', 'dwell_mins_per_node'],
+        'journey_mode': 'unit_group',
+        'row_limit': 10000,
+        'extra_form_data': {},
+        'dashboards': []
+    }
+    
+    query_context = {
+        'datasource': {'type': 'table'},
+        'force': False,
+        'queries': [
+            {
+                'filters': [],
+                'extras': {'having': '', 'where': ''},
+                'applied_time_extras': {},
+                'columns': [],
+                'metrics': [],
+                'annotation_layers': [],
+                'row_limit': 10000,
+                'series_limit': 0,
+                'order_desc': True,
+                'url_params': {},
+                'custom_params': {},
+                'custom_form_data': {},
+                'groupby': ['cluster_id', 'journey_nodes_unit_group', 'journey_nodes_unit', 'dwell_mins_per_node']
+            }
+        ],
+        'form_data': {
+            'viz_type': 'ext-customer-journey',
+            'slice_id': chart_id,
+            'cols': ['cluster_id', 'journey_nodes_unit_group', 'journey_nodes_unit', 'dwell_mins_per_node'],
+            'journey_mode': 'unit_group',
+            'row_limit': 10000,
+            'extra_form_data': {},
+            'dashboards': [],
+            'force': False,
+            'result_format': 'json',
+            'result_type': 'full'
+        },
+        'result_format': 'json',
+        'result_type': 'full'
+    }
+    
+    return {
+        'slice_name': 'Category Journey',
+        'description': None,
+        'certified_by': None,
+        'certification_details': None,
+        'viz_type': 'ext-customer-journey',
+        'params': params,
+        'query_context': json.dumps(query_context),
+        'cache_timeout': None,
+        'uuid': generate_uuid(),
+        'version': '1.0.0',
+        'dataset_uuid': dataset_uuid
+    }
+
+
+def generate_customer_journey_dataset(extract_dir, db_uuid, dwell_time_threshold=5):
+    """Generate the Customer Journey Raw Data dataset."""
+    datasets_dir = os.path.join(extract_dir, 'datasets', 'None')
+    os.makedirs(datasets_dir, exist_ok=True)
+    
+    # Remove existing Customer Journey datasets
+    if os.path.exists(datasets_dir):
+        for f in os.listdir(datasets_dir):
+            if 'Customer_Journey' in f and f.endswith('.yaml'):
+                old_file = os.path.join(datasets_dir, f)
+                os.remove(old_file)
+                print(f"🧹 Removed dataset: {f}")
+    
+    # Generate dataset
+    new_dataset = create_customer_journey_dataset_template(db_uuid, dwell_time_threshold)
+    
+    filename = "Customer_Journey_Raw_Data.yaml"
+    filepath = os.path.join(datasets_dir, filename)
+    
+    with open(filepath, 'w') as f:
+        yaml.dump(new_dataset, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+    
+    print(f"📊 Created Customer Journey dataset: {filename} (UUID: {new_dataset['uuid'][:8]}..., dwell_time_threshold: {dwell_time_threshold})")
+    
+    return {
+        'uuid': new_dataset['uuid'],
+        'table_name': new_dataset['table_name'],
+        'filename': filename
+    }
+
+
+def generate_customer_journey_charts(extract_dir, dataset_info, starting_chart_id=200):
+    """Generate Store Journey and Category Journey chart YAML files."""
+    charts_dir = os.path.join(extract_dir, 'charts')
+    os.makedirs(charts_dir, exist_ok=True)
+    
+    # Remove existing Customer Journey charts
+    if os.path.exists(charts_dir):
+        for f in os.listdir(charts_dir):
+            if ('Store_Journey' in f or 'Category_Journey' in f) and f.endswith('.yaml'):
+                old_file = os.path.join(charts_dir, f)
+                os.remove(old_file)
+                print(f"🧹 Removed chart: {f}")
+    
+    dataset_uuid = dataset_info['uuid']
+    created_charts = []
+    
+    # Create Store Journey chart
+    store_journey_chart_id = starting_chart_id
+    store_journey = create_store_journey_chart_template(store_journey_chart_id, dataset_uuid)
+    store_journey_filename = f"Store_Journey_{store_journey_chart_id}.yaml"
+    store_journey_filepath = os.path.join(charts_dir, store_journey_filename)
+    
+    with open(store_journey_filepath, 'w') as f:
+        yaml.dump(store_journey, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+    
+    created_charts.append({
+        'chart_name': 'Store Journey',
+        'uuid': store_journey['uuid'],
+        'slice_name': store_journey['slice_name'],
+        'chart_id': store_journey_chart_id,
+        'filename': store_journey_filename,
+        'component_id': f"CHART-{generate_chart_id()}"
+    })
+    print(f"📈 Created chart: {store_journey_filename} (UUID: {store_journey['uuid'][:8]}...)")
+    
+    # Create Category Journey chart
+    category_journey_chart_id = starting_chart_id + 1
+    category_journey = create_category_journey_chart_template(category_journey_chart_id, dataset_uuid)
+    category_journey_filename = f"Category_Journey_{category_journey_chart_id}.yaml"
+    category_journey_filepath = os.path.join(charts_dir, category_journey_filename)
+    
+    with open(category_journey_filepath, 'w') as f:
+        yaml.dump(category_journey, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+    
+    created_charts.append({
+        'chart_name': 'Category Journey',
+        'uuid': category_journey['uuid'],
+        'slice_name': category_journey['slice_name'],
+        'chart_id': category_journey_chart_id,
+        'filename': category_journey_filename,
+        'component_id': f"CHART-{generate_chart_id()}"
+    })
+    print(f"📈 Created chart: {category_journey_filename} (UUID: {category_journey['uuid'][:8]}...)")
+    
+    return created_charts
+
+
 def find_dashboard_file(extract_dir):
     """Find the dashboard YAML file."""
     dashboards_dir = os.path.join(extract_dir, 'dashboards')
@@ -785,12 +1155,15 @@ def update_dashboard_with_charts(extract_dir, created_charts):
                 config['crossFilters']['chartsInScope'] = update_charts_in_scope(charts_in_scope, new_chart_ids)
     
     # Update native_filter_configuration for specific filters to include new Map View tab
-    filter_names_to_expand = {'time_range', 'categories', 'stores'}
+    # Expand: time_range, property, floor, categories, stores — all except line_chart_time_range
+    filter_names_to_skip = {'line chart time range'}
 
     if 'native_filter_configuration' in metadata:
         for filter_config in metadata['native_filter_configuration']:
             filter_name = str(filter_config.get('name', '')).strip().lower()
-            if filter_name not in filter_names_to_expand:
+            filter_type = str(filter_config.get('type', '')).strip()
+            # Skip dividers and any explicitly excluded filters
+            if filter_type == 'DIVIDER' or filter_name in filter_names_to_skip:
                 continue
 
             # Expand scope.rootPath to include the new Map View tab
@@ -833,6 +1206,243 @@ def update_dashboard_with_charts(extract_dir, created_charts):
         yaml.dump(dashboard, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
     
     print(f"✅ Dashboard updated with {len(created_charts)} new floor map charts")
+    
+    return map_tab_id  # Return the map tab ID for reference
+
+
+def update_dashboard_with_customer_journey(extract_dir, journey_charts, map_tab_id=None):
+    """Update dashboard YAML to include Customer Journey tab next to Map View tab."""
+    dashboard_path = find_dashboard_file(extract_dir)
+    if not dashboard_path:
+        print("⚠️ No dashboard YAML found")
+        return
+    
+    with open(dashboard_path, 'r') as f:
+        dashboard = yaml.safe_load(f)
+    
+    position = dashboard.get('position', {})
+    
+    # Resolve ROOT / GRID IDs from position
+    root_id = 'ROOT_ID' if 'ROOT_ID' in position else None
+    grid_id = 'GRID_ID' if 'GRID_ID' in position else None
+
+    if not root_id:
+        for key, value in position.items():
+            if isinstance(value, dict) and value.get('type') == 'ROOT':
+                root_id = key
+                break
+
+    if not grid_id:
+        for key, value in position.items():
+            if isinstance(value, dict) and value.get('type') == 'GRID':
+                grid_id = key
+                break
+
+    if not root_id or not grid_id:
+        print("⚠️ Could not resolve ROOT/GRID in dashboard layout")
+        return
+
+    # Find the top-level tabs container under GRID
+    tabs_container_id = None
+    grid_children = position.get(grid_id, {}).get('children', [])
+
+    for child_id in grid_children:
+        child = position.get(child_id, {})
+        if isinstance(child, dict) and child.get('type') == 'TABS':
+            tabs_container_id = child_id
+            break
+
+    if not tabs_container_id:
+        for key, value in position.items():
+            if (
+                isinstance(value, dict)
+                and value.get('type') == 'TABS'
+                and value.get('parents', [])
+                and value.get('parents', [])[-1] == grid_id
+            ):
+                tabs_container_id = key
+                break
+
+    if not tabs_container_id:
+        print("⚠️ No tabs container found in dashboard")
+        return
+
+    tabs_parents = position.get(tabs_container_id, {}).get('parents', [root_id, grid_id])
+    tabs_children = position.get(tabs_container_id, {}).get('children', [])
+
+    # Find the Map View tab position to insert Customer Journey tab next to it
+    map_view_index = -1
+    for i, child_id in enumerate(tabs_children):
+        child = position.get(child_id, {})
+        if isinstance(child, dict) and child.get('meta', {}).get('text') == 'Map View':
+            map_view_index = i
+            break
+
+    # Create Customer Journey tab
+    journey_tab_id = f"TAB-{generate_chart_id()}"
+    journey_tab_parents = tabs_parents + [tabs_container_id]
+    position[journey_tab_id] = {
+        'children': [],
+        'id': journey_tab_id,
+        'meta': {'text': 'Customer Journey'},
+        'parents': journey_tab_parents,
+        'type': 'TAB'
+    }
+
+    # Insert Customer Journey tab right after Map View tab
+    if map_view_index >= 0:
+        tabs_children.insert(map_view_index + 1, journey_tab_id)
+    else:
+        tabs_children.append(journey_tab_id)
+    position[tabs_container_id]['children'] = tabs_children
+    print(f"🆕 Created Customer Journey tab: {journey_tab_id} (next to Map View)")
+
+    # Create a single row for both charts (side by side)
+    base_parents = journey_tab_parents + [journey_tab_id]
+    row_id = f"ROW-{generate_chart_id()}"
+    position[row_id] = {
+        'children': [],
+        'id': row_id,
+        'meta': {'background': 'BACKGROUND_TRANSPARENT'},
+        'parents': base_parents.copy(),
+        'type': 'ROW'
+    }
+    position[journey_tab_id]['children'] = [row_id]
+    print(f"📐 Created row for Customer Journey charts: {row_id}")
+
+    # Add journey charts to the row
+    new_chart_ids = []
+    for chart in journey_charts:
+        component_id = chart['component_id']
+        chart_parents = base_parents + [row_id]
+        position[component_id] = {
+            'children': [],
+            'id': component_id,
+            'meta': {
+                'chartId': chart['chart_id'],
+                'height': 66,
+                'sliceName': chart['slice_name'],
+                'uuid': chart['uuid'],
+                'width': 6
+            },
+            'parents': chart_parents,
+            'type': 'CHART'
+        }
+        position[row_id]['children'].append(component_id)
+        new_chart_ids.append(chart['chart_id'])
+        print(f"📊 Added Customer Journey chart: {chart['slice_name']} (chartId: {chart['chart_id']})")
+
+    # Update metadata chartsInScope arrays
+    metadata = dashboard.get('metadata', {})
+    
+    def update_charts_in_scope(charts_list, new_ids):
+        for chart_id in new_ids:
+            if chart_id not in charts_list:
+                charts_list.append(chart_id)
+        return charts_list
+    
+    # Update global_chart_configuration.chartsInScope
+    if 'global_chart_configuration' in metadata:
+        charts_in_scope = metadata['global_chart_configuration'].get('chartsInScope', [])
+        metadata['global_chart_configuration']['chartsInScope'] = update_charts_in_scope(charts_in_scope, new_chart_ids)
+    
+    # Update chart_configuration cross filters
+    if 'chart_configuration' in metadata:
+        for key, config in metadata['chart_configuration'].items():
+            if 'crossFilters' in config:
+                charts_in_scope = config['crossFilters'].get('chartsInScope', [])
+                config['crossFilters']['chartsInScope'] = update_charts_in_scope(charts_in_scope, new_chart_ids)
+    
+    # Update native_filter_configuration to include new Customer Journey tab
+    # Expand: time_range, property, floor. Skip line chart time range.
+    # Also explicitly remove Stores/Categories scope from Customer Journey tab.
+    filter_names_to_skip = {'line chart time range'}
+
+    if 'native_filter_configuration' in metadata:
+        for filter_config in metadata['native_filter_configuration']:
+            filter_name = str(filter_config.get('name', '')).strip().lower()
+            filter_type = str(filter_config.get('type', '')).strip()
+            # Skip dividers
+            if filter_type == 'DIVIDER':
+                continue
+
+            # Never scope Stores/Categories to Customer Journey tab.
+            if filter_name in {'stores', 'categories'}:
+                scope = filter_config.setdefault('scope', {})
+                root_path = scope.get('rootPath', [])
+                if isinstance(root_path, list):
+                    scope['rootPath'] = [item for item in root_path if item != journey_tab_id]
+                else:
+                    scope['rootPath'] = []
+
+                excluded = scope.get('excluded', [])
+                if isinstance(excluded, list):
+                    scope['excluded'] = [item for item in excluded if item != journey_tab_id]
+                else:
+                    scope['excluded'] = []
+
+                tabs_in_scope = filter_config.get('tabsInScope', [])
+                if isinstance(tabs_in_scope, list):
+                    filter_config['tabsInScope'] = [
+                        item for item in tabs_in_scope if item != journey_tab_id
+                    ]
+                else:
+                    filter_config['tabsInScope'] = []
+
+                charts_in_scope = filter_config.get('chartsInScope', [])
+                if isinstance(charts_in_scope, list):
+                    filter_config['chartsInScope'] = [
+                        chart_id for chart_id in charts_in_scope if chart_id not in new_chart_ids
+                    ]
+                else:
+                    filter_config['chartsInScope'] = []
+                continue
+
+            # Skip any other explicitly excluded filters
+            if filter_name in filter_names_to_skip:
+                continue
+
+            # Expand scope.rootPath to include the new Customer Journey tab
+            scope = filter_config.setdefault('scope', {})
+            root_path = scope.get('rootPath', [])
+            if not isinstance(root_path, list):
+                root_path = []
+            if journey_tab_id not in root_path:
+                root_path.append(journey_tab_id)
+            scope['rootPath'] = root_path
+
+            # Ensure tab is not excluded
+            excluded = scope.get('excluded', [])
+            if isinstance(excluded, list):
+                scope['excluded'] = [item for item in excluded if item != journey_tab_id]
+            else:
+                scope['excluded'] = []
+
+            # Expand tabsInScope to include the new Customer Journey tab
+            tabs_in_scope = filter_config.get('tabsInScope', [])
+            if not isinstance(tabs_in_scope, list):
+                tabs_in_scope = []
+            if journey_tab_id not in tabs_in_scope:
+                tabs_in_scope.append(journey_tab_id)
+            filter_config['tabsInScope'] = tabs_in_scope
+
+            # Expand chartsInScope to include new Customer Journey charts
+            charts_in_scope = filter_config.get('chartsInScope', [])
+            if not isinstance(charts_in_scope, list):
+                charts_in_scope = []
+            filter_config['chartsInScope'] = update_charts_in_scope(
+                charts_in_scope, new_chart_ids
+            )
+    
+    dashboard['position'] = position
+    dashboard['metadata'] = metadata
+    
+    # Write updated dashboard
+    with open(dashboard_path, 'w') as f:
+        yaml.dump(dashboard, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+    
+    print(f"✅ Dashboard updated with Customer Journey tab and {len(journey_charts)} charts")
+
 
 def update_database_yaml_credentials(extract_dir, conn_config, db_display_name, target_db_uuid, timezone=None):
     """Rewrite databases/*.yaml inside the extracted ZIP with real credentials
@@ -901,24 +1511,38 @@ def update_dataset_database_uuid(extract_dir, target_db_uuid):
     print(f"🔗 Updated database_uuid for {updated} dataset files")
 
 
-def process_floor_maps(zip_path, floors, db_uuid, conn_config=None, db_display_name=None, starting_chart_id=100, timezone=None):
-    """Process floor maps: generate datasets, charts, and update dashboard.
+def process_floor_maps(zip_path, floors, db_uuid, conn_config=None, db_display_name=None, starting_chart_id=100, timezone=None, dwell_time_threshold=5):
+    """Process floor maps and customer journey: generate datasets, charts, and update dashboard.
     Returns tuple: (new_zip_path, dataset_info, created_charts)"""
-    if not floors:
-        print("ℹ️ No floors configured, skipping floor map generation")
-        return None, None, []
+    
     # Find extraction directory
     extract_dir = find_extract_dir(zip_path)
     if not extract_dir:
         print("❌ Could not find or create extraction directory")
         return None, None, []
-    print(f"📂 Processing floor maps in: {extract_dir}")
-    # Generate single shared dataset
-    dataset_info = generate_floor_datasets(extract_dir, floors, db_uuid)
-    # Generate charts (all sharing the single dataset)
-    created_charts = generate_floor_charts(extract_dir, floors, dataset_info, starting_chart_id=starting_chart_id)
-    # Update dashboard
-    update_dashboard_with_charts(extract_dir, created_charts)
+    print(f"📂 Processing dashboard in: {extract_dir}")
+    
+    # Process floor maps if configured
+    if floors:
+        print(f"🗺️ Processing {len(floors)} floor maps...")
+        # Generate single shared dataset
+        dataset_info = generate_floor_datasets(extract_dir, floors, db_uuid)
+        # Generate charts (all sharing the single dataset)
+        created_charts = generate_floor_charts(extract_dir, floors, dataset_info, starting_chart_id=starting_chart_id)
+        # Update dashboard with floor map charts
+        map_tab_id = update_dashboard_with_charts(extract_dir, created_charts)
+    else:
+        print("ℹ️ No floors configured, skipping floor map generation")
+        dataset_info = None
+        created_charts = []
+        map_tab_id = None
+    
+    # Process Customer Journey components
+    print(f"🚶 Processing Customer Journey with dwell_time_threshold: {dwell_time_threshold}...")
+    journey_dataset_info = generate_customer_journey_dataset(extract_dir, db_uuid, dwell_time_threshold)
+    journey_charts = generate_customer_journey_charts(extract_dir, journey_dataset_info, starting_chart_id=starting_chart_id + 100)
+    update_dashboard_with_customer_journey(extract_dir, journey_charts, map_tab_id)
+    
     # Inject real database credentials into the ZIP before import
     if conn_config and db_display_name:
         update_database_yaml_credentials(extract_dir, conn_config, db_display_name, db_uuid, timezone=timezone)
@@ -1040,6 +1664,8 @@ def update_via_superset_shell():
 
         # Step 2: Check if dashboard already exists in DB — if so, only update connection
         floors = dash.get("floors", [])
+        dwell_time_threshold = dash.get("dwell_time_threshold", 5)
+        print(f"🚶 Dwell time threshold: {dwell_time_threshold} minutes")
 
         if check_dashboard_exists(zip_path):
             print("✅ Dashboard already exists in database — only updating database connection.")
@@ -1051,32 +1677,38 @@ def update_via_superset_shell():
         dataset_info = None
         created_charts = []
 
-        if floors:
-            print(f"🗺️ Processing {len(floors)} floor maps...")
-            starting_chart_id = 100 + dash_index * 1000
-            new_zip_path, dataset_info, created_charts = process_floor_maps(
-                zip_path, floors, target_db_uuid,
-                conn_config=conn_config, db_display_name=new_name,
-                starting_chart_id=starting_chart_id, timezone=timezone
-            )
-            if not new_zip_path:
-                continue
-        else:
-            print("ℹ️ No floors configured, patching database credentials only...")
-            extract_dir = find_extract_dir(zip_path)
-            if extract_dir:
-                update_database_yaml_credentials(extract_dir, conn_config, new_name, target_db_uuid, timezone=timezone)
-                update_dataset_database_uuid(extract_dir, target_db_uuid)
-                new_zip_path = rezip_dashboard_export(extract_dir, zip_path)
-            else:
-                print("❌ Could not extract ZIP for credential patching")
+        # Always process floor maps and customer journey (even if no floors)
+        print(f"🗺️ Processing dashboard components...")
+        starting_chart_id = 100 + dash_index * 1000
+        new_zip_path, dataset_info, created_charts = process_floor_maps(
+            zip_path, floors, target_db_uuid,
+            conn_config=conn_config, db_display_name=new_name,
+            starting_chart_id=starting_chart_id, timezone=timezone,
+            dwell_time_threshold=dwell_time_threshold
+        )
+        if not new_zip_path:
+            print("❌ Failed to process dashboard components")
+            continue
 
         # Step 3: Update database connection
         if not run_db_update():
             continue
 
         print(f"🚀 Importing Dashboard: {new_zip_path}")
-        subprocess.run(["superset", "import-dashboards", "-p", new_zip_path, "-u", "admin"])
+        result = subprocess.run(
+            ["superset", "import-dashboards", "-p", new_zip_path, "-u", "admin"],
+            capture_output=True,
+            text=True
+        )
+        if result.returncode != 0:
+            print(f"❌ Import failed with exit code {result.returncode}")
+            if result.stderr:
+                print(result.stderr)
+            continue
+        else:
+            print(f"✅ Dashboard imported successfully")
+            if result.stdout:
+                print(result.stdout)
 
         # Cleanup extracted folders and temp zip
         base_dir = os.path.dirname(zip_path)
