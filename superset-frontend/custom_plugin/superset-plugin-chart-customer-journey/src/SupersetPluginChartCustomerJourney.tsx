@@ -1688,7 +1688,7 @@ export default function SupersetPluginChartCustomerJourney(
     if (!searchQuery.trim()) return [];
     const query = searchQuery.toLowerCase();
     return allNodes
-      .filter(node => node.nodeName.toLowerCase().includes(query))
+      .filter(node => node.nodeName.toLowerCase().startsWith(query))
       .slice(0, 10);
   }, [allNodes, searchQuery]);
 
@@ -1715,9 +1715,9 @@ export default function SupersetPluginChartCustomerJourney(
         return true;
       }
 
-      // OR logic: include journey if at least one filter value matches.
+      // OR logic: include journey if at least one filter value matches exactly.
       return allFilters.some(filterValue =>
-        nodes.some(node => node.includes(filterValue)),
+        nodes.some(node => node === filterValue),
       );
     });
   }, [processedData, selectedItems, searchQuery]);
