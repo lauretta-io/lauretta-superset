@@ -234,7 +234,7 @@ const Styles = styled.div`
       padding: ${theme.gridUnit}px ${theme.gridUnit * 2}px;
       background: ${theme.colors.grayscale.light3};
       border-radius: ${theme.gridUnit}px;
-      color: ${theme.colors.grayscale.dark1};
+      color: ${theme.colors.primary.base};
       font-size: ${theme.typography.sizes.s}px;
       font-weight: ${theme.typography.weights.medium};
     }
@@ -462,6 +462,26 @@ const Styles = styled.div`
       color: ${theme.colors.grayscale.light1};
     }
 
+    .search-clear-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      align-self: center;
+      border: none;
+      background: transparent;
+      color: ${theme.colors.primary.base};
+      font-size: ${theme.typography.sizes.s}px;
+      font-weight: ${theme.typography.weights.medium};
+      cursor: pointer;
+      padding: ${theme.gridUnit}px;
+      white-space: nowrap;
+    }
+
+    .search-clear-btn:hover {
+      color: ${theme.colors.primary.dark1};
+      text-decoration: underline;
+    }
+
     .search-results {
       position: absolute;
       top: 100%;
@@ -517,49 +537,6 @@ const Styles = styled.div`
       margin-top: ${theme.gridUnit}px;
     }
 
-    /* Selected Items Panel */
-    .selected-items-panel {
-      margin-top: ${theme.gridUnit * 2}px;
-      padding: ${theme.gridUnit * 2}px;
-      background: white;
-      border: 1px solid ${theme.colors.grayscale.light2};
-      border-radius: ${theme.gridUnit}px;
-    }
-
-    .selected-items-header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      margin-bottom: ${theme.gridUnit * 2}px;
-    }
-
-    .selected-items-title {
-      font-size: ${theme.typography.sizes.s}px;
-      font-weight: ${theme.typography.weights.bold};
-      color: ${theme.colors.grayscale.dark1};
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-    }
-
-    .clear-all-btn {
-      background: transparent;
-      border: none;
-      color: ${theme.colors.primary.base};
-      font-size: ${theme.typography.sizes.s}px;
-      cursor: pointer;
-      padding: ${theme.gridUnit}px;
-    }
-
-    .clear-all-btn:hover {
-      text-decoration: underline;
-    }
-
-    .selected-items-tags {
-      display: flex;
-      flex-wrap: wrap;
-      gap: ${theme.gridUnit}px;
-    }
-
     .empty-state {
       text-align: center;
       padding: ${theme.gridUnit * 4}px;
@@ -604,36 +581,50 @@ export default function SupersetPluginChartCustomerJourney(
   const [selectedNodes, setSelectedNodes] = useState<string[]>([]);
   const [activeSearchIndex, setActiveSearchIndex] = useState(0);
 
-  // Filter journeys using AND condition
-  const filteredJourneys = useMemo(() => {
+  // Filter journeys using AND condition - all selected nodes must be present
+  const { availableNodes, topJourneys } = useMemo(() => {
     const journeys = processedData?.journeys || [];
+    const selectedNodesLower = selectedNodes.map(n => n.toLowerCase().trim());
 
+    // Step 1: Filter journeys
+    let filtered: ProcessedJourney[];
     if (selectedNodes.length === 0) {
-      return journeys;
+      // No filter - use all journeys
+      filtered = [...journeys];
+    } else {
+      // AND logic: journey must contain ALL selected nodes
+      filtered = journeys.filter(journey => {
+        const journeyNodesLower = journey.nodesList.map(n => n.toLowerCase().trim());
+        // Every selected node must exist in this journey
+        return selectedNodesLower.every(selectedNode =>
+          journeyNodesLower.some(jNode => jNode === selectedNode)
+        );
+      });
     }
 
-    // AND logic: journey must contain ALL selected nodes
-    return journeys.filter(journey => {
-      const journeyNodesLower = journey.nodesList.map(n => n.toLowerCase());
-      return selectedNodes.every(selectedNode =>
-        journeyNodesLower.some(n => n === selectedNode.toLowerCase()),
-      );
-    });
-  }, [processedData, selectedNodes]);
+    // Step 2: Sort by footfall descending
+    filtered.sort((a, b) => b.totalFootfall - a.totalFootfall);
 
-  const availableNodes = useMemo(() => {
-    const nodes = new Set<string>();
-
-    filteredJourneys.forEach(journey => {
+    // Step 3: Get available nodes for search (from filtered journeys, excluding already selected)
+    const nodesSet = new Set<string>();
+    filtered.forEach(journey => {
       journey.nodesList.forEach(node => {
-        if (!selectedNodes.includes(node)) {
-          nodes.add(node);
+        const nodeLower = node.toLowerCase().trim();
+        if (!selectedNodesLower.includes(nodeLower)) {
+          nodesSet.add(node);
         }
       });
     });
+    const available = Array.from(nodesSet).sort();
 
-    return Array.from(nodes).sort();
-  }, [filteredJourneys, selectedNodes]);
+    // Step 4: Get top N journeys
+    const top = filtered.slice(0, topSize);
+
+    return {
+      availableNodes: available,
+      topJourneys: top,
+    };
+  }, [processedData, selectedNodes, topSize]);
 
   const searchResults = useMemo(() => {
     if (!searchQuery.trim()) return [];
@@ -642,10 +633,6 @@ export default function SupersetPluginChartCustomerJourney(
       .filter(node => matchesSearchQuery(node, searchQuery))
       .slice(0, 10);
   }, [availableNodes, searchQuery]);
-
-  const topJourneys = useMemo(() => {
-    return filteredJourneys.slice(0, topSize);
-  }, [filteredJourneys, topSize]);
 
   useEffect(() => {
     setSelectedJourney(null);
@@ -676,7 +663,12 @@ export default function SupersetPluginChartCustomerJourney(
   }, [searchQuery, searchResults]);
 
   const handleSearchResultClick = (node: string) => {
-    setSelectedNodes(prev => (prev.includes(node) ? prev : [...prev, node]));
+    // Case-insensitive duplicate check
+    const nodeLower = node.toLowerCase().trim();
+    setSelectedNodes(prev => {
+      const alreadyExists = prev.some(n => n.toLowerCase().trim() === nodeLower);
+      return alreadyExists ? prev : [...prev, node];
+    });
     setSearchQuery('');
     setIsSearchFocused(false);
     setActiveSearchIndex(0);
@@ -685,10 +677,24 @@ export default function SupersetPluginChartCustomerJourney(
   const handleSearchInputKeyDown = (
     event: React.KeyboardEvent<HTMLInputElement>,
   ) => {
-    if (!isSearchFocused || !searchQuery.trim() || searchResults.length === 0) {
-      if (event.key === 'Escape') {
-        setIsSearchFocused(false);
-      }
+    // Handle Backspace to remove last selected node when input is empty
+    if (
+      (event.key === 'Backspace' || event.key === 'Delete') &&
+      !searchQuery &&
+      selectedNodes.length > 0
+    ) {
+      event.preventDefault();
+      setSelectedNodes(prev => prev.slice(0, -1));
+      return;
+    }
+
+    if (event.key === 'Escape') {
+      setIsSearchFocused(false);
+      return;
+    }
+
+    // For navigation/selection, only proceed if we have search results
+    if (!searchQuery.trim() || searchResults.length === 0) {
       return;
     }
 
@@ -783,6 +789,18 @@ export default function SupersetPluginChartCustomerJourney(
               onFocus={() => setIsSearchFocused(true)}
               onBlur={() => setTimeout(() => setIsSearchFocused(false), 200)}
             />
+            {selectedNodes.length > 0 && (
+              <button
+                type="button"
+                className="search-clear-btn"
+                onClick={event => {
+                  event.stopPropagation();
+                  handleClearAllSelected();
+                }}
+              >
+                Clear
+              </button>
+            )}
           </div>
           {isSearchFocused && searchQuery.trim() && (
             <div className="search-results">
@@ -813,36 +831,6 @@ export default function SupersetPluginChartCustomerJourney(
             Filter journeys containing ALL selected locations
           </div>
         </div>
-
-        {/* Selected Items Panel */}
-        {selectedNodes.length > 0 && (
-          <div className="selected-items-panel">
-            <div className="selected-items-header">
-              <span className="selected-items-title">
-                Filter by ({selectedNodes.length})
-              </span>
-              <button
-                className="clear-all-btn"
-                onClick={handleClearAllSelected}
-              >
-                Clear All
-              </button>
-            </div>
-            <div className="selected-items-tags">
-              {selectedNodes.map(node => (
-                <span key={node} className="search-tag">
-                  {node}
-                  <button
-                    className="search-tag-remove"
-                    onClick={() => handleRemoveSelectedNode(node)}
-                  >
-                    ×
-                  </button>
-                </span>
-              ))}
-            </div>
-          </div>
-        )}
       </div>
 
       <div className="table-wrapper">
@@ -863,7 +851,7 @@ export default function SupersetPluginChartCustomerJourney(
               </tr>
             ) : (
               topJourneys.map((journey, index) => (
-                <tr key={journey.journeyNodes}>
+                <tr key={`journey-${index}-${journey.journeyNodes}`}>
                   <td className="rank-cell">
                     <span className={getRankClass(index + 1)}>{index + 1}</span>
                   </td>

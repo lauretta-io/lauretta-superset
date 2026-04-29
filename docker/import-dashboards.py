@@ -907,7 +907,7 @@ def update_dataset_database_uuid(extract_dir, target_db_uuid):
     print(f"🔗 Updated database_uuid for {updated} dataset files")
 
 
-def process_floor_maps(zip_path, floors, db_uuid, conn_config=None, db_display_name=None, starting_chart_id=100, timezone=None, dwell_time_threshold=5):
+def process_floor_maps(zip_path, floors, db_uuid, conn_config=None, db_display_name=None, starting_chart_id=100, timezone=None):
     """Process floor maps: generate datasets, charts, and update dashboard.
     Returns tuple: (new_zip_path, dataset_info, created_charts)"""
     
@@ -1057,8 +1057,6 @@ def update_via_superset_shell():
 
         # Step 2: Check if dashboard already exists in DB — if so, only update connection
         floors = dash.get("floors", [])
-        dwell_time_threshold = dash.get("dwell_time_threshold", 5)
-        print(f"🚶 Dwell time threshold: {dwell_time_threshold} minutes")
 
         if check_dashboard_exists(zip_path):
             print("✅ Dashboard already exists in database — only updating database connection.")
@@ -1076,8 +1074,7 @@ def update_via_superset_shell():
         new_zip_path, dataset_info, created_charts = process_floor_maps(
             zip_path, floors, target_db_uuid,
             conn_config=conn_config, db_display_name=new_name,
-            starting_chart_id=starting_chart_id, timezone=timezone,
-            dwell_time_threshold=dwell_time_threshold
+            starting_chart_id=starting_chart_id, timezone=timezone
         )
         if not new_zip_path:
             print("❌ Failed to process dashboard components")
