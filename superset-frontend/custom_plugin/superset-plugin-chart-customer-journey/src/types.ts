@@ -16,44 +16,20 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import {
-  QueryFormData,
-  supersetTheme,
-  TimeseriesDataRecord,
-} from '@superset-ui/core';
+import { QueryFormData } from '@superset-ui/core';
 
 export interface SupersetPluginChartCustomerJourneyStylesProps {
   height: number;
   width: number;
-  headerFontSize: keyof typeof supersetTheme.typography.sizes;
-  boldText: boolean;
-}
-
-interface SupersetPluginChartCustomerJourneyCustomizeProps {
-  headerText: string;
 }
 
 export type SupersetPluginChartCustomerJourneyQueryFormData = QueryFormData &
-  SupersetPluginChartCustomerJourneyStylesProps &
-  SupersetPluginChartCustomerJourneyCustomizeProps;
-
-// Journey display mode
-export type JourneyMode = 'unit' | 'unit_group';
+  SupersetPluginChartCustomerJourneyStylesProps;
 
 // Raw data record from query
 export interface RawJourneyRecord {
-  cluster_id: number;
-  journey_nodes_unit: string;
-  journey_nodes_unit_group: string;
-  dwell_mins_per_node: string;
-  entry_count?: number; // Footfall count for this journey record
-}
-
-// Individual cluster journey detail
-export interface ClusterJourneyDetail {
-  clusterId: number;
-  dwellMins: number[];
-  entryCount: number;
+  journey_nodes: string;
+  total_footfall: number;
 }
 
 // Processed journey with aggregated data
@@ -61,48 +37,16 @@ export interface ProcessedJourney {
   journeyNodes: string;
   nodesList: string[];
   totalFootfall: number;
-  avgDwellMins: number[];
-  clusterIds: number[];
-  clusterDetails: ClusterJourneyDetail[];
-}
-
-// Flow pair for source-target analysis
-export interface FlowPair {
-  source: string;
-  target: string;
-  count: number;
-}
-
-// Node statistics for individual node analysis
-export interface NodeStats {
-  nodeName: string;
-  totalVisits: number;
-  asFirstNode: number;
-  asLastNode: number;
-  firstNodePercentage: number;
-  lastNodePercentage: number;
-  incomingFlows: { source: string; count: number; percentage: number }[];
-  outgoingFlows: { target: string; count: number; percentage: number }[];
-  avgDwellTime: number;
-  // Unique customer statistics
-  uniqueCustomers: number;
-  avgDwellTimePerCustomer: number;
-  uniqueIncomingFlows: { source: string; count: number; percentage: number }[];
-  uniqueOutgoingFlows: { target: string; count: number; percentage: number }[];
 }
 
 // All processed data passed to the component
 export interface ProcessedData {
   journeys: ProcessedJourney[];
-  flowPairs: FlowPair[];
-  nodeStats: Map<string, NodeStats>;
-  totalJourneys: number;
+  uniqueNodes: string[];
 }
 
 export type SupersetPluginChartCustomerJourneyProps =
-  SupersetPluginChartCustomerJourneyStylesProps &
-    SupersetPluginChartCustomerJourneyCustomizeProps & {
-      data: TimeseriesDataRecord[];
-      processedData: ProcessedData;
-      journeyMode: JourneyMode;
-    };
+  SupersetPluginChartCustomerJourneyStylesProps & {
+    processedData: ProcessedData;
+    topSize: number;
+  };

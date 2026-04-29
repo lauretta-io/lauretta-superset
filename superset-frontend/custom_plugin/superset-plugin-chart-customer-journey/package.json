@@ -26,9 +26,6 @@
   "publishConfig": {
     "access": "public"
   },
-  "dependencies": {
-    "react-zoom-pan-pinch": "^2.6.1"
-  },
   "peerDependencies": {
     "@airbnb/config-babel": "^2.0.1",
     "@superset-ui/chart-controls": "*",
