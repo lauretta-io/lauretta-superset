@@ -32,7 +32,7 @@ const config: ControlPanelConfig = {
           {
             name: 'cols',
             config: {
-              ...sharedControls.groupby,
+              ...sharedControls.columns,
               label: t('Columns'),
               description: t('Columns to group by'),
               validators: [validateNonEmpty],

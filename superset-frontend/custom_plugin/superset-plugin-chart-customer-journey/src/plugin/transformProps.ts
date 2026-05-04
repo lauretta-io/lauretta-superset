@@ -60,7 +60,7 @@ function processJourneyData(rawData: RawJourneyRecord[]): ProcessedData {
 
   rawData.forEach(record => {
     const nodesList = parseNodeList(record.journey_nodes);
-    const totalFootfall = record.total_footfall || 1;
+    const journeyCount = Number(record.journey_count);
 
     if (nodesList.length === 0) return;
 
@@ -69,14 +69,14 @@ function processJourneyData(rawData: RawJourneyRecord[]): ProcessedData {
     journeys.push({
       journeyNodes: journeyKey,
       nodesList,
-      totalFootfall,
+      journeyCount: Number.isFinite(journeyCount) ? journeyCount : 0,
     });
 
     nodesList.forEach(node => uniqueNodesSet.add(node));
   });
 
-  // Sort journeys by footfall descending
-  journeys.sort((a, b) => b.totalFootfall - a.totalFootfall);
+  // Sort journeys by count descending
+  journeys.sort((a, b) => b.journeyCount - a.journeyCount);
 
   return {
     journeys,

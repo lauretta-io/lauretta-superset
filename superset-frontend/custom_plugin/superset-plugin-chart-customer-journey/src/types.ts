@@ -29,14 +29,14 @@ export type SupersetPluginChartCustomerJourneyQueryFormData = QueryFormData &
 // Raw data record from query
 export interface RawJourneyRecord {
   journey_nodes: string;
-  total_footfall: number;
+  journey_count: number | string;
 }
 
 // Processed journey with aggregated data
 export interface ProcessedJourney {
   journeyNodes: string;
   nodesList: string[];
-  totalFootfall: number;
+  journeyCount: number;
 }
 
 // All processed data passed to the component

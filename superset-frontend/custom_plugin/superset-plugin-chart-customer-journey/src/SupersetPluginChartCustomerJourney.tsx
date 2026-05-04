@@ -18,10 +18,16 @@
  */
 import React, { useEffect, useMemo, useState } from 'react';
 import { css, styled } from '@superset-ui/core';
-import { SupersetPluginChartCustomerJourneyProps, ProcessedJourney } from './types';
+import {
+  SupersetPluginChartCustomerJourneyProps,
+  ProcessedJourney,
+} from './types';
 
 function normalizeSearchValue(value: string): string {
-  return value.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
 }
 
 function getEditDistance(source: string, target: string): number {
@@ -594,16 +600,18 @@ export default function SupersetPluginChartCustomerJourney(
     } else {
       // AND logic: journey must contain ALL selected nodes
       filtered = journeys.filter(journey => {
-        const journeyNodesLower = journey.nodesList.map(n => n.toLowerCase().trim());
+        const journeyNodesLower = journey.nodesList.map(n =>
+          n.toLowerCase().trim(),
+        );
         // Every selected node must exist in this journey
         return selectedNodesLower.every(selectedNode =>
-          journeyNodesLower.some(jNode => jNode === selectedNode)
+          journeyNodesLower.some(jNode => jNode === selectedNode),
         );
       });
     }
 
-    // Step 2: Sort by footfall descending
-    filtered.sort((a, b) => b.totalFootfall - a.totalFootfall);
+    // Step 2: Sort by journey count descending
+    filtered.sort((a, b) => b.journeyCount - a.journeyCount);
 
     // Step 3: Get available nodes for search (from filtered journeys, excluding already selected)
     const nodesSet = new Set<string>();
@@ -666,7 +674,9 @@ export default function SupersetPluginChartCustomerJourney(
     // Case-insensitive duplicate check
     const nodeLower = node.toLowerCase().trim();
     setSelectedNodes(prev => {
-      const alreadyExists = prev.some(n => n.toLowerCase().trim() === nodeLower);
+      const alreadyExists = prev.some(
+        n => n.toLowerCase().trim() === nodeLower,
+      );
       return alreadyExists ? prev : [...prev, node];
     });
     setSearchQuery('');
@@ -808,8 +818,9 @@ export default function SupersetPluginChartCustomerJourney(
                 searchResults.map((node, index) => (
                   <div
                     key={node}
-                    className={`search-result-item ${activeSearchIndex === index ? 'active' : ''
-                      }`}
+                    className={`search-result-item ${
+                      activeSearchIndex === index ? 'active' : ''
+                    }`}
                     onClick={() => handleSearchResultClick(node)}
                     role="button"
                     tabIndex={0}
@@ -838,7 +849,7 @@ export default function SupersetPluginChartCustomerJourney(
           <thead>
             <tr>
               <th className="rank-cell">Rank</th>
-              <th className="footfall-cell">Total Footfall</th>
+              <th className="footfall-cell">Journey Count</th>
               <th>Journey Path</th>
             </tr>
           </thead>
@@ -866,7 +877,7 @@ export default function SupersetPluginChartCustomerJourney(
                       >
                         <path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z" />
                       </svg>
-                      {journey.totalFootfall.toLocaleString()}
+                      {journey.journeyCount.toLocaleString()}
                     </div>
                   </td>
                   <td>
@@ -884,9 +895,7 @@ export default function SupersetPluginChartCustomerJourney(
                           {nodeIndex > 0 && (
                             <span className="node-arrow">→</span>
                           )}
-                          <span className="node-chip">
-                            {node}
-                          </span>
+                          <span className="node-chip">{node}</span>
                         </React.Fragment>
                       ))}
                       {journey.nodesList.length > 3 && (
@@ -918,10 +927,15 @@ export default function SupersetPluginChartCustomerJourney(
             </div>
             <div className="modal-body">
               <div className="footfall-pill">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                <svg
+                  width="16"
+                  height="16"
+                  viewBox="0 0 24 24"
+                  fill="currentColor"
+                >
                   <path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z" />
                 </svg>
-                Total Footfall: {selectedJourney.totalFootfall.toLocaleString()}
+                Journey Count: {selectedJourney.journeyCount.toLocaleString()}
               </div>
               <div className="journey-path">
                 {selectedJourney.nodesList.map((node, index) => (

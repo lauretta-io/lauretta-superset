@@ -436,7 +436,7 @@ def create_default_chart_template(floor_name, floor_id, chart_id, dataset_uuid, 
     adhoc_filters = [
         {
             'expressionType': 'SIMPLE',
-            'subject': 'datestamp',
+            'subject': 'event_time',
             'operator': 'TEMPORAL_RANGE',
             'comparator': 'Last day',
             'clause': 'WHERE',
@@ -476,7 +476,7 @@ def create_default_chart_template(floor_name, floor_id, chart_id, dataset_uuid, 
         'queries': [
             {
                 'filters': [
-                    {'col': 'datestamp', 'op': 'TEMPORAL_RANGE', 'val': 'Last day'},
+                    {'col': 'event_time', 'op': 'TEMPORAL_RANGE', 'val': 'Last day'},
                     {'col': 'floor_id', 'op': '==', 'val': str(floor_id)}
                 ],
                 'extras': {'having': '', 'where': ''},
