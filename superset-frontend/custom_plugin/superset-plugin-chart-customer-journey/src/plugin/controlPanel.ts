@@ -55,7 +55,10 @@ const config: ControlPanelConfig = {
         [
           {
             name: 'row_limit',
-            config: sharedControls.row_limit,
+            config: {
+              ...sharedControls.row_limit,
+              default: 50000,
+            },
           },
         ],
       ],
