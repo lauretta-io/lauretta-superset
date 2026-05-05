@@ -26,21 +26,21 @@ describe('SupersetPluginChartCustomerJourney transformProps', () => {
     granularity_sqla: 'ds',
     metric: 'sum__num',
     series: 'name',
-    boldText: true,
-    headerFontSize: 'xs',
-    headerText: 'my text',
+    topSize: 20,
   };
 
   const mockJourneyData = [
     {
-      cluster_id: 537789325,
       journey_nodes: 'Store A,Store B,Store C',
-      dwell_mins_per_node: '[10, 20, 30]',
+      journey_count: 150,
     },
     {
-      cluster_id: 537787883,
-      journey_nodes: 'Store A,Store B,Store C',
-      dwell_mins_per_node: '[15, 25, 35]',
+      journey_nodes: 'Store A,Store D',
+      journey_count: 80,
+    },
+    {
+      journey_nodes: 'Store B,Store C,Store D,Store E',
+      journey_count: 45,
     },
   ];
 
@@ -61,31 +61,78 @@ describe('SupersetPluginChartCustomerJourney transformProps', () => {
 
     expect(result.width).toEqual(800);
     expect(result.height).toEqual(600);
-    expect(result.boldText).toEqual(true);
-    expect(result.headerFontSize).toEqual('xs');
-    expect(result.headerText).toEqual('my text');
+    expect(result.topSize).toEqual(20);
     expect(result.processedData).toBeDefined();
-    expect(result.processedData.journeys).toHaveLength(1);
-    expect(result.processedData.journeys[0].totalFootfall).toEqual(2);
+    expect(result.processedData.journeys).toHaveLength(3);
   });
 
-  it('should calculate average dwell times correctly', () => {
+  it('should parse journey nodes correctly', () => {
     const result = transformProps(chartProps);
-    const journey = result.processedData.journeys[0];
+    const firstJourney = result.processedData.journeys[0];
 
-    expect(journey.avgDwellMins[0]).toEqual(12.5); // (10 + 15) / 2
-    expect(journey.avgDwellMins[1]).toEqual(22.5); // (20 + 25) / 2
-    expect(journey.avgDwellMins[2]).toEqual(32.5); // (30 + 35) / 2
+    expect(firstJourney.nodesList).toEqual(['Store A', 'Store B', 'Store C']);
+    expect(firstJourney.journeyNodes).toEqual('Store A, Store B, Store C');
+    expect(firstJourney.journeyCount).toEqual(150);
   });
 
-  it('should generate flow pairs correctly', () => {
+  it('should sort journeys by journey count descending', () => {
     const result = transformProps(chartProps);
+    const journeys = result.processedData.journeys;
 
-    expect(result.processedData.flowPairs.length).toBeGreaterThan(0);
-    expect(
-      result.processedData.flowPairs.some(
-        p => p.source === 'Store A' && p.target === 'Store B',
-      ),
-    ).toBe(true);
+    expect(journeys[0].journeyCount).toEqual(150);
+    expect(journeys[1].journeyCount).toEqual(80);
+    expect(journeys[2].journeyCount).toEqual(45);
+  });
+
+  it('should collect unique nodes', () => {
+    const result = transformProps(chartProps);
+    const uniqueNodes = result.processedData.uniqueNodes;
+
+    expect(uniqueNodes).toContain('Store A');
+    expect(uniqueNodes).toContain('Store B');
+    expect(uniqueNodes).toContain('Store C');
+    expect(uniqueNodes).toContain('Store D');
+    expect(uniqueNodes).toContain('Store E');
+    expect(uniqueNodes).toHaveLength(5);
+  });
+
+  it('should handle JSON array format for journey_nodes', () => {
+    const jsonArrayData = [
+      {
+        journey_nodes: '["Zone 1", "Zone 2", "Zone 3"]',
+        journey_count: 100,
+      },
+    ];
+
+    const jsonChartProps = new ChartProps({
+      formData,
+      width: 800,
+      height: 600,
+      theme: supersetTheme,
+      queriesData: [{ data: jsonArrayData }],
+    });
+
+    const result = transformProps(jsonChartProps);
+    expect(result.processedData.journeys[0].nodesList).toEqual([
+      'Zone 1',
+      'Zone 2',
+      'Zone 3',
+    ]);
+  });
+
+  it('should use default topSize when not provided', () => {
+    const noTopSizeFormData = { ...formData };
+    delete (noTopSizeFormData as Record<string, unknown>).topSize;
+
+    const noTopSizeChartProps = new ChartProps({
+      formData: noTopSizeFormData,
+      width: 800,
+      height: 600,
+      theme: supersetTheme,
+      queriesData: [{ data: mockJourneyData }],
+    });
+
+    const result = transformProps(noTopSizeChartProps);
+    expect(result.topSize).toEqual(20);
   });
 });

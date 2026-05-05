@@ -28,7 +28,7 @@ export type SupersetPluginChartCustomerJourneyQueryFormData = QueryFormData &
 
 // Raw data record from query
 export interface RawJourneyRecord {
-  journey_nodes: string;
+  journey_nodes: unknown;
   journey_count: number | string;
 }
 

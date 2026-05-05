@@ -16,7 +16,7 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { ChartProps, TimeseriesDataRecord } from '@superset-ui/core';
+import { ChartProps } from '@superset-ui/core';
 import { RawJourneyRecord, ProcessedJourney, ProcessedData } from '../types';
 
 function parseNodeList(rawNodes: unknown): string[] {
@@ -107,17 +107,13 @@ function parseTopSize(value: unknown, fallback = 20): number {
 
 export default function transformProps(chartProps: ChartProps) {
   const { width, height, formData, queriesData } = chartProps;
-  const data = queriesData[0].data as TimeseriesDataRecord[];
-
-  const rawTopSize =
-    (formData as Record<string, unknown>).topSize ??
-    (formData as Record<string, unknown>).top_size;
+  const data = queriesData[0].data as RawJourneyRecord[];
+  const formDataRecord = formData as Record<string, unknown>;
+  const rawTopSize = formDataRecord.topSize ?? formDataRecord.top_size;
 
   const topSize = parseTopSize(rawTopSize, 20);
 
-  const processedData = processJourneyData(
-    data as unknown as RawJourneyRecord[],
-  );
+  const processedData = processJourneyData(data);
 
   return {
     width,

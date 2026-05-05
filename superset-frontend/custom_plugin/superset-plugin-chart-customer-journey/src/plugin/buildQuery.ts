@@ -16,7 +16,11 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { buildQueryContext, QueryFormData } from '@superset-ui/core';
+import {
+  buildQueryContext,
+  QueryFormData,
+  QueryObject,
+} from '@superset-ui/core';
 
 /**
  * The buildQuery function is used to create an instance of QueryContext that's
@@ -35,7 +39,7 @@ import { buildQueryContext, QueryFormData } from '@superset-ui/core';
 export default function buildQuery(formData: QueryFormData) {
   const columns = Array.isArray(formData.cols) ? formData.cols : [];
 
-  return buildQueryContext(formData, (baseQueryObject: any) => [
+  return buildQueryContext(formData, (baseQueryObject: QueryObject) => [
     {
       ...baseQueryObject,
       query_mode: 'raw',
