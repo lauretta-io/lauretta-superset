@@ -26,6 +26,7 @@ x-superset-volumes:
   - ./docker:/app/docker
   - superset_home:/app/superset_home
   - ./lauretta:/app/lauretta
+  - ./lauretta/branding:/app/superset/static/assets/branding
 
 x-common-build: &common-build
   context: .

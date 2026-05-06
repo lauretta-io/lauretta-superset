@@ -30,6 +30,7 @@ x-superset-volumes: &superset-volumes
   - superset_home:/app/superset_home
   - ./tests:/app/tests
   - ./lauretta:/app/lauretta
+  - ./lauretta/branding:/app/superset/static/assets/branding
 
 x-common-build: &common-build
   context: .
