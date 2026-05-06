@@ -2,7 +2,6 @@ import json, os, zipfile, yaml, subprocess, uuid, shutil, re, glob, string, rand
 
 CONFIG_PATH = "/app/lauretta/dashboards/config.json"
 
-
 def check_dashboard_exists(zip_path):
     """Check if the dashboard from the given ZIP has already been imported into Superset.
     Reads the dashboard UUID from the zip then queries the Dashboard model.
@@ -437,7 +436,7 @@ def create_default_chart_template(floor_name, floor_id, chart_id, dataset_uuid, 
     adhoc_filters = [
         {
             'expressionType': 'SIMPLE',
-            'subject': 'datestamp',
+            'subject': 'event_time',
             'operator': 'TEMPORAL_RANGE',
             'comparator': 'Last day',
             'clause': 'WHERE',
@@ -477,7 +476,7 @@ def create_default_chart_template(floor_name, floor_id, chart_id, dataset_uuid, 
         'queries': [
             {
                 'filters': [
-                    {'col': 'datestamp', 'op': 'TEMPORAL_RANGE', 'val': 'Last day'},
+                    {'col': 'event_time', 'op': 'TEMPORAL_RANGE', 'val': 'Last day'},
                     {'col': 'floor_id', 'op': '==', 'val': str(floor_id)}
                 ],
                 'extras': {'having': '', 'where': ''},
@@ -524,6 +523,7 @@ def create_default_chart_template(floor_name, floor_id, chart_id, dataset_uuid, 
         'version': '1.0.0',
         'dataset_uuid': dataset_uuid
     }
+
 
 def find_dashboard_file(extract_dir):
     """Find the dashboard YAML file."""
@@ -785,12 +785,15 @@ def update_dashboard_with_charts(extract_dir, created_charts):
                 config['crossFilters']['chartsInScope'] = update_charts_in_scope(charts_in_scope, new_chart_ids)
     
     # Update native_filter_configuration for specific filters to include new Map View tab
-    filter_names_to_expand = {'time_range', 'categories', 'stores'}
+    # Expand: time_range, property, floor, categories, stores — all except line_chart_time_range
+    filter_names_to_skip = {'line chart time range'}
 
     if 'native_filter_configuration' in metadata:
         for filter_config in metadata['native_filter_configuration']:
             filter_name = str(filter_config.get('name', '')).strip().lower()
-            if filter_name not in filter_names_to_expand:
+            filter_type = str(filter_config.get('type', '')).strip()
+            # Skip dividers and any explicitly excluded filters
+            if filter_type == 'DIVIDER' or filter_name in filter_names_to_skip:
                 continue
 
             # Expand scope.rootPath to include the new Map View tab
@@ -833,6 +836,9 @@ def update_dashboard_with_charts(extract_dir, created_charts):
         yaml.dump(dashboard, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
     
     print(f"✅ Dashboard updated with {len(created_charts)} new floor map charts")
+    
+    return map_tab_id  # Return the map tab ID for reference
+
 
 def update_database_yaml_credentials(extract_dir, conn_config, db_display_name, target_db_uuid, timezone=None):
     """Rewrite databases/*.yaml inside the extracted ZIP with real credentials
@@ -904,21 +910,32 @@ def update_dataset_database_uuid(extract_dir, target_db_uuid):
 def process_floor_maps(zip_path, floors, db_uuid, conn_config=None, db_display_name=None, starting_chart_id=100, timezone=None):
     """Process floor maps: generate datasets, charts, and update dashboard.
     Returns tuple: (new_zip_path, dataset_info, created_charts)"""
-    if not floors:
-        print("ℹ️ No floors configured, skipping floor map generation")
-        return None, None, []
+    
     # Find extraction directory
     extract_dir = find_extract_dir(zip_path)
     if not extract_dir:
         print("❌ Could not find or create extraction directory")
         return None, None, []
-    print(f"📂 Processing floor maps in: {extract_dir}")
-    # Generate single shared dataset
-    dataset_info = generate_floor_datasets(extract_dir, floors, db_uuid)
-    # Generate charts (all sharing the single dataset)
-    created_charts = generate_floor_charts(extract_dir, floors, dataset_info, starting_chart_id=starting_chart_id)
-    # Update dashboard
-    update_dashboard_with_charts(extract_dir, created_charts)
+    print(f"📂 Processing dashboard in: {extract_dir}")
+    
+    # Process floor maps if configured
+    if floors:
+        print(f"🗺️ Processing {len(floors)} floor maps...")
+        # Generate single shared dataset
+        dataset_info = generate_floor_datasets(extract_dir, floors, db_uuid)
+        # Generate charts (all sharing the single dataset)
+        created_charts = generate_floor_charts(extract_dir, floors, dataset_info, starting_chart_id=starting_chart_id)
+        # Update dashboard with floor map charts
+        map_tab_id = update_dashboard_with_charts(extract_dir, created_charts)
+    else:
+        print("ℹ️ No floors configured, skipping floor map generation")
+        dataset_info = None
+        created_charts = []
+        map_tab_id = None
+    
+    # Customer Journey is now manually configured - just import as-is from ZIP
+    print("ℹ️ Customer Journey components will be imported from ZIP (manual setup)")
+    
     # Inject real database credentials into the ZIP before import
     if conn_config and db_display_name:
         update_database_yaml_credentials(extract_dir, conn_config, db_display_name, db_uuid, timezone=timezone)
@@ -1051,32 +1068,37 @@ def update_via_superset_shell():
         dataset_info = None
         created_charts = []
 
-        if floors:
-            print(f"🗺️ Processing {len(floors)} floor maps...")
-            starting_chart_id = 100 + dash_index * 1000
-            new_zip_path, dataset_info, created_charts = process_floor_maps(
-                zip_path, floors, target_db_uuid,
-                conn_config=conn_config, db_display_name=new_name,
-                starting_chart_id=starting_chart_id, timezone=timezone
-            )
-            if not new_zip_path:
-                continue
-        else:
-            print("ℹ️ No floors configured, patching database credentials only...")
-            extract_dir = find_extract_dir(zip_path)
-            if extract_dir:
-                update_database_yaml_credentials(extract_dir, conn_config, new_name, target_db_uuid, timezone=timezone)
-                update_dataset_database_uuid(extract_dir, target_db_uuid)
-                new_zip_path = rezip_dashboard_export(extract_dir, zip_path)
-            else:
-                print("❌ Could not extract ZIP for credential patching")
+        # Always process floor maps and customer journey (even if no floors)
+        print(f"🗺️ Processing dashboard components...")
+        starting_chart_id = 100 + dash_index * 1000
+        new_zip_path, dataset_info, created_charts = process_floor_maps(
+            zip_path, floors, target_db_uuid,
+            conn_config=conn_config, db_display_name=new_name,
+            starting_chart_id=starting_chart_id, timezone=timezone
+        )
+        if not new_zip_path:
+            print("❌ Failed to process dashboard components")
+            continue
 
         # Step 3: Update database connection
         if not run_db_update():
             continue
 
         print(f"🚀 Importing Dashboard: {new_zip_path}")
-        subprocess.run(["superset", "import-dashboards", "-p", new_zip_path, "-u", "admin"])
+        result = subprocess.run(
+            ["superset", "import-dashboards", "-p", new_zip_path, "-u", "admin"],
+            capture_output=True,
+            text=True
+        )
+        if result.returncode != 0:
+            print(f"❌ Import failed with exit code {result.returncode}")
+            if result.stderr:
+                print(result.stderr)
+            continue
+        else:
+            print(f"✅ Dashboard imported successfully")
+            if result.stdout:
+                print(result.stdout)
 
         # Cleanup extracted folders and temp zip
         base_dir = os.path.dirname(zip_path)
