@@ -29,6 +29,8 @@ interface SupersetPluginChartFloorMapCustomizeProps {
   floorSelection: string;
   floorImage: string;
   hotThreshold: number;
+  allowHeatmap: boolean;
+  showZonalPercentage: boolean;
 }
 
 export type SupersetPluginChartFloorMapProps =

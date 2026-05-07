@@ -142,6 +142,34 @@ const config: ControlPanelConfig = {
       controlSetRows: [
         [
           {
+            name: 'allow_heatmap',
+            config: {
+              type: 'CheckboxControl',
+              label: t('Allow Heatmap'),
+              description: t(
+                'Enable or disable the ability to switch between Polygon and Heatmap mode.',
+              ),
+              renderTrigger: true,
+              default: true,
+            },
+          },
+        ],
+        [
+          {
+            name: 'show_zonal_percentage',
+            config: {
+              type: 'CheckboxControl',
+              label: t('Show zonal % footfall'),
+              description: t(
+                'Show percentage of property footfall next to footfall figure in sidebar and polygon.',
+              ),
+              renderTrigger: true,
+              default: true,
+            },
+          },
+        ],
+        [
+          {
             name: 'hot_threshold',
             config: {
               type: 'SliderControl',

@@ -694,6 +694,8 @@ export default function SupersetPluginChartFloorMap(
     floorImage,
     floorSelection,
     hotThreshold,
+    allowHeatmap,
+    showZonalPercentage,
   } = props;
 
   const viewModeStorageKey = React.useMemo(() => {
@@ -721,6 +723,14 @@ export default function SupersetPluginChartFloorMap(
     setPersistedViewMode(viewModeStorageKey, mode);
     setViewModeState(mode);
   };
+
+  // Force polygon mode when allowHeatmap is disabled
+  React.useEffect(() => {
+    if (!allowHeatmap && viewMode === 'heatmap') {
+      setViewMode('polygon');
+    }
+  }, [allowHeatmap, viewMode]);
+
   const [hoveredPolygonKey, setHoveredPolygonKey] = useState<string | null>(
     null,
   );
@@ -1623,20 +1633,12 @@ export default function SupersetPluginChartFloorMap(
                       <span
                         className="value"
                         style={{
-                          color:
-                            viewMode === 'heatmap'
-                              ? legendColorAtFootfall(
-                                  item.total_footfall,
-                                  heatmapRobustMax,
-                                )
-                              : getLayerFootfallColor(
-                                  item.total_footfall,
-                                  item.layer,
-                                  maxFootfallByLayer[item.layer] || 1,
-                                ),
+                          color: 'black',
                         }}
                       >
-                        {`${item.total_footfall.toLocaleString()} (${item.percentage_of_prop}%)`}
+                        {showZonalPercentage
+                          ? `${item.total_footfall.toLocaleString()} (${item.percentage_of_prop}%)`
+                          : item.total_footfall.toLocaleString()}
                       </span>
                     </div>
                   </div>
@@ -1652,37 +1654,39 @@ export default function SupersetPluginChartFloorMap(
           <ZoomPanWrapper
             ref={zoomPanRef}
             extraControls={
-              <ViewToggleInline>
-                <button
-                  type="button"
-                  className={`toggle-btn ${viewMode === 'polygon' ? 'active' : ''}`}
-                  onClick={() => {
-                    setViewMode('polygon');
-                    setIsHeatmapPending(false);
-                    zoomPanRef.current?.resetTransform();
-                  }}
-                >
-                  Polygon
-                </button>
-                <button
-                  type="button"
-                  className={`toggle-btn ${viewMode === 'heatmap' ? 'active' : ''}`}
-                  onClick={() => {
-                    zoomPanRef.current?.resetTransform();
-                    // If already in heatmap mode, just clear the pending flag immediately
-                    if (viewMode === 'heatmap') {
+              allowHeatmap ? (
+                <ViewToggleInline>
+                  <button
+                    type="button"
+                    className={`toggle-btn ${viewMode === 'polygon' ? 'active' : ''}`}
+                    onClick={() => {
+                      setViewMode('polygon');
                       setIsHeatmapPending(false);
-                    } else {
-                      // Switching to heatmap: show spinner during transition
-                      setIsHeatmapPending(true);
-                      // setViewMode on next tick so the spinner renders first
-                      setTimeout(() => setViewMode('heatmap'), 0);
-                    }
-                  }}
-                >
-                  Heatmap
-                </button>
-              </ViewToggleInline>
+                      zoomPanRef.current?.resetTransform();
+                    }}
+                  >
+                    Polygon
+                  </button>
+                  <button
+                    type="button"
+                    className={`toggle-btn ${viewMode === 'heatmap' ? 'active' : ''}`}
+                    onClick={() => {
+                      zoomPanRef.current?.resetTransform();
+                      // If already in heatmap mode, just clear the pending flag immediately
+                      if (viewMode === 'heatmap') {
+                        setIsHeatmapPending(false);
+                      } else {
+                        // Switching to heatmap: show spinner during transition
+                        setIsHeatmapPending(true);
+                        // setViewMode on next tick so the spinner renders first
+                        setTimeout(() => setViewMode('heatmap'), 0);
+                      }
+                    }}
+                  >
+                    Heatmap
+                  </button>
+                </ViewToggleInline>
+              ) : undefined
             }
           >
             <svg
@@ -1830,7 +1834,9 @@ export default function SupersetPluginChartFloorMap(
                         color: 'black',
                       }}
                     >
-                      {`${displayedItem.total_footfall.toLocaleString()} (${displayedItem.percentage_of_prop}%)`}
+                      {showZonalPercentage
+                        ? `${displayedItem.total_footfall.toLocaleString()} (${displayedItem.percentage_of_prop}%)`
+                        : displayedItem.total_footfall.toLocaleString()}
                     </div>
                   </div>
                 )}
@@ -1863,7 +1869,9 @@ export default function SupersetPluginChartFloorMap(
                         color: 'black',
                       }}
                     >
-                      {`${selectedItemData.total_footfall.toLocaleString()} (${selectedItemData.percentage_of_prop}%)`}
+                      {showZonalPercentage
+                        ? `${selectedItemData.total_footfall.toLocaleString()} (${selectedItemData.percentage_of_prop}%)`
+                        : selectedItemData.total_footfall.toLocaleString()}
                     </div>
                   </div>
                 )}
