@@ -8,10 +8,11 @@ Complete guide for managing custom dashboards in Apache Superset with automatic 
 
 - [Overview](#overview)
 - [Quick Start (5 Minutes)](#quick-start-5-minutes)
+  - [Dev vs. Prod](#dev-vs-prod)
 - [Project Structure](#project-structure)
-- [Configuration Guide](#configuration-guide)
-- [How It Works](#how-it-works)
-- [Usage](#usage)
+- [Dashboard Configuration](#dashboard-configuration)
+  - [How It Works](#how-it-works)
+  - [Usage](#usage)
 - [Alerts & Reports](#alerts--reports)
 - [White Labeling](#white-labeling)
 - [Troubleshooting](#troubleshooting)
@@ -65,6 +66,20 @@ docker-compose -f docker-compose-non-dev.yml up -d --build
 
 After setup, your dashboards should be visible immediately in the Superset UI under the "Dashboards" menu.
 
+### Dev vs. prod
+There are actually two ways to spin up a superset instance
+1. **Development**: `docker compose up` --> uses `docker-compose.yml`
+    - this spins up with `superset_node` container which allows hot-module reloading (HMR) and will rebuild the app as changes are made
+    - accessed via http://localhost:9000
+    - only available via localhost, blocks access from other hosts
+    - use this for development and testing changes
+
+2. **Production**: `docker compose -f docker-compose-non-dev.yml up -d --build`
+    - builds the app before serving, after build changes will require rebuild to take effect
+    - accessed via http://localhost:8088
+    - allows access from other hosts
+    - use this for client-facing deployed instances
+
 ---
 
 ## Project Structure
@@ -87,9 +102,9 @@ lauretta-superset/
 
 ---
 
-## Configuration Guide
+## Dashboard Configuration
 
-### 1. Dashboard Configuration
+### 1. Property dashboard template
 
 **File**: `lauretta/dashboards/config.json`
 
@@ -97,7 +112,7 @@ lauretta-superset/
 {
   "dashboards": [
     {
-      "path": "/lauretta/dashboards/property_demo.zip",
+      "path": "/lauretta/dashboards/property_dashboard_template_v{}.zip",
       "connections": {
         "database_display_name": "my_database",
         "host": "localhost",
@@ -254,10 +269,10 @@ EMAIL_REPORTS_SUBJECT_PREFIX=[Superset]
 
 ---
 
-## How It Works
+### How It Works
 
 
-### Startup Sequence
+#### Startup Sequence
 
 ```
 1. docker-compose -f docker-compose-non-dev.yml up -d --build
@@ -284,7 +299,7 @@ EMAIL_REPORTS_SUBJECT_PREFIX=[Superset]
 6. Dashboards ready to use!
 ```
 
-### Dashboard & Floor Map Import Process
+#### Dashboard & Floor Map Import Process
 
 The `import-dashboards.py` script automates database credential injection and floor chart creation:
 
@@ -325,9 +340,9 @@ Notes for developers:
 
 ---
 
-## Usage
+### Usage
 
-### Adding a New Dashboard
+#### Adding a New Dashboard
 
 1. **Export from Superset UI**:
    - Navigate to your dashboard
@@ -379,7 +394,7 @@ Notes for developers:
 
 ---
 
-### Updating Database Credentials
+#### Updating Database Credentials
 
 **If you just need to update database credentials** (host, port, password, etc.):
 
@@ -408,7 +423,7 @@ Example:
 ```
 
 ---
-### Adding or Updating a Floor Image
+#### Adding or Updating a Floor Image
 
 1. **Copy the image** into `lauretta/images/`:
    ```bash
@@ -431,7 +446,7 @@ No rebuild of the frontend is needed — images are fetched from `lauretta/image
 > To apply changed `floors`/chart layout, re-import as a fresh dashboard metadata state (for example after `docker compose down -v`).
 
 ---
-### Manual Import (Testing)
+#### Manual Import (Testing)
 
 ```bash
 docker exec -it superset_app superset import-dashboards \
@@ -439,7 +454,7 @@ docker exec -it superset_app superset import-dashboards \
   -u admin
 ```
 
-### Viewing Logs
+#### Viewing Logs
 
 ```bash
 # Init process logs (import happens here)

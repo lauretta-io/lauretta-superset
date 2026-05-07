@@ -1,7 +1,7 @@
 {
   "dashboards": [
     {
-      "path": "/lauretta/dashboards/property_demo.zip",
+      "path": "/lauretta/dashboards/property_dashboard_template_v{}.zip",
       "connections": {
         "database_display_name": "my_database",
         "host": "localhost",
