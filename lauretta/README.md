@@ -13,6 +13,7 @@ Complete guide for managing custom dashboards in Apache Superset with automatic 
 - [How It Works](#how-it-works)
 - [Usage](#usage)
 - [Alerts & Reports](#alerts--reports)
+- [White Labeling](#white-labeling)
 - [Troubleshooting](#troubleshooting)
 - [Advanced Topics](#advanced-topics)
 
@@ -222,6 +223,9 @@ If `connections.timezone` is set, import also writes PostgreSQL session timezone
 **File**: `docker/.env`
 
 ```bash
+# Removes the "development" tag in the Nav Bar
+SUPERSET_ENV=production
+
 # Disable example data loading
 SUPERSET_LOAD_EXAMPLES=no
 
@@ -243,6 +247,7 @@ EMAIL_REPORTS_SUBJECT_PREFIX=[Superset]
 ```
 
 **Key Settings**:
+- `SUPERSET_ENV=production` - Removes the "development" tag in the Nav Bar
 - `SUPERSET_LOAD_EXAMPLES=no` - Prevents example dashboards from loading
 - Set database credentials for the Superset metadata database
 - Set `SMTP_*` variables for Alerts & Reports email delivery
@@ -574,6 +579,20 @@ Use this section if you only create alerts/reports from the Superset UI.
 
 ---
 
+## White Labeling
+
+The white labeling options provided for are:
+* APP_ICON: banner image displayed in the Nav Bar
+* APP_NAME: name displayed in browser tab
+
+By default, the app will use the standard Superset banner and "Superset" app name. 
+To use a custom banner image and app name, follow these steps:
+
+1. add custom banner image to `/lauretta/branding` directory
+2. uncomment and modify APP_ICON and APP_NAME variables in `docker/pythonpath_dev/superset_config.py` as necessary
+
+---
+
 ## Troubleshooting
 
 
@@ -834,6 +853,6 @@ See `LICENSE.txt` for details.
 
 ---
 
-**Last Updated**: March 2026  
-**Superset Version**: 4.1.0  
+**Last Updated**: 7 May 2026  
+**Superset Version**: 5.0.0  
 **Maintained by**: Lauretta Team

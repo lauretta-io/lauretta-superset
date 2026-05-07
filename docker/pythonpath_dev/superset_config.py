@@ -170,7 +170,7 @@ LAURETTA_TEMP_IMAGES_DIR = Path("/app/lauretta/images/tmp")
 ALLOWED_FLOOR_IMAGE_EXTENSIONS = {".jpeg", ".jpg", ".png", ".gif", ".webp"}
 
 """
-By default, the app will use the standard Superset icon. 
+By default, the app will use the standard Superset banner. 
 To use a custom banner image and app name, follow these steps:
 
 1. add custom banner image to /lauretta/branding directory
