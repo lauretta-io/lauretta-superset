@@ -169,6 +169,19 @@ LAURETTA_CUSTOM_IMAGES_DIR = Path("/app/lauretta/images/customs")
 LAURETTA_TEMP_IMAGES_DIR = Path("/app/lauretta/images/tmp")
 ALLOWED_FLOOR_IMAGE_EXTENSIONS = {".jpeg", ".jpg", ".png", ".gif", ".webp"}
 
+"""
+By default, the app will use the standard Superset banner. 
+To use a custom banner image and app name, follow these steps:
+
+1. add custom banner image to /lauretta/branding directory
+2. uncomment APP_ICON below and set the file name as "/static/assets/branding/{your_customer_banner.png}"
+3. APP_NAME can also be set to change the app name shown in the browser tab
+
+/lauretta/branding is mounted to /app/superset/static/assets/branding in the Docker image [see superset-volumes configured in docker-compose.yml & docker-compose-non-dev.yml]
+and referenced within the app via "/static/assets/branding/{image_name}"
+"""
+# APP_ICON = "/static/assets/branding/lauretta-banner.png"
+# APP_NAME = "Lauretta Superset"
 
 def _resolve_floor_image(floor_ref: str) -> Path | None:
     if not floor_ref:
