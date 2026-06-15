@@ -130,7 +130,11 @@ main_query AS (
                     COALESCE(usd.total_footfall, 0) AS total_footfall,
                         usd.event_time
             FROM property.zones z
-            LEFT JOIN property.unit_zone_mappings uzm ON uzm.zone_id = z.id
+            JOIN property.unit_zone_mappings uzm ON (
+                uzm.zone_id = z.id
+                AND (uzm.deleted_at IS NULL {% if to_dttm %} OR uzm.deleted_at >= '{{ to_str.replace("T", " ") }}'::timestamp {% endif %})
+                {% if from_dttm %} AND uzm.created_at <= '{{ from_str.replace("T", " ") }}'::timestamp {% endif %}
+            )
             LEFT JOIN property.units u ON u.id = uzm.unit_id
             LEFT JOIN property.unit_unit_group_mappings uugm ON uugm.unit_id = u.id
             LEFT JOIN property.unit_groups ug ON ug.id = uugm.unit_group_id
@@ -153,7 +157,11 @@ main_query AS (
                     COALESCE(pssd.total_footfall, 0) AS total_footfall,
                         pssd.event_time
             FROM property.public_spaces ps
-            LEFT JOIN property.public_space_zone_mappings pszm ON pszm.public_space_id = ps.id
+            JOIN property.public_space_zone_mappings pszm ON (
+                pszm.public_space_id = ps.id
+                AND (pszm.deleted_at IS NULL {% if to_dttm %} OR pszm.deleted_at >= '{{ to_str.replace("T", " ") }}'::timestamp {% endif %})
+                {% if from_dttm %} AND pszm.created_at <= '{{ from_str.replace("T", " ") }}'::timestamp {% endif %}
+            )
             LEFT JOIN property.zones z ON z.id = pszm.zone_id
             LEFT JOIN (
                     SELECT public_space_id, SUM(footfall_zo) AS total_footfall, MAX({{ t_col }}) as event_time
@@ -173,7 +181,11 @@ main_query AS (
                     COALESCE(esd.total_footfall, 0) AS total_footfall,
                         esd.event_time
             FROM property.entrances e
-            LEFT JOIN property.entrance_zone_mappings ezm ON ezm.entrance_id = e.id
+            JOIN property.entrance_zone_mappings ezm ON (
+                ezm.entrance_id = e.id 
+                AND (ezm.deleted_at IS NULL {% if to_dttm %} OR ezm.deleted_at >= '{{ to_str.replace("T", " ") }}'::timestamp {% endif %})
+                {% if from_dttm %} AND ezm.created_at <= '{{ from_str.replace("T", " ") }}'::timestamp {% endif %}
+            )
             LEFT JOIN property.zones z ON z.id = ezm.zone_id
             LEFT JOIN (
                     SELECT entrance_id, SUM(footfall_zo) AS total_footfall, MAX({{ t_col }}) as event_time
@@ -193,7 +205,11 @@ main_query AS (
                     COALESCE(esd.total_footfall, 0) AS total_footfall,
                         esd.event_time
             FROM property.escalators e
-            LEFT JOIN property.escalator_zone_mappings ezm ON ezm.escalator_id = e.id
+            JOIN property.escalator_zone_mappings ezm ON (
+                ezm.escalator_id = e.id
+                AND (ezm.deleted_at IS NULL {% if to_dttm %} OR ezm.deleted_at >= '{{ to_str.replace("T", " ") }}'::timestamp {% endif %})
+                {% if from_dttm %} AND ezm.created_at <= '{{ from_str.replace("T", " ") }}'::timestamp {% endif %}
+            )
             LEFT JOIN property.zones z ON z.id = ezm.zone_id
             LEFT JOIN (
                     SELECT escalator_id, SUM(footfall_zo) AS total_footfall, MAX({{ t_col }}) as event_time
@@ -213,7 +229,11 @@ main_query AS (
                     COALESCE(llsd.total_footfall, 0) AS total_footfall,
                         llsd.event_time
             FROM property.lift_lobbies ll
-            LEFT JOIN property.lift_lobby_zone_mappings llzm ON llzm.lift_lobby_id = ll.id
+            JOIN property.lift_lobby_zone_mappings llzm ON (
+                llzm.lift_lobby_id = ll.id
+                AND (llzm.deleted_at IS NULL {% if to_dttm %} OR llzm.deleted_at >= '{{ to_str.replace("T", " ") }}'::timestamp {% endif %})
+                {% if from_dttm %} AND llzm.created_at <= '{{ from_str.replace("T", " ") }}'::timestamp {% endif %}
+            )
             LEFT JOIN property.zones z ON z.id = llzm.zone_id
             LEFT JOIN (
                     SELECT lift_lobby_id, SUM(footfall_zo) AS total_footfall, MAX({{ t_col }}) as event_time
