@@ -94,7 +94,8 @@ def create_default_dataset_template(db_uuid):
 {% set floor_filter = filter_values('floor_id') %}
 WITH property_footfall AS (
     SELECT
-            SUM(pd.footfall_zo) AS prop_footfall
+            SUM(pd.footfall_zo) AS prop_footfall_zo,
+            SUM(pd.footfall_reid) AS prop_footfall_reid
     FROM property.property_summary{{ suffix }} pd
     WHERE 1=1
         {% if from_dttm %} AND {{ t_col }}::timestamp >= '{{ from_str.replace("T", " ") }}'::timestamp {% endif %}
@@ -108,14 +109,22 @@ main_query AS (
             res.layer,
             res.category,
             res.points,
-            res.total_footfall,
+            res.total_footfall_zo AS total_footfall,
+            -- res.total_footfall_reid AS total_footfall,
             ROUND(
                 100 * (
-                    res.total_footfall::NUMERIC
-                    / NULLIF(property_footfall.prop_footfall::NUMERIC, 0)
+                    res.total_footfall_zo::NUMERIC
+                    / NULLIF(property_footfall.prop_footfall_zo::NUMERIC, 0)
                 ),
                 2
             ) AS percentage_of_prop,
+            -- ROUND(
+            --     100 * (
+            --         res.total_footfall_reid::NUMERIC
+            --         / NULLIF(property_footfall.prop_footfall_reid::NUMERIC, 0)
+            --     ),
+            --     2
+            -- ) AS percentage_of_prop,
             COALESCE(
                 res.event_time,
                 CAST({{ "'" + start_date + "'" if from_dttm else start_date }} AS TIMESTAMP)
@@ -123,12 +132,15 @@ main_query AS (
     FROM (
             -- Units
             SELECT
-                    z.floor_id, z.name as zone_name, u.name AS name,
+                    z.floor_id, 
+                    z.name as zone_name, 
+                    u.name AS name,
                     'Retail' AS layer,
                     COALESCE(ug.name, 'Uncategorized') AS category,
                     z.points,
-                    COALESCE(usd.total_footfall, 0) AS total_footfall,
-                        usd.event_time
+                    COALESCE(usd.total_footfall_zo, 0) AS total_footfall_zo,
+                    COALESCE(usd.total_footfall_reid, 0) AS total_footfall_reid,
+                    usd.event_time
             FROM property.zones z
             JOIN property.unit_zone_mappings uzm ON (
                 uzm.zone_id = z.id
@@ -139,7 +151,11 @@ main_query AS (
             LEFT JOIN property.unit_unit_group_mappings uugm ON uugm.unit_id = u.id
             LEFT JOIN property.unit_groups ug ON ug.id = uugm.unit_group_id
             LEFT JOIN (
-                    SELECT unit_id, SUM(footfall_zo) AS total_footfall, MAX({{ t_col }}) as event_time
+                    SELECT 
+                      unit_id,
+                      SUM(footfall_zo) AS total_footfall_zo,
+                      SUM(footfall_reid) AS total_footfall_reid,
+                      MAX({{ t_col }}) as event_time
                     FROM property.unit_summary{{ suffix }}
                     WHERE 1=1
                         {% if from_dttm %} AND {{ t_col }}::timestamp >= '{{ from_str.replace("T", " ") }}'::timestamp {% endif %}
@@ -150,12 +166,15 @@ main_query AS (
             UNION ALL
             -- Public Spaces
             SELECT
-                    z.floor_id, z.name as zone_name, ps.name as name,
+                    z.floor_id,
+                    z.name as zone_name,
+                    ps.name as name,
                     'Public' AS layer,
                     'Public' AS category,
                     z.points,
-                    COALESCE(pssd.total_footfall, 0) AS total_footfall,
-                        pssd.event_time
+                    COALESCE(pssd.total_footfall_zo, 0) AS total_footfall_zo,
+                    COALESCE(pssd.total_footfall_reid, 0) AS total_footfall_reid,
+                    pssd.event_time
             FROM property.public_spaces ps
             JOIN property.public_space_zone_mappings pszm ON (
                 pszm.public_space_id = ps.id
@@ -164,7 +183,11 @@ main_query AS (
             )
             LEFT JOIN property.zones z ON z.id = pszm.zone_id
             LEFT JOIN (
-                    SELECT public_space_id, SUM(footfall_zo) AS total_footfall, MAX({{ t_col }}) as event_time
+                    SELECT
+                      public_space_id,
+                      SUM(footfall_zo) AS total_footfall_zo,
+                      SUM(footfall_reid) AS total_footfall_reid,
+                      MAX({{ t_col }}) as event_time
                     FROM property.public_space_summary{{ suffix }}
                     WHERE 1=1
                         {% if from_dttm %} AND {{ t_col }}::timestamp >= '{{ from_str.replace("T", " ") }}'::timestamp {% endif %}
@@ -174,12 +197,15 @@ main_query AS (
             UNION ALL
             -- Entrances
             SELECT
-                    z.floor_id, z.name as zone_name, e.name as name,
+                    z.floor_id,
+                    z.name as zone_name,
+                    e.name as name,
                     'Entrances' AS layer,
                     'Entrances' AS category,
                     z.points,
-                    COALESCE(esd.total_footfall, 0) AS total_footfall,
-                        esd.event_time
+                    COALESCE(esd.total_footfall_zo, 0) AS total_footfall_zo,
+                    COALESCE(esd.total_footfall_reid, 0) AS total_footfall_reid,
+                    esd.event_time
             FROM property.entrances e
             JOIN property.entrance_zone_mappings ezm ON (
                 ezm.entrance_id = e.id 
@@ -188,7 +214,11 @@ main_query AS (
             )
             LEFT JOIN property.zones z ON z.id = ezm.zone_id
             LEFT JOIN (
-                    SELECT entrance_id, SUM(footfall_zo) AS total_footfall, MAX({{ t_col }}) as event_time
+                    SELECT
+                      entrance_id,
+                      SUM(footfall_zo) AS total_footfall_zo,
+                      SUM(footfall_reid) AS total_footfall_reid,
+                      MAX({{ t_col }}) as event_time
                     FROM property.entrance_summary{{ suffix }}
                     WHERE 1=1
                         {% if from_dttm %} AND {{ t_col }}::timestamp >= '{{ from_str.replace("T", " ") }}'::timestamp {% endif %}
@@ -198,12 +228,15 @@ main_query AS (
             UNION ALL
             -- Escalators
             SELECT
-                    z.floor_id, z.name as zone_name, e.name as name,
+                    z.floor_id,
+                    z.name as zone_name,
+                    e.name as name,
                     'Circulation' AS layer,
                     'Circulation' AS category,
                     z.points,
-                    COALESCE(esd.total_footfall, 0) AS total_footfall,
-                        esd.event_time
+                    COALESCE(esd.total_footfall_zo, 0) AS total_footfall_zo,
+                    COALESCE(esd.total_footfall_reid, 0) AS total_footfall_reid,
+                    esd.event_time
             FROM property.escalators e
             JOIN property.escalator_zone_mappings ezm ON (
                 ezm.escalator_id = e.id
@@ -212,7 +245,11 @@ main_query AS (
             )
             LEFT JOIN property.zones z ON z.id = ezm.zone_id
             LEFT JOIN (
-                    SELECT escalator_id, SUM(footfall_zo) AS total_footfall, MAX({{ t_col }}) as event_time
+                    SELECT
+                      escalator_id,
+                      SUM(footfall_zo) AS total_footfall_zo,
+                      SUM(footfall_reid) AS total_footfall_reid,
+                      MAX({{ t_col }}) as event_time
                     FROM property.escalator_summary{{ suffix }}
                     WHERE 1=1
                         {% if from_dttm %} AND {{ t_col }}::timestamp >= '{{ from_str.replace("T", " ") }}'::timestamp {% endif %}
@@ -222,12 +259,15 @@ main_query AS (
             UNION ALL
             -- Lift Lobbies
             SELECT
-                    z.floor_id, z.name as zone_name, ll.name as name,
+                    z.floor_id,
+                    z.name as zone_name,
+                    ll.name as name,
                     'Circulation' AS layer,
                     'Circulation' AS category,
                     z.points,
-                    COALESCE(llsd.total_footfall, 0) AS total_footfall,
-                        llsd.event_time
+                    COALESCE(llsd.total_footfall_zo, 0) AS total_footfall_zo,
+                    COALESCE(llsd.total_footfall_reid, 0) AS total_footfall_reid,
+                    llsd.event_time
             FROM property.lift_lobbies ll
             JOIN property.lift_lobby_zone_mappings llzm ON (
                 llzm.lift_lobby_id = ll.id
@@ -236,7 +276,11 @@ main_query AS (
             )
             LEFT JOIN property.zones z ON z.id = llzm.zone_id
             LEFT JOIN (
-                    SELECT lift_lobby_id, SUM(footfall_zo) AS total_footfall, MAX({{ t_col }}) as event_time
+                    SELECT
+                      lift_lobby_id,
+                      SUM(footfall_zo) AS total_footfall_zo,
+                      SUM(footfall_reid) AS total_footfall_reid,
+                      MAX({{ t_col }}) as event_time
                     FROM property.lift_lobby_summary{{ suffix }}
                     WHERE 1=1
                         {% if from_dttm %} AND {{ t_col }}::timestamp >= '{{ from_str.replace("T", " ") }}'::timestamp {% endif %}
@@ -245,18 +289,20 @@ main_query AS (
             ) llsd ON llsd.lift_lobby_id = ll.id
             UNION ALL
             -- Dummy row (always present, mirrors all active filters)
-            SELECT {{ floor_filter[0] if floor_filter else 0 }}                                                                                          AS floor_id,
-                    'No Data'                                                                                                                              AS zone_name,
-                    'No Data'                                                                                                                              AS name,
-                    'None'                                                                                                                                 AS layer,
-                    'None'                                                                                                                                 AS category,
-                    NULL                                                                                                                                   AS points,
-                    0                                                                                                                                      AS total_footfall,
-                    {% if from_str %}
-                        TO_TIMESTAMP('{{ from_str.replace("T", " ") }}', 'YYYY-MM-DD HH24:MI:SS')
-                    {% else %}
-                        CURRENT_TIMESTAMP
-                    {% endif %}                                   AS event_time
+            SELECT 
+              {{ floor_filter[0] if floor_filter else 0 }} AS floor_id,
+              'No Data' AS zone_name,
+              'No Data' AS name,
+              'None' AS layer,
+              'None' AS category,
+              NULL AS points,
+              0 AS total_footfall_zo,
+              0 AS total_footfall_reid,
+              {% if from_str %}
+                  TO_TIMESTAMP('{{ from_str.replace("T", " ") }}', 'YYYY-MM-DD HH24:MI:SS')
+              {% else %}
+                  CURRENT_TIMESTAMP
+              {% endif %}                                   AS event_time
 
     ) res
     CROSS JOIN property_footfall
