@@ -117,7 +117,7 @@ def create_default_dataset_template(db_uuid):
                     --         / NULLIF(property_footfall.prop_footfall_zo::NUMERIC, 0)
                     --     ),
                     --     2
-                    -- ) AS percentage_of_prop
+                    -- ) AS percentage_of_prop,
                     res.footfall_reid AS total_footfall,
                     ROUND(
                         100 * (
