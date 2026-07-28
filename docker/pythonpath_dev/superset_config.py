@@ -28,8 +28,10 @@ import uuid
 import re
 from pathlib import Path
 
+from datetime import timedelta
+
 from celery.schedules import crontab
-from flask import abort, send_file, jsonify, request
+from flask import abort, send_file, jsonify, request, session
 from flask_caching.backends.filesystemcache import FileSystemCache
 
 logger = logging.getLogger()
@@ -161,6 +163,13 @@ WEBDRIVER_BASEURL = "http://superset:8088" # When running using docker compose u
 WEBDRIVER_BASEURL_USER_FRIENDLY = "http://localhost:8088"
 SQLLAB_CTAS_NO_LIMIT = True
 
+# Log users out after 30 minutes of inactivity.
+# SESSION_REFRESH_EACH_REQUEST re-stamps the cookie expiry on every request,
+# turning PERMANENT_SESSION_LIFETIME into a rolling (idle) timeout instead of an
+# absolute one. Sessions are marked permanent in FLASK_APP_MUTATOR below.
+PERMANENT_SESSION_LIFETIME = timedelta(minutes=30)
+SESSION_REFRESH_EACH_REQUEST = True
+
 log_level_text = os.getenv("SUPERSET_LOG_LEVEL", "INFO")
 LOG_LEVEL = getattr(logging, log_level_text.upper(), logging.INFO)
 
@@ -271,6 +280,11 @@ def _cleanup_temp_images():
 
 
 def FLASK_APP_MUTATOR(app):
+   # ── Mark every session permanent so PERMANENT_SESSION_LIFETIME applies ──
+   @app.before_request
+   def _make_session_permanent():
+       session.permanent = True
+
    # ── Register celery task for cleaning temp images ──
    from superset.extensions import celery_app
 
