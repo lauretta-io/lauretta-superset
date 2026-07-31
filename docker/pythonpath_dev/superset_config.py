@@ -28,6 +28,7 @@ import uuid
 import re
 from functools import wraps
 from pathlib import Path
+from urllib.parse import quote
 
 from datetime import timedelta
 
@@ -88,6 +89,17 @@ REDIS_HOST = os.getenv("REDIS_HOST", "redis")
 REDIS_PORT = os.getenv("REDIS_PORT", "6379")
 REDIS_CELERY_DB = os.getenv("REDIS_CELERY_DB", "0")
 REDIS_RESULTS_DB = os.getenv("REDIS_RESULTS_DB", "1")
+# Empty in dev/nondev mode, where Redis has no `requirepass`. The secure stack sets
+# it, and every Redis URL/connection below has to carry it or caching, Celery and
+# server-side sessions all fail to authenticate.
+REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "")
+
+
+def redis_url(db: str | int) -> str:
+    """Redis URL for `db`, with credentials only when a password is configured."""
+    auth = f":{quote(REDIS_PASSWORD, safe='')}@" if REDIS_PASSWORD else ""
+    return f"redis://{auth}{REDIS_HOST}:{REDIS_PORT}/{db}"
+
 
 RESULTS_BACKEND = FileSystemCache("/app/superset_home/sqllab")
 
@@ -99,18 +111,20 @@ CACHE_CONFIG = {
     "CACHE_REDIS_PORT": REDIS_PORT,
     "CACHE_REDIS_DB": REDIS_RESULTS_DB,
 }
+if REDIS_PASSWORD:
+    CACHE_CONFIG["CACHE_REDIS_PASSWORD"] = REDIS_PASSWORD
 DATA_CACHE_CONFIG = CACHE_CONFIG
 
 
 class CeleryConfig:
-    broker_url = f"redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_CELERY_DB}"
+    broker_url = redis_url(REDIS_CELERY_DB)
     imports = (
         "superset.sql_lab",
         "superset.tasks.scheduler",
         "superset.tasks.thumbnails",
         "superset.tasks.cache",
     )
-    result_backend = f"redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_RESULTS_DB}"
+    result_backend = redis_url(REDIS_RESULTS_DB)
     worker_prefetch_multiplier = 1
     task_acks_late = False
     beat_schedule = {
@@ -564,3 +578,22 @@ try:
     )
 except ImportError:
     logger.info("Using default Docker config...")
+
+#
+# Hardened overrides for the secure deployment (docker-compose-secure.yml).
+#
+# Loaded LAST, after superset_config_docker, so that a stale local override file
+# can never silently weaken a secure deployment's security settings.
+#
+# Enabled by SUPERSET_SECURE_MODE=true, which is set only in docker/.env-secure.
+# That file also extends PYTHONPATH with /app/docker/pythonpath_secure so this
+# import resolves. Modes 1 (dev) and 2 (nondev) never take this branch.
+#
+if os.getenv("SUPERSET_SECURE_MODE", "").strip().lower() in {"1", "true", "yes"}:
+    import superset_config_secure
+    from superset_config_secure import *  # noqa
+
+    logger.info(
+        f"Loaded hardened secure configuration at "
+        f"[{superset_config_secure.__file__}]"
+    )

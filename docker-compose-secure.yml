@@ -1,0 +1,254 @@
+#
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+
+# -----------------------------------------------------------------------
+# Hardened deployment. See DEPLOYMENT.md for setup and verification.
+#
+#   docker compose -f docker-compose-secure.yml up -d --build
+#
+# Differences from docker-compose-non-dev.yml:
+#   * builds the `production` image stage (lean base, no dev toolchain)
+#   * every container runs as the non-root `superset` user
+#   * Superset is published to 127.0.0.1 only — TLS is terminated by nginx on
+#     the host (docker/nginx/superset-secure.conf), never by this stack
+#   * Postgres and Redis are not published at all
+#   * Redis requires a password
+#   * no-new-privileges, dropped capabilities, pid/memory ceilings, bounded logs
+#   * loads docker/.env-secure instead of docker/.env-local, so local dev
+#     overrides can never weaken a secure deployment
+# -----------------------------------------------------------------------
+
+# Distinct project name so this stack never shares volumes, networks or container
+# names with a dev/nondev stack started from the same directory.
+name: superset-secure
+
+x-superset-volumes: &superset-volumes
+  - ./docker:/app/docker:ro
+  - superset_home:/app/superset_home
+  # Read-write: the floor-map upload endpoint writes into lauretta/images.
+  - ./lauretta:/app/lauretta
+  - ./lauretta/branding:/app/superset/static/assets/branding:ro
+
+x-superset-env: &superset-env
+  env_file:
+    - path: docker/.env # committed defaults
+      required: true
+    - path: docker/.env-secure # secrets + hardening, gitignored
+      required: true
+
+x-superset-build: &superset-build
+  context: .
+  target: production
+  cache_from:
+    - apache/superset-cache:3.10-slim-bookworm
+  args:
+    # Drops the scarf.sh telemetry pixel from the frontend bundle. Must be a build
+    # arg — webpack bakes it in (superset-frontend/webpack.config.js).
+    SCARF_ANALYTICS: "false"
+    # Must be false or the frontend bundle is never built and every /static asset
+    # 404s. Already the Dockerfile default; pinned so a change there cannot break
+    # this mode silently.
+    DEV_MODE: "false"
+
+# Pinned rather than derived from the project name, to match the lauretta-superset-<mode>
+# scheme the other two compose files use. See DEPLOYMENT.md ("Image tags").
+x-superset-image: &superset-image lauretta-superset-secure:latest
+
+# Containers that run as the `superset` user from the start need no capabilities at
+# all: there is no privilege-dropping entrypoint to accommodate.
+x-superset-hardening: &superset-hardening
+  user: "superset"
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  pids_limit: 512
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "5"
+
+services:
+  redis:
+    image: redis:7
+    container_name: superset_cache_secure
+    restart: unless-stopped
+    # No published ports: reachable only on the compose network.
+    #
+    # $$REDIS_PASSWORD is escaped so Compose leaves it alone and the container's
+    # shell expands it. Compose interpolation only reads the shell environment and a
+    # root-level .env, neither of which holds our secrets — so a bare
+    # ${REDIS_PASSWORD} here would silently expand to an empty password.
+    command:
+      - sh
+      - -c
+      - exec redis-server --requirepass "$$REDIS_PASSWORD" --appendonly yes
+    env_file:
+      - path: docker/.env-secure
+        required: true
+    healthcheck:
+      test: ["CMD-SHELL", 'redis-cli -a "$$REDIS_PASSWORD" ping | grep -q PONG']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - redis:/data
+    security_opt:
+      - no-new-privileges:true
+    # The official image starts as root and drops to the `redis` user via gosu,
+    # which needs these four. Everything else goes.
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+      - DAC_OVERRIDE
+    pids_limit: 256
+    mem_limit: 1g
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  db:
+    <<: *superset-env
+    image: postgres:15
+    container_name: superset_db_secure
+    restart: unless-stopped
+    # No published ports.
+    volumes:
+      - db_home:/var/lib/postgresql/data
+      - ./docker/docker-entrypoint-initdb.d:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    security_opt:
+      - no-new-privileges:true
+    # Same reasoning as redis: the entrypoint runs initdb as root then drops to the
+    # `postgres` user.
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+      - DAC_OVERRIDE
+      - FOWNER
+    pids_limit: 512
+    mem_limit: 2g
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  superset:
+    <<: [*superset-env, *superset-hardening]
+    build:
+      <<: *superset-build
+    image: *superset-image
+    container_name: superset_app_secure
+    command: ["/app/docker/docker-bootstrap.sh", "app-gunicorn"]
+    restart: unless-stopped
+    # Loopback only. Publishing 0.0.0.0 here would expose plaintext HTTP around the
+    # TLS terminator, which is what an external port scan looks for.
+    ports:
+      - "127.0.0.1:8088:8088"
+    depends_on:
+      superset-init:
+        condition: service_completed_successfully
+    volumes: *superset-volumes
+    mem_limit: 4g
+    environment:
+      SUPERSET_LOG_LEVEL: "${SUPERSET_LOG_LEVEL:-info}"
+
+  superset-init:
+    <<: [*superset-env, *superset-hardening]
+    build:
+      <<: *superset-build
+    image: *superset-image
+    container_name: superset_init_secure
+    command: ["/app/docker/docker-init.sh"]
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes: *superset-volumes
+    mem_limit: 2g
+    healthcheck:
+      disable: true
+    environment:
+      # Hardcoded, not "${SUPERSET_LOAD_EXAMPLES:-yes}" as in the other compose
+      # files: that form interpolates from a root-level .env which does not exist,
+      # so it resolves to "yes" and overrides docker/.env regardless.
+      SUPERSET_LOAD_EXAMPLES: "no"
+      SUPERSET_LOG_LEVEL: "${SUPERSET_LOG_LEVEL:-info}"
+
+  superset-worker:
+    <<: [*superset-env, *superset-hardening]
+    build:
+      <<: *superset-build
+    image: *superset-image
+    container_name: superset_worker_secure
+    command: ["/app/docker/docker-bootstrap.sh", "worker"]
+    restart: unless-stopped
+    depends_on:
+      superset-init:
+        condition: service_completed_successfully
+    volumes: *superset-volumes
+    # Headless-browser screenshots for alerts/reports are memory hungry.
+    mem_limit: 4g
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "celery -A superset.tasks.celery_app:app inspect ping -d celery@$$HOSTNAME",
+        ]
+    environment:
+      SUPERSET_LOG_LEVEL: "${SUPERSET_LOG_LEVEL:-info}"
+
+  superset-worker-beat:
+    <<: [*superset-env, *superset-hardening]
+    build:
+      <<: *superset-build
+    image: *superset-image
+    container_name: superset_worker_beat_secure
+    command: ["/app/docker/docker-bootstrap.sh", "beat"]
+    restart: unless-stopped
+    depends_on:
+      superset-init:
+        condition: service_completed_successfully
+    volumes: *superset-volumes
+    mem_limit: 1g
+    healthcheck:
+      disable: true
+    environment:
+      SUPERSET_LOG_LEVEL: "${SUPERSET_LOG_LEVEL:-info}"
+
+volumes:
+  superset_home:
+    external: false
+  db_home:
+    external: false
+  redis:
+    external: false

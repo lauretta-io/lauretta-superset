@@ -34,6 +34,11 @@ ARG BUILD_TRANSLATIONS
 ENV BUILD_TRANSLATIONS=${BUILD_TRANSLATIONS}
 ARG DEV_MODE="false"           # Skip frontend build in dev mode
 ENV DEV_MODE=${DEV_MODE}
+# Baked into the bundle by webpack (superset-frontend/webpack.config.js), so it has
+# to be a build arg rather than a runtime env var. Set to "false" by
+# docker-compose-secure.yml to drop the scarf.sh telemetry pixel.
+ARG SCARF_ANALYTICS
+ENV SCARF_ANALYTICS=${SCARF_ANALYTICS}
 
 COPY docker/ /app/docker/
 # Arguments for build configuration
@@ -262,3 +267,21 @@ USER root
 RUN uv pip install .[postgres]
 USER superset
 CMD ["/app/docker/entrypoints/docker-ci.sh"]
+
+######################################################################
+# Production image...
+######################################################################
+# Used by docker-compose-secure.yml. Based on `lean` rather than `dev` so the
+# image carries neither requirements/development.txt nor the git/build-essential
+# toolchain, which keeps the CVE surface small.
+#
+# The postgres driver has to be baked in here: docker-bootstrap.sh only installs
+# it when running as root, and the secure stack runs as the `superset` user.
+#
+# `thumbnails` pulls in Pillow. It is in requirements/development.txt but not
+# base.txt, so without it this image would silently lose chart/dashboard thumbnails
+# and PDF export relative to the dev-stage images ("No PIL installation found").
+FROM lean AS production
+USER root
+RUN uv pip install .[postgres,thumbnails]
+USER superset

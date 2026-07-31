@@ -36,6 +36,26 @@ Init Step ${1}/${STEP_CNT} [${2}] -- ${3}
 EOF
 }
 ADMIN_PASSWORD="${ADMIN_PASSWORD:-admin}"
+
+# In secure mode, refuse to create the admin/admin default. Default credentials are
+# the first thing any scan or pentest checks for, and a stack that silently boots
+# with them is worse than one that fails loudly here.
+case "$(echo "${SUPERSET_SECURE_MODE:-}" | tr '[:upper:]' '[:lower:]')" in
+  1|true|yes)
+    if [ "${ADMIN_PASSWORD}" = "admin" ]; then
+        cat >&2 <<'EOF'
+######################################################################
+ERROR: SUPERSET_SECURE_MODE is enabled but ADMIN_PASSWORD is unset or
+       still set to the default "admin".
+
+Set a unique ADMIN_PASSWORD in docker/.env-secure, or regenerate the file:
+    ./scripts/generate-secure-secrets.sh
+######################################################################
+EOF
+        exit 1
+    fi
+    ;;
+esac
 # If Cypress run – overwrite the password for admin and export env variables
 if [ "$CYPRESS_CONFIG" == "true" ]; then
     ADMIN_PASSWORD="general"

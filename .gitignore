@@ -118,6 +118,13 @@ docker/requirements-local.txt
 
 cache/
 docker/*local*
+# ...but the .env-local template is committed; only the real file is ignored.
+!docker/.env-local.example
+
+# Secure-deploy secrets (docker-compose-secure.yml). The .example template is
+# committed with placeholders; the real file never is.
+docker/.env-secure
+!docker/.env-secure.example
 
 .temp_cache
 
