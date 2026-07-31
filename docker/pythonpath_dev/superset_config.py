@@ -212,25 +212,21 @@ LOG_LEVEL = getattr(logging, log_level_text.upper(), logging.INFO)
 LAURETTA_IMAGES_DIR = Path("/app/lauretta/images")
 LAURETTA_CUSTOM_IMAGES_DIR = Path("/app/lauretta/images/customs")
 LAURETTA_TEMP_IMAGES_DIR = Path("/app/lauretta/images/tmp")
-ALLOWED_FLOOR_IMAGE_EXTENSIONS = {".jpeg", ".jpg", ".png", ".gif", ".webp"}
-
-# Magic-byte signatures for the extensions we accept. Used to confirm an upload is
-# really the image type its filename claims, so the Content-Type that send_file
-# derives from the extension can't disagree with the bytes on disk. Deliberately
-# dependency-free: Pillow is only in requirements/development.txt, so it is absent
-# from the lean-based production image.
-_IMAGE_MAGIC_BYTES = {
-    "jpeg": lambda head: head.startswith(b"\xff\xd8\xff"),
-    "png": lambda head: head.startswith(b"\x89PNG\r\n\x1a\n"),
-    "gif": lambda head: head.startswith((b"GIF87a", b"GIF89a")),
-    "webp": lambda head: head[:4] == b"RIFF" and head[8:12] == b"WEBP",
-}
-_EXTENSION_IMAGE_FORMAT = {
-    ".jpg": "jpeg",
-    ".jpeg": "jpeg",
-    ".png": "png",
-    ".gif": "gif",
-    ".webp": "webp",
+# Accepted upload extensions, each mapped to a test of its magic bytes. One dict
+# rather than a set plus a lookup table: membership is what makes an extension
+# allowed and the value is what confirms the bytes match, so adding an extension
+# without a signature for it is not expressible.
+#
+# The check confirms an upload really is the type its filename claims, so the
+# Content-Type that send_file derives from the extension can't disagree with the
+# bytes on disk. Deliberately dependency-free: Pillow is only in
+# requirements/development.txt, so it is absent from the lean-based production image.
+ALLOWED_FLOOR_IMAGE_EXTENSIONS = {
+    ".jpg": lambda head: head.startswith(b"\xff\xd8\xff"),
+    ".jpeg": lambda head: head.startswith(b"\xff\xd8\xff"),
+    ".png": lambda head: head.startswith(b"\x89PNG\r\n\x1a\n"),
+    ".gif": lambda head: head.startswith((b"GIF87a", b"GIF89a")),
+    ".webp": lambda head: head[:4] == b"RIFF" and head[8:12] == b"WEBP",
 }
 
 """
@@ -529,11 +525,10 @@ def FLASK_APP_MUTATOR(app):
        image_file.stream.seek(0)
        head = image_file.stream.read(32)
        image_file.stream.seek(0)
-       expected_format = _EXTENSION_IMAGE_FORMAT[suffix]
-       if not _IMAGE_MAGIC_BYTES[expected_format](head):
+       if not ALLOWED_FLOOR_IMAGE_EXTENSIONS[suffix](head):
            return abort(
                400,
-               description=f"File contents are not a valid {expected_format} image",
+               description=f"File contents are not a valid {suffix.lstrip('.')} image",
            )
 
        safe_stem = re.sub(r"[^A-Za-z0-9._-]+", "_", Path(original_name).stem).strip("._")
