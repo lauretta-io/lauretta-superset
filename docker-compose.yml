@@ -43,6 +43,15 @@ x-common-build: &common-build
     INCLUDE_FIREFOX: ${INCLUDE_FIREFOX:-false}
     BUILD_TRANSLATIONS: ${BUILD_TRANSLATIONS:-false}
 
+# Image tags are pinned explicitly across all three compose files, as
+# lauretta-superset-<mode>. Left implicit, Compose derives the tag from the project
+# name plus the service name — and this file and docker-compose-non-dev.yml share
+# both, so they collided on one tag and overwrote each other despite building with
+# opposite DEV_MODE values. See DEPLOYMENT.md ("Image tags").
+#
+# The suffix tracks SUPERSET_BUILD_TARGET so a `lean` build is not tagged `dev`.
+x-common-image: &common-image lauretta-superset-${SUPERSET_BUILD_TARGET:-dev}:latest
+
 services:
   nginx:
     image: nginx:latest
@@ -86,6 +95,7 @@ services:
         required: false
     build:
       <<: *common-build
+    image: *common-image
     container_name: superset_app
     command: ["/app/docker/docker-bootstrap.sh", "app"]
     restart: unless-stopped
@@ -107,6 +117,7 @@ services:
   superset-websocket:
     container_name: superset_websocket
     build: ./superset-websocket
+    image: lauretta-superset-websocket:latest
     ports:
       - 8080:8080
     extra_hosts:
@@ -140,6 +151,7 @@ services:
   superset-init:
     build:
       <<: *common-build
+    image: *common-image
     container_name: superset_init
     command: ["/app/docker/docker-init.sh"]
     env_file:
@@ -171,6 +183,8 @@ services:
         # it'll mount and watch local files and rebuild as you update them
         DEV_MODE: "true"
         BUILD_TRANSLATIONS: ${BUILD_TRANSLATIONS:-false}
+    # Builds the `superset-node` stage, not `dev`, so it needs its own tag.
+    image: lauretta-superset-node:latest
     environment:
       # set this to false if you have perf issues running the npm i; npm run dev in-docker
       # if you do so, you have to run this manually on the host, which should perform better!
@@ -195,6 +209,7 @@ services:
   superset-worker:
     build:
       <<: *common-build
+    image: *common-image
     container_name: superset_worker
     command: ["/app/docker/docker-bootstrap.sh", "worker"]
     env_file:
@@ -223,6 +238,7 @@ services:
   superset-worker-beat:
     build:
       <<: *common-build
+    image: *common-image
     container_name: superset_worker_beat
     command: ["/app/docker/docker-bootstrap.sh", "beat"]
     env_file:
@@ -244,6 +260,7 @@ services:
   superset-tests-worker:
     build:
       <<: *common-build
+    image: *common-image
     container_name: superset_tests_worker
     command: ["/app/docker/docker-bootstrap.sh", "worker"]
     env_file:

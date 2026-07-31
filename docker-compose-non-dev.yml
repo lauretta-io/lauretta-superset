@@ -16,10 +16,14 @@
 #
 
 # -----------------------------------------------------------------------
-# We don't support docker compose for production environments.
-# If you choose to use this type of deployment make sure to
-# create you own docker environment file (docker/.env) with your own
-# unique random secure passwords and SECRET_KEY.
+# Nondev deployment: locally hosted over plain HTTP. See DEPLOYMENT.md.
+#
+#   docker compose -f docker-compose-non-dev.yml up -d --build
+#
+# Serves a pre-built frontend bundle through gunicorn instead of the webpack dev
+# server, so it is not development-shaped — but it is not hardened either: plain
+# HTTP, root containers, and the development defaults in docker/.env. Use it on a
+# trusted network only. For anything internet-facing use docker-compose-secure.yml.
 # -----------------------------------------------------------------------
 x-superset-volumes:
   &superset-volumes # /app/pythonpath_docker will be appended to the PYTHONPATH in the final container
@@ -31,8 +35,23 @@ x-superset-volumes:
 x-common-build: &common-build
   context: .
   target: dev
+  args:
+    # Must be false, or the superset-node stage skips `npm ci` + `npm run build`
+    # and the image ships an empty /app/superset/static/assets. This mode serves
+    # the bundle from the image (unlike docker-compose.yml, which proxies /static
+    # to a webpack dev server), so without it every asset 404s and the UI is
+    # unusable. It happens to be the Dockerfile default — pinned here so a change
+    # to that default cannot silently break this mode.
+    DEV_MODE: "false"
   cache_from:
     - apache/superset-cache:3.10-slim-bookworm
+
+# Image tags are pinned explicitly across all three compose files, as
+# lauretta-superset-<mode>. Left implicit, Compose derives the tag from the project
+# name plus the service name — and this file and docker-compose.yml share both, so
+# they collided on one tag and silently overwrote each other despite building with
+# opposite DEV_MODE values. See DEPLOYMENT.md ("Image tags").
+x-common-image: &common-image lauretta-superset-nondev:latest
 
 services:
   redis:
@@ -63,6 +82,7 @@ services:
         required: false
     build:
       <<: *common-build
+    image: *common-image
     container_name: superset_app
     command: ["/app/docker/docker-bootstrap.sh", "app-gunicorn"]
     user: "root"
@@ -80,6 +100,7 @@ services:
     container_name: superset_init
     build:
       <<: *common-build
+    image: *common-image
     command: ["/app/docker/docker-init.sh"]
     env_file:
       - path: docker/.env # default
@@ -102,6 +123,7 @@ services:
   superset-worker:
     build:
       <<: *common-build
+    image: *common-image
     container_name: superset_worker
     command: ["/app/docker/docker-bootstrap.sh", "worker"]
     env_file:
@@ -127,6 +149,7 @@ services:
   superset-worker-beat:
     build:
       <<: *common-build
+    image: *common-image
     container_name: superset_worker_beat
     command: ["/app/docker/docker-bootstrap.sh", "beat"]
     env_file:
