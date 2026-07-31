@@ -1071,7 +1071,11 @@ def update_via_superset_shell():
                 "    if database:",
                 "        print(f'Updating existing database: {database.database_name}')",
                 "        database.database_name = target_name",
-                "        database.sqlalchemy_uri = target_uri",
+                # set_sqlalchemy_uri(), not a plain assignment: the setter moves the
+                # password out of the URI into the encrypted `password` column and
+                # leaves PASSWORD_MASK behind. Assigning the attribute directly
+                # stores the credential in plaintext in the metadata database.
+                "        database.set_sqlalchemy_uri(target_uri)",
                 "        # Merge engine_params into existing extra",
                 "        try:",
                 "            existing_extra = json.loads(database.extra) if database.extra else {}",
@@ -1082,7 +1086,10 @@ def update_via_superset_shell():
                 "        database.extra = json.dumps(existing_extra)",
                 "    else:",
                 "        print(f'Database with UUID {target_uuid} not found. Creating new one...')",
-                "        database = Database(database_name=target_name, sqlalchemy_uri=target_uri, uuid=target_uuid, extra=target_extra)",
+                # Same reason: the constructor kwarg would assign the attribute
+                # directly, so the URI is set through the setter instead.
+                "        database = Database(database_name=target_name, uuid=target_uuid, extra=target_extra)",
+                "        database.set_sqlalchemy_uri(target_uri)",
                 "        db.session.add(database)",
                 "    db.session.commit()",
                 "    refreshed = db.session.query(Database).filter_by(uuid=target_uuid).first()",
