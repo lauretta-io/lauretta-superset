@@ -26,6 +26,7 @@ import os
 import sys
 import uuid
 import re
+from functools import wraps
 from pathlib import Path
 
 from datetime import timedelta
@@ -33,8 +34,29 @@ from datetime import timedelta
 from celery.schedules import crontab
 from flask import abort, send_file, jsonify, request, session
 from flask_caching.backends.filesystemcache import FileSystemCache
+from flask_login import current_user
 
 logger = logging.getLogger()
+
+
+def _require_authenticated_user(view):
+    """Reject anonymous callers with a JSON 401.
+
+    Deliberately not flask_login's @login_required: that hands off to
+    login_manager.unauthorized(), which builds a redirect with url_for("login").
+    Flask-AppBuilder registers the login endpoint as "AuthDBView.login", so the
+    lookup raises BuildError and the route returns 500 instead of rejecting
+    cleanly. These are JSON endpoints, so 401 is the right answer anyway.
+    """
+
+    @wraps(view)
+    def wrapper(*args, **kwargs):
+        if not getattr(current_user, "is_authenticated", False):
+            return jsonify(error="Authentication required"), 401
+        return view(*args, **kwargs)
+
+    return wrapper
+
 
 DATABASE_DIALECT = os.getenv("DATABASE_DIALECT")
 DATABASE_USER = os.getenv("DATABASE_USER")
@@ -177,6 +199,25 @@ LAURETTA_IMAGES_DIR = Path("/app/lauretta/images")
 LAURETTA_CUSTOM_IMAGES_DIR = Path("/app/lauretta/images/customs")
 LAURETTA_TEMP_IMAGES_DIR = Path("/app/lauretta/images/tmp")
 ALLOWED_FLOOR_IMAGE_EXTENSIONS = {".jpeg", ".jpg", ".png", ".gif", ".webp"}
+
+# Magic-byte signatures for the extensions we accept. Used to confirm an upload is
+# really the image type its filename claims, so the Content-Type that send_file
+# derives from the extension can't disagree with the bytes on disk. Deliberately
+# dependency-free: Pillow is only in requirements/development.txt, so it is absent
+# from the lean-based production image.
+_IMAGE_MAGIC_BYTES = {
+    "jpeg": lambda head: head.startswith(b"\xff\xd8\xff"),
+    "png": lambda head: head.startswith(b"\x89PNG\r\n\x1a\n"),
+    "gif": lambda head: head.startswith((b"GIF87a", b"GIF89a")),
+    "webp": lambda head: head[:4] == b"RIFF" and head[8:12] == b"WEBP",
+}
+_EXTENSION_IMAGE_FORMAT = {
+    ".jpg": "jpeg",
+    ".jpeg": "jpeg",
+    ".png": "png",
+    ".gif": "gif",
+    ".webp": "webp",
+}
 
 """
 By default, the app will use the standard Superset banner. 
@@ -425,7 +466,11 @@ def FLASK_APP_MUTATOR(app):
        sqla.event.listen(Slice, "before_delete", _on_slice_delete)
        sqla.event.listen(Slice, "before_update", _on_slice_update)
 
+   # NOTE: these routes are registered straight onto the Flask app, so they bypass
+   # FAB's permission layer entirely. @_require_authenticated_user is what keeps
+   # them from being anonymously reachable — do not remove it.
    @app.get("/api/v1/lauretta/floors")
+   @_require_authenticated_user
    def lauretta_floors_list():
        """Return the list of floors from config.json."""
        config_path = Path("/app/lauretta/dashboards/config.json")
@@ -446,6 +491,7 @@ def FLASK_APP_MUTATOR(app):
        return jsonify(all_floors)
 
    @app.get("/api/v1/lauretta/images/<path:floor_ref>")
+   @_require_authenticated_user
    def lauretta_floor_image(floor_ref: str):
        image_path = _resolve_floor_image(floor_ref)
        if not image_path:
@@ -453,6 +499,7 @@ def FLASK_APP_MUTATOR(app):
        return send_file(image_path) 
 
    @app.post("/api/v1/lauretta/images/upload")
+   @_require_authenticated_user
    def lauretta_floor_image_upload():
        image_file = request.files.get("file")
        if not image_file or not image_file.filename:
@@ -462,6 +509,18 @@ def FLASK_APP_MUTATOR(app):
        suffix = Path(original_name).suffix.lower()
        if suffix not in ALLOWED_FLOOR_IMAGE_EXTENSIONS:
            return abort(400, description="Unsupported image extension")
+
+       # The extension alone says nothing about the contents — check the magic bytes
+       # match, so we never serve a non-image back under an image Content-Type.
+       image_file.stream.seek(0)
+       head = image_file.stream.read(32)
+       image_file.stream.seek(0)
+       expected_format = _EXTENSION_IMAGE_FORMAT[suffix]
+       if not _IMAGE_MAGIC_BYTES[expected_format](head):
+           return abort(
+               400,
+               description=f"File contents are not a valid {expected_format} image",
+           )
 
        safe_stem = re.sub(r"[^A-Za-z0-9._-]+", "_", Path(original_name).stem).strip("._")
        if not safe_stem:
