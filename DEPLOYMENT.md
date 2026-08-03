@@ -83,6 +83,28 @@ Log in as `admin` with the password the generator printed, then change it in the
 - Postgres and Redis publish nothing; they are reachable only on the compose network.
 - Redis requires a password.
 
+**If nginx runs on a different host**
+
+The loopback bind assumes nginx is local. A remote proxy cannot reach `127.0.0.1`,
+and the failure looks like a connect timeout rather than a refusal — nginx logs
+`upstream timed out (110) while connecting to upstream` and answers 504. ("while
+connecting" is the tell: the TCP handshake never completed. A wrong port with a live
+host gives `connection refused` and a 502 instead.)
+
+Widening the bind to the LAN address works but puts plaintext HTTP on the network,
+which is the finding the loopback bind exists to avoid. Prefer a tunnel — WireGuard
+or Tailscale between the two hosts — and bind to the tunnel address:
+
+```yaml
+ports:
+  - "<tunnel-ip>:8088:8088"
+```
+
+Then point `proxy_pass` at `http://<tunnel-ip>:8088`. Traffic stays encrypted and
+8088 never appears on the LAN. Two caveats: the address must exist before Docker
+starts or the container fails with `cannot assign requested address`, and everything
+on the tunnel can reach 8088 unless you add an ACL restricting it to the proxy.
+
 **Application**
 - `ENABLE_PROXY_FIX` so Superset knows the request arrived over HTTPS. Without it
   Talisman emits no HSTS header and Superset builds `http://` redirects.
@@ -106,6 +128,20 @@ Log in as `admin` with the password the generator printed, then change it in the
 - Startup refuses to proceed on a placeholder `SUPERSET_SECRET_KEY` or
   `GUEST_TOKEN_SECRET`, a non-HTTPS `SUPERSET_PUBLIC_URL`, or an `admin`/`admin`
   password.
+- Chromium runs **with** its sandbox. `WEBDRIVER_OPTION_ARGS` drops `--no-sandbox`
+  and `--disable-setuid-sandbox`, which the shared config only carries because modes
+  1 and 2 run the browser as root.
+
+**Alerts and reports**
+- Screenshots are taken with Playwright, not Selenium (`PLAYWRIGHT_REPORTS_AND_THUMBNAILS`).
+  No image ships `chromedriver`; the Selenium path depends on Selenium Manager
+  downloading one at runtime, which works as root and fails as uid 1000. Playwright's
+  chromium is already in the image and is only read, never written.
+- `WEBDRIVER_BASEURL` is the **public** URL, not `http://superset:8088`. Talisman's
+  `force_https` answers plain HTTP with a 301 to `https://superset:8088`, where
+  nothing terminates TLS, so the headless browser hangs until it times out.
+  Consequence: **the worker needs public DNS and egress for `SUPERSET_PUBLIC_URL`** —
+  report screenshots leave through the reverse proxy and come back.
 
 ---
 
@@ -248,8 +284,13 @@ done
 # static asset is missing, so check an asset explicitly rather than trusting them.
 curl -sS -o /dev/null -w '%{http_code}\n' http://localhost:8088/static/assets/images/favicon.png
 
-# Secure config actually loaded
-docker compose -f docker-compose-secure.yml logs superset | grep -i "secure configuration"
+# Secure config actually loaded. Read a value it sets rather than grepping the logs:
+# superset_config.py logs "Loaded hardened secure configuration" through logger.info
+# while the config is still being imported, which is before Superset configures
+# logging — so the record is dropped and that grep never matches, loaded or not.
+docker compose -f docker-compose-secure.yml exec superset python -c \
+  "from superset.app import create_app; c = create_app().config; \
+   print('secure config loaded:', c['ENABLE_PROXY_FIX'] and c['SESSION_COOKIE_SECURE'])"
 
 # Non-root
 docker compose -f docker-compose-secure.yml exec superset whoami        # superset
@@ -381,9 +422,6 @@ Not addressed by mode 3, in rough priority order:
 - **Read-only root filesystems.** Gunicorn, celery beat's `/tmp/celerybeat.pid` and
   the Superset home cache all need writable paths, so `read_only: true` needs
   targeted `tmpfs` mounts and its own testing pass.
-- **`--no-sandbox` in `WEBDRIVER_OPTION_ARGS`.** Flagged by container-hardening
-  reviews. It can probably be dropped now that the worker is non-root, but that
-  needs an actual alert-report screenshot to confirm.
 - **TLS on the internal Postgres connection.** Traffic stays on the compose bridge
   network, so this is defence in depth rather than a finding.
 - **Secrets on the process environment.** `docker inspect` can read them. Moving to
