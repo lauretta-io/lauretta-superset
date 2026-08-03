@@ -184,6 +184,15 @@ RUN --mount=type=cache,target=${SUPERSET_HOME}/.cache/uv \
         echo "Skipping browser installation"; \
     fi
 
+# playwright above runs as root, leaving ${SUPERSET_HOME}/.cache root-owned inside
+# a home directory the `superset` user owns. Containers that run as that user then
+# cannot create anything under it — fontconfig and matplotlib caches fail silently,
+# a Playwright bump cannot fetch a newer browser build, and Selenium Manager cannot
+# write .cache/selenium at all. Only the two directories are chowned, not their
+# contents: a recursive chown would rewrite the ~280 MB chromium into a new layer,
+# and the browser is already world-readable and executable.
+RUN chown superset:superset ${SUPERSET_HOME}/.cache ${SUPERSET_HOME}/.cache/ms-playwright
+
 # Copy required files for Python build
 COPY pyproject.toml setup.py MANIFEST.in README.md ./
 COPY superset-frontend/package.json superset-frontend/

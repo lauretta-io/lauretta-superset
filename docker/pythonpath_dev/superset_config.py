@@ -150,6 +150,14 @@ FEATURE_FLAGS = {
     "ALERT_REPORT_TABS": True,
     "ALLOW_ADHOC_SUBQUERY": True,
     "ENABLE_TEMPLATE_PROCESSING": True,
+    # Take screenshots with Playwright rather than Selenium. The image ships
+    # Playwright's chromium (Dockerfile "playwright install chromium") but no
+    # chromedriver, so the Selenium path relies on Selenium Manager downloading
+    # one at runtime into $HOME/.cache/selenium. That works as root (modes 1 and
+    # 2) and fails with EACCES in secure mode, where the process is uid 1000 and
+    # .cache is root-owned. Playwright only reads the bundled browser, so it
+    # needs no download and no write access.
+    "PLAYWRIGHT_REPORTS_AND_THUMBNAILS": True,
 }
 ALERT_REPORTS_NOTIFICATION_DRY_RUN = False
 SCREENSHOT_LOCATE_WAIT = 100

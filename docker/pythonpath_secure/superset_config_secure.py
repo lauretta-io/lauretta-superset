@@ -216,8 +216,16 @@ MAX_CONTENT_LENGTH = 16 * 1024 * 1024
 # ---------------------------------------------------------------------------
 # Alerts and reports
 # ---------------------------------------------------------------------------
-# Internal address the headless browser fetches; the user-facing link in the email
-# has to be the real public URL, not http://localhost:8088.
-# Uses the compose *service* name, so it keeps resolving regardless of container_name.
-WEBDRIVER_BASEURL = os.environ.get("WEBDRIVER_BASEURL", "http://superset:8088")
+# Address the headless browser fetches, and the user-facing link in the email.
+#
+# Both are the public URL here. An internal "http://superset:8088" cannot work in
+# this mode: TALISMAN_CONFIG["force_https"] answers every plain-HTTP request with a
+# 301 to https://superset:8088, where nothing terminates TLS, so the browser hangs
+# until SCREENSHOT_PLAYWRIGHT_DEFAULT_TIMEOUT and the report fails with
+# ReportScheduleScreenshotFailedError. Superset builds the Playwright context in
+# superset/utils/webdriver.py with no hook for extra headers, so the alternative --
+# sending X-Forwarded-Proto: https on the internal request -- is not reachable from
+# config. Screenshots therefore go out through nginx and back; the worker needs
+# public DNS and egress for SUPERSET_PUBLIC_URL.
+WEBDRIVER_BASEURL = os.environ.get("WEBDRIVER_BASEURL", SUPERSET_PUBLIC_URL)
 WEBDRIVER_BASEURL_USER_FRIENDLY = SUPERSET_PUBLIC_URL
