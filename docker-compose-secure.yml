@@ -178,8 +178,6 @@ services:
         condition: service_completed_successfully
     volumes: *superset-volumes
     mem_limit: 4g
-    environment:
-      SUPERSET_LOG_LEVEL: "${SUPERSET_LOG_LEVEL:-info}"
 
   superset-init:
     <<: [*superset-env, *superset-hardening]
@@ -202,7 +200,6 @@ services:
       # files: that form interpolates from a root-level .env which does not exist,
       # so it resolves to "yes" and overrides docker/.env regardless.
       SUPERSET_LOAD_EXAMPLES: "no"
-      SUPERSET_LOG_LEVEL: "${SUPERSET_LOG_LEVEL:-info}"
 
   superset-worker:
     <<: [*superset-env, *superset-hardening]
@@ -224,8 +221,6 @@ services:
           "CMD-SHELL",
           "celery -A superset.tasks.celery_app:app inspect ping -d celery@$$HOSTNAME",
         ]
-    environment:
-      SUPERSET_LOG_LEVEL: "${SUPERSET_LOG_LEVEL:-info}"
 
   superset-worker-beat:
     <<: [*superset-env, *superset-hardening]
@@ -242,8 +237,6 @@ services:
     mem_limit: 1g
     healthcheck:
       disable: true
-    environment:
-      SUPERSET_LOG_LEVEL: "${SUPERSET_LOG_LEVEL:-info}"
 
 volumes:
   superset_home:
