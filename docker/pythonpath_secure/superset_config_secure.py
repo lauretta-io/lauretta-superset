@@ -216,6 +216,24 @@ MAX_CONTENT_LENGTH = 16 * 1024 * 1024
 # ---------------------------------------------------------------------------
 # Alerts and reports
 # ---------------------------------------------------------------------------
+# Same list as the shared config, minus --no-sandbox and --disable-setuid-sandbox.
+# Disabling Chromium's sandbox is a standard container-hardening finding, and it was
+# only there because modes 1 and 2 run the browser as root. This mode runs as uid
+# 1000, where the sandbox initialises normally even under cap_drop: ALL and
+# no-new-privileges — verified by taking a real report screenshot.
+#
+# Left alone in the shared config on purpose: the sandbox needs either CAP_SYS_ADMIN
+# or unprivileged user namespaces, and a dev host with the latter disabled would see
+# screenshots start failing. Only this mode has to satisfy a hardening review.
+WEBDRIVER_OPTION_ARGS = [
+    "--force-device-scale-factor=2.0",
+    "--high-dpi-support=2.0",
+    "--headless",
+    "--disable-gpu",
+    "--disable-dev-shm-usage",
+    "--disable-extensions",
+]
+
 # Address the headless browser fetches, and the user-facing link in the email.
 #
 # Both are the public URL here. An internal "http://superset:8088" cannot work in
