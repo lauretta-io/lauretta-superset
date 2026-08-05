@@ -33,8 +33,10 @@
 # -----------------------------------------------------------------------
 
 # Distinct project name so this stack never shares volumes, networks or container
-# names with a dev/nondev stack started from the same directory.
-name: superset-secure
+# names with a dev/nondev stack started from the same directory. Modes 1 and 2 both
+# pin lauretta-superset; the -secure suffix is what keeps this stack's data separate.
+# See DEPLOYMENT.md ("Migrating between modes") for moving data across that boundary.
+name: lauretta-superset-secure
 
 x-superset-volumes: &superset-volumes
   - ./docker:/app/docker:ro

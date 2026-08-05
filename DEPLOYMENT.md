@@ -239,7 +239,7 @@ modes shared a tag, running `docker compose up` and then
 `docker compose -f docker-compose-non-dev.yml up -d` silently reused the dev image
 and every asset 404'd: the UI rendered as an unstyled page with a broken favicon,
 while `/health` and the REST API kept returning 200. Mode 3 is isolated already by
-its `name: superset-secure` project name.
+its `name: lauretta-superset-secure` project name.
 
 To confirm an image really has a bundle:
 
@@ -278,13 +278,13 @@ the same way with the files swapped.
 
 ### Why the volumes are separate
 
-Modes 1 and 2 declare no `name:`, so Compose derives the project from the directory
-and prefixes their volumes `lauretta-superset_`. Mode 3 sets `name: superset-secure`
-and gets `superset-secure_`. Same volume keys, different volumes:
+Each compose file pins its own project name, and Compose prefixes volumes with it.
+Modes 1 and 2 share `lauretta-superset`; mode 3 uses `lauretta-superset-secure`.
+Same volume keys, different volumes:
 
 ```
-lauretta-superset_db_home        superset-secure_db_home
-lauretta-superset_superset_home  superset-secure_superset_home
+lauretta-superset_db_home        lauretta-superset-secure_db_home
+lauretta-superset_superset_home  lauretta-superset-secure_superset_home
 ```
 
 That separation is deliberate — it is what stops a dev stack and a secure stack
@@ -498,7 +498,7 @@ gitignored by design, so each exists in exactly one place. Lose the file and you
 re-entered by hand.
 
 **Modes are mutually exclusive on one host.** The secure stack uses its own compose
-project name (`superset-secure`) and container names, so it will not clobber a
+project name (`lauretta-superset-secure`) and container names, so it will not clobber a
 running nondev stack — but they both want port 8088. Stop one before starting the
 other. That project name also gives each mode its own volumes, so a secure stack
 starts empty rather than picking up a dev stack's dashboards; see "Migrating between

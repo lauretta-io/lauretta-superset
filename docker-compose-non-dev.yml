@@ -25,6 +25,13 @@
 # HTTP, root containers, and the development defaults in docker/.env. Use it on a
 # trusted network only. For anything internet-facing use docker-compose-secure.yml.
 # -----------------------------------------------------------------------
+
+# Same project name as docker-compose.yml on purpose: the two modes share volumes,
+# so a nondev stack picks up whatever a dev stack created. Pinned rather than
+# derived from the directory name, which is Compose's fallback.
+# docker-compose-secure.yml uses lauretta-superset-secure and stays separate.
+name: lauretta-superset
+
 x-superset-volumes:
   &superset-volumes # /app/pythonpath_docker will be appended to the PYTHONPATH in the final container
   - ./docker:/app/docker

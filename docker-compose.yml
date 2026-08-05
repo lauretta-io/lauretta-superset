@@ -21,6 +21,14 @@
 # create you own docker environment file (docker/.env) with your own
 # unique random secure passwords and SECRET_KEY.
 # -----------------------------------------------------------------------
+
+# Pinned rather than left to Compose's fallback of deriving it from the directory
+# name: a clone into a differently-named directory would otherwise get its own set
+# of volumes and start empty for no visible reason. Shared with
+# docker-compose-non-dev.yml so both modes see the same data.
+# docker-compose-secure.yml uses lauretta-superset-secure and stays separate.
+name: lauretta-superset
+
 x-superset-user: &superset-user root
 x-superset-volumes: &superset-volumes
   # /app/pythonpath_docker will be appended to the PYTHONPATH in the final container
