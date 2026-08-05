@@ -139,6 +139,24 @@ SESSION_REDIS = Redis(
     db=int(os.environ.get("REDIS_SESSION_DB", "2")),
 )
 
+# HMACs the session id in the cookie with SECRET_KEY, so a tampered or planted id is
+# rejected before Redis is consulted. Named by the upstream hardening guide
+# (superset.apache.org/admin-docs/security/securing_superset), and it works: the redis
+# backend honours it and Flask-Session signs on write and verifies on read.
+#
+# Read this before treating it as load-bearing. Flask-Session 0.8.0 marks the option
+# deprecated and warns "will be removed in the next minor release" (base.py), so a
+# routine dependency bump turns it into a silent no-op rather than an error. It also
+# adds little on its own here: ids are 32 characters of os.urandom and sessions are
+# server-side, so an unrecognised id yields an empty session rather than a hijacked
+# one. Set because it is cheap, explicitly recommended, and something an auditor will
+# grep for — not because much rests on it.
+#
+# Enabling it emits a DeprecationWarning at startup. That is expected, not a
+# misconfiguration. When the option disappears, drop this block rather than hunting
+# for a replacement: signed ids were deprecated because random ids already cover it.
+SESSION_USE_SIGNER = True
+
 # ---------------------------------------------------------------------------
 # Security headers / CSP (Flask-Talisman)
 # ---------------------------------------------------------------------------
