@@ -5,7 +5,7 @@ Superset config; each mode layers on top of the last rather than forking it.
 
 | Mode | Compose file | Use for | Access |
 |---|---|---|---|
-| 1. **dev** | `docker-compose.yml` | Local development, hot reload, Cypress | `http://localhost:8088` |
+| 1. **dev** | `docker-compose.yml` | Local development, hot reload, Cypress | `http://localhost:9000` |
 | 2. **nondev** | `docker-compose-non-dev.yml` | Locally hosted, plain HTTP, trusted network | `http://<host>:8088` |
 | 3. **secure** | `docker-compose-secure.yml` | Internet-facing, must pass security scans | `https://<domain>` via host nginx |
 
@@ -22,6 +22,21 @@ docker compose up
 
 Frontend is served by a webpack dev server and rebuilds on change. Uses the `dev`
 image stage, runs as `root`, loads examples.
+
+**Use `http://localhost:9000`, not `:8088`.** This is the one mode where the two are
+not interchangeable. `DEV_MODE=true` skips `npm run build`, so the image ships an
+empty `/app/superset/static/assets` and the app on `:8088` serves HTML whose every
+asset 404s — an unstyled page with a broken favicon, while `/health` and the REST API
+still answer 200. The webpack dev server on `:9000` serves the assets it has just
+built *and* proxies everything else to the app (`superset-frontend/webpack.proxy-config.js`,
+pointed at the backend by the `superset` environment variable in `docker-compose.yml`),
+so it is the only port that gives you a complete UI.
+
+`http://localhost` (port 80) also works: the compose nginx sends `/static` to `:9000`
+and everything else to `:8088`, reassembling the same thing from the other direction.
+`:9000` is the one to use — it is where hot module reloading is wired up.
+
+Both are published on loopback only.
 
 ## Mode 2 — nondev
 
@@ -218,7 +233,7 @@ project name and the same service names, so they collided on one tag — built w
 
 | Mode | Tag | Build target | `DEV_MODE` | Frontend |
 |---|---|---|---|---|
-| dev | `lauretta-superset-dev` | `dev` | `true` | webpack dev server on `:9000`, proxied by the compose nginx |
+| dev | `lauretta-superset-dev` | `dev` | `true` | webpack dev server on `:9000` (browse there, not `:8088`); also reachable through the compose nginx on `:80` |
 | nondev | `lauretta-superset-nondev` | `dev` | `false` | built into the image |
 | secure | `lauretta-superset-secure` | `production` | `false` | built into the image, `SCARF_ANALYTICS=false` |
 
@@ -375,6 +390,9 @@ done
 
 # The UI actually renders. /health and the REST API return 200 even when every
 # static asset is missing, so check an asset explicitly rather than trusting them.
+# Modes 2 and 3 only — in mode 1 this 404s by design, because the dev image has no
+# bundle and the assets come from the webpack dev server instead:
+#   curl -sS -o /dev/null -w '%{http_code}\n' http://localhost:9000/static/assets/images/favicon.png
 curl -sS -o /dev/null -w '%{http_code}\n' http://localhost:8088/static/assets/images/favicon.png
 
 # Secure config actually loaded. Read a value it sets rather than grepping the logs:

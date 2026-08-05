@@ -58,8 +58,15 @@ The database will initialize itself upon startup via the init container ([`super
 
 To run the container, simply run: `docker compose up`
 
-After waiting several minutes for Superset initialization to finish, you can open a browser and view [`http://localhost:8088`](http://localhost:8088)
+After waiting several minutes for Superset initialization to finish, you can open a browser and view [`http://localhost:9000`](http://localhost:9000)
 to start your journey.
+
+Note the port: `docker compose up` is dev mode, where `DEV_MODE=true` skips the
+frontend build. The app on `:8088` therefore serves HTML with no assets behind it and
+renders unstyled; `:9000` is the webpack dev server, which serves the assets and
+proxies everything else to the app. `:8088` is the right port for
+`docker-compose-non-dev.yml`, which bakes the bundle into the image. See
+[`DEPLOYMENT.md`](../DEPLOYMENT.md).
 
 ## Developing
 
