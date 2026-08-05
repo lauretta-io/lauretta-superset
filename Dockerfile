@@ -191,7 +191,14 @@ RUN --mount=type=cache,target=${SUPERSET_HOME}/.cache/uv \
 # write .cache/selenium at all. Only the two directories are chowned, not their
 # contents: a recursive chown would rewrite the ~280 MB chromium into a new layer,
 # and the browser is already world-readable and executable.
-RUN chown superset:superset ${SUPERSET_HOME}/.cache ${SUPERSET_HOME}/.cache/ms-playwright
+#
+# mkdir -p because neither directory is guaranteed to exist. When INCLUDE_CHROMIUM
+# and INCLUDE_FIREFOX are both false the block above installs nothing, so there is no
+# ms-playwright at all, and .cache survives only as the mountpoint left by the uv
+# cache. Creating them first keeps this one RUN correct for every combination of the
+# two build args instead of failing the build for the combination dev happens to use.
+RUN mkdir -p ${SUPERSET_HOME}/.cache/ms-playwright \
+    && chown superset:superset ${SUPERSET_HOME}/.cache ${SUPERSET_HOME}/.cache/ms-playwright
 
 # Copy required files for Python build
 COPY pyproject.toml setup.py MANIFEST.in README.md ./

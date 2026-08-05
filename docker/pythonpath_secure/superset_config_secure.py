@@ -84,6 +84,23 @@ if urlparse(SUPERSET_PUBLIC_URL).scheme != "https":
         "The secure stack assumes TLS is terminated by the reverse proxy."
     )
 
+# Playwright is required here, not merely preferred. The shared config falls back to
+# Selenium when Playwright is absent, which is fine for modes 1 and 2 but not for this
+# one: no image ships chromedriver, Selenium Manager downloads it at runtime, and it
+# cannot write $HOME/.cache as uid 1000. The fallback therefore fails at screenshot
+# time with "Unable to obtain driver for chrome" — an hour into a report schedule
+# rather than at startup. Fail here instead, naming the build flag that fixes it.
+try:
+    import playwright  # noqa: F401
+except ModuleNotFoundError:
+    raise ValueError(
+        "SUPERSET_SECURE_MODE requires Playwright, which is missing from this image. "
+        "Rebuild with INCLUDE_CHROMIUM=true (the Dockerfile default; only "
+        "docker-compose.yml overrides it to false). The Selenium fallback cannot "
+        "work in secure mode: it downloads chromedriver at runtime and the "
+        "non-root user cannot write the cache directory."
+    ) from None
+
 # ---------------------------------------------------------------------------
 # Reverse proxy awareness
 # ---------------------------------------------------------------------------

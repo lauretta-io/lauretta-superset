@@ -145,19 +145,47 @@ class CeleryConfig:
 
 CELERY_CONFIG = CeleryConfig
 
+
+# Is Playwright available in this image?
+#
+# Dockerfile installs it, and the chromium it drives, only when INCLUDE_CHROMIUM or
+# INCLUDE_FIREFOX is true. That is the default, but docker-compose.yml overrides it
+# to false for dev so a development build does not pull ~280 MB of browser it will
+# probably never use. So the answer differs per mode, and is a property of the image
+# rather than of the deployment.
+try:
+    import playwright  # noqa: F401
+
+    _HAS_PLAYWRIGHT = True
+except ModuleNotFoundError:
+    _HAS_PLAYWRIGHT = False
+
 FEATURE_FLAGS = {
     "ALERT_REPORTS": True,
     "ALERT_REPORT_TABS": True,
     "ALLOW_ADHOC_SUBQUERY": True,
     "ENABLE_TEMPLATE_PROCESSING": True,
-    # Take screenshots with Playwright rather than Selenium. The image ships
-    # Playwright's chromium (Dockerfile "playwright install chromium") but no
-    # chromedriver, so the Selenium path relies on Selenium Manager downloading
-    # one at runtime into $HOME/.cache/selenium. That works as root (modes 1 and
-    # 2) and fails with EACCES in secure mode, where the process is uid 1000 and
-    # .cache is root-owned. Playwright only reads the bundled browser, so it
-    # needs no download and no write access.
-    "PLAYWRIGHT_REPORTS_AND_THUMBNAILS": True,
+    # Take screenshots with Playwright rather than Selenium, wherever Playwright is
+    # in the image.
+    #
+    # No image ships chromedriver, so the Selenium path depends on Selenium Manager
+    # fetching one at runtime into $HOME/.cache/selenium. That works in modes 1 and
+    # 2, which run as root, and fails with EACCES in secure mode, where the process
+    # is uid 1000 and .cache is root-owned. Playwright only reads the chromium
+    # already in the image, so it needs neither a download nor write access.
+    #
+    # Keyed on availability rather than on mode. superset/utils/webdriver.py imports
+    # playwright at module import time when this is on, and playwright is an optional
+    # extra (pyproject.toml "playwright = [...]"), so turning it on unconditionally
+    # makes any image built without it die at init with ModuleNotFoundError. Keying
+    # it this way means nondev and secure both get Playwright — so report behaviour
+    # in nondev actually predicts secure — while a dev image built without browsers
+    # falls back to Selenium instead of failing. `INCLUDE_CHROMIUM=true docker
+    # compose up --build` gives a dev image that opts into the same engine.
+    #
+    # Secure mode does not tolerate the fallback: superset_config_secure.py refuses
+    # to start if Playwright is missing, because Selenium cannot work as uid 1000.
+    "PLAYWRIGHT_REPORTS_AND_THUMBNAILS": _HAS_PLAYWRIGHT,
 }
 ALERT_REPORTS_NOTIFICATION_DRY_RUN = False
 SCREENSHOT_LOCATE_WAIT = 100
