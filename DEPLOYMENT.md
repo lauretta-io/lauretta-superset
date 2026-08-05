@@ -270,6 +270,99 @@ deployment only, edit layer 3.
 
 ---
 
+## Migrating between modes
+
+Carrying dashboards, charts and saved database connections from a dev or nondev
+stack into a secure one. The direction below is nondev → secure; the reverse works
+the same way with the files swapped.
+
+### Why the volumes are separate
+
+Modes 1 and 2 declare no `name:`, so Compose derives the project from the directory
+and prefixes their volumes `lauretta-superset_`. Mode 3 sets `name: superset-secure`
+and gets `superset-secure_`. Same volume keys, different volumes:
+
+```
+lauretta-superset_db_home        superset-secure_db_home
+lauretta-superset_superset_home  superset-secure_superset_home
+```
+
+That separation is deliberate — it is what stops a dev stack and a secure stack
+started from this directory sharing state.
+
+### Sharing the volumes instead is a trap
+
+Pointing mode 3 at the mode 1/2 volumes with an explicit `name:` looks like the
+short path. Three things make it a poor trade:
+
+- **`POSTGRES_PASSWORD` is ignored on a non-empty data directory.** It is applied by
+  `initdb`, which only runs on first start. Reusing an existing `db_home` keeps the
+  *old* role password while `docker/.env-secure` presents a new one, so the app
+  cannot authenticate against its own database.
+- **Ownership is one-way.** Modes 1 and 2 run as root; mode 3 runs as uid 1000.
+  Every file those modes wrote is root-owned and not writable by the secure stack —
+  the same failure class as the upload directory in step 3 of the mode 3 setup.
+- **`down -v` in either stack destroys both.**
+
+Migrate the data instead. It keeps both stacks intact and is reversible.
+
+### Steps
+
+Modes are mutually exclusive: both want 8088, and two Postgres containers over one
+data directory is corruption territory. Stop one before starting the other.
+
+```bash
+# 1. Dump from the source stack. `up -d db` brings up Postgres without the app, so
+#    this also works on a stack that is failing to start.
+docker compose -f docker-compose-non-dev.yml up -d db
+docker compose -f docker-compose-non-dev.yml exec -T db \
+    pg_dump -U superset -d superset > migrate.sql
+docker compose -f docker-compose-non-dev.yml down
+
+# 2. Restore into the secure stack. Let it keep its OWN generated DB password —
+#    the volume is empty, so initdb applies the value from docker/.env-secure.
+docker compose -f docker-compose-secure.yml up -d db
+docker compose -f docker-compose-secure.yml exec -T db \
+    psql -U superset -d superset < migrate.sql
+```
+
+The dump carries `dbs.password`, `dbs.encrypted_extra`, `dbs.server_cert`, the
+`ssh_tunnels` credential columns and `database_user_oauth2_tokens` still encrypted
+under the **source** stack's `SUPERSET_SECRET_KEY`. Pick one of:
+
+**Re-encrypt onto the secure key (preferred).** Leaves the generated key in
+`docker/.env-secure` alone, so the deployment does not inherit a secret that has
+been sitting in gitignored files on dev machines.
+
+```bash
+docker compose -f docker-compose-secure.yml run --rm --no-deps superset \
+    superset re-encrypt-secrets --previous_secret_key '<source SUPERSET_SECRET_KEY>'
+docker compose -f docker-compose-secure.yml up -d
+```
+
+**Or copy the key across.** Set `SUPERSET_SECRET_KEY` in `docker/.env-secure` to the
+source value before first start. It must survive the mode 3 guards: at least 42
+characters, and not one of the known development placeholders — a stack still on the
+`TEST_NON_DEV_SECRET` in `docker/.env` cannot take this path and has to re-encrypt.
+
+Either way, starting the app on a key that does not match the data fails init with
+`ValueError: Invalid decryption key`; see Operational notes for recovery.
+
+### Files outside the database
+
+`lauretta/images` is a bind mount rather than a volume, so uploaded floor maps carry
+over on their own — but the ownership rule still applies:
+
+```bash
+sudo chown -R 1000:1000 lauretta/images
+```
+
+Nothing in the Redis volume needs migrating: cache, Celery broker and (in mode 3)
+server-side sessions. Let the secure stack build its own — it requires a password
+the other modes do not set.
+
+---
+
 ## Verification
 
 ### The stack itself
@@ -407,7 +500,9 @@ re-entered by hand.
 **Modes are mutually exclusive on one host.** The secure stack uses its own compose
 project name (`superset-secure`) and container names, so it will not clobber a
 running nondev stack — but they both want port 8088. Stop one before starting the
-other.
+other. That project name also gives each mode its own volumes, so a secure stack
+starts empty rather than picking up a dev stack's dashboards; see "Migrating between
+modes" for moving data across.
 
 **Jinja templating is enabled.** `ENABLE_TEMPLATE_PROCESSING` and
 `ALLOW_ADHOC_SUBQUERY` are on in the shared config. Jinja in datasets and charts
