@@ -248,6 +248,68 @@ as `dev`.
 All services within a mode share one tag, so each mode builds a single image instead
 of four identical ones under per-service names.
 
+### Which service builds
+
+Within each mode, only `superset-init` carries a `build:` block. The other services
+declare the same `image:` and add `pull_policy: never`.
+
+The reason is that Compose builds through `buildx bake`, which turns every service
+with a `build:` into its own bake target. Because all the Superset services share one
+tag, that used to mean four targets writing the same image name in parallel:
+
+```
+targets: superset, superset-init, superset-worker, superset-worker-beat
+   all four ->  "tags": ["lauretta-superset-nondev:latest"]
+```
+
+The legacy overlay2 image store tolerates the duplicate writes — they simply overwrite
+each other. The containerd image store, which is the default for fresh Docker 29
+installations, rejects the second one:
+
+```
+target superset: failed to solve: image
+"docker.io/library/lauretta-superset-nondev:latest": already exists
+```
+
+This surfaces on a fresh clone on a new server, whether or not `--build` is passed,
+and it affected all three modes. `superset-init` is the service that keeps the build
+block because it is the only one that can build alone — every other service
+`depends_on` it, so naming any of them drags `superset-init` into the build graph and
+the collision returns:
+
+```bash
+docker compose -f docker-compose-non-dev.yml build --print superset-init
+#   targets: ['superset-init']                      <- single target
+docker compose -f docker-compose-non-dev.yml build --print superset
+#   targets: ['superset', 'superset-init']          <- collision returns
+```
+
+`pull_policy: never` stops Compose from trying to pull a tag that exists in no
+registry. Without it the stack still starts — Compose falls through to the image
+`superset-init` just built — but a cold build first prints one
+`pull access denied ... repository does not exist` error per non-building service.
+
+Two consequences worth knowing:
+
+- **Do not add a `build:` block back to the other services.** It looks like an
+  oversight and reintroduces the failure, but only on containerd-store hosts, so it
+  will pass review on a machine that was upgraded from an older Docker.
+- **`docker compose up superset-worker` on its own** now fails with an image-not-found
+  error on a host that has never built the image, instead of building it. Build first,
+  or start the whole stack, which finishes all builds before creating any container:
+
+  ```bash
+  docker compose -f docker-compose-non-dev.yml build superset-init
+  ```
+
+`COMPOSE_BAKE=false` is not a fix. The classic builder exports the image once per
+service rather than once per mode, so it performs *more* duplicate writes of the same
+tag, not fewer.
+
+In mode 1, `superset-node` and `superset-websocket` keep their own `build:` blocks.
+They build different stages under their own tags, so they were never part of the
+collision.
+
 `DEV_MODE=true` skips `npm ci` and `npm run build`, so the dev image ships an empty
 `/app/superset/static/assets` — correct for mode 1, fatal for mode 2. When both
 modes shared a tag, running `docker compose up` and then

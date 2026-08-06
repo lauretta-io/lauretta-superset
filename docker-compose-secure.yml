@@ -68,6 +68,15 @@ x-superset-build: &superset-build
 
 # Pinned rather than derived from the project name, to match the lauretta-superset-<mode>
 # scheme the other two compose files use. See DEPLOYMENT.md ("Image tags").
+#
+# Only superset-init carries a `build:` block; the others reference the image it
+# produces and are marked `pull_policy: never`. Compose builds through `buildx bake`,
+# which turns every service with a `build:` into its own bake target — several targets
+# writing this one tag in parallel. The containerd image store (the default for fresh
+# Docker 29 installs) rejects the duplicate with `already exists`; the legacy overlay2
+# store silently tolerates it. superset-init is the only service that can build alone,
+# because every other service depends_on it.
+# See DEPLOYMENT.md ("Which service builds").
 x-superset-image: &superset-image lauretta-superset-secure:latest
 
 # Containers that run as the `superset` user from the start need no capabilities at
@@ -165,9 +174,8 @@ services:
 
   superset:
     <<: [*superset-env, *superset-hardening]
-    build:
-      <<: *superset-build
     image: *superset-image
+    pull_policy: never # built by superset-init; see the x-superset-image comment
     container_name: superset_app_secure
     command: ["/app/docker/docker-bootstrap.sh", "app-gunicorn"]
     restart: unless-stopped
@@ -205,9 +213,8 @@ services:
 
   superset-worker:
     <<: [*superset-env, *superset-hardening]
-    build:
-      <<: *superset-build
     image: *superset-image
+    pull_policy: never # built by superset-init; see the x-superset-image comment
     container_name: superset_worker_secure
     command: ["/app/docker/docker-bootstrap.sh", "worker"]
     restart: unless-stopped
@@ -226,9 +233,8 @@ services:
 
   superset-worker-beat:
     <<: [*superset-env, *superset-hardening]
-    build:
-      <<: *superset-build
     image: *superset-image
+    pull_policy: never # built by superset-init; see the x-superset-image comment
     container_name: superset_worker_beat_secure
     command: ["/app/docker/docker-bootstrap.sh", "beat"]
     restart: unless-stopped

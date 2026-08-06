@@ -58,6 +58,16 @@ x-common-build: &common-build
 # opposite DEV_MODE values. See DEPLOYMENT.md ("Image tags").
 #
 # The suffix tracks SUPERSET_BUILD_TARGET so a `lean` build is not tagged `dev`.
+#
+# Only superset-init carries a `build:` block; the others reference the image it
+# produces and are marked `pull_policy: never`. Compose builds through `buildx bake`,
+# which turns every service with a `build:` into its own bake target — several targets
+# writing this one tag in parallel. The containerd image store (the default for fresh
+# Docker 29 installs) rejects the duplicate with `already exists`; the legacy overlay2
+# store silently tolerates it. superset-init is the only service that can build alone,
+# because every other service depends_on it. superset-node and superset-websocket are
+# unaffected: they build different stages under their own tags.
+# See DEPLOYMENT.md ("Which service builds").
 x-common-image: &common-image lauretta-superset-${SUPERSET_BUILD_TARGET:-dev}:latest
 
 services:
@@ -101,9 +111,8 @@ services:
         required: true
       - path: docker/.env-local # optional override
         required: false
-    build:
-      <<: *common-build
     image: *common-image
+    pull_policy: never # built by superset-init; see the x-common-image comment
     container_name: superset_app
     command: ["/app/docker/docker-bootstrap.sh", "app"]
     restart: unless-stopped
@@ -215,9 +224,8 @@ services:
     volumes: *superset-volumes
 
   superset-worker:
-    build:
-      <<: *common-build
     image: *common-image
+    pull_policy: never # built by superset-init; see the x-common-image comment
     container_name: superset_worker
     command: ["/app/docker/docker-bootstrap.sh", "worker"]
     env_file:
@@ -244,9 +252,8 @@ services:
     # mem_reservation: 128M
 
   superset-worker-beat:
-    build:
-      <<: *common-build
     image: *common-image
+    pull_policy: never # built by superset-init; see the x-common-image comment
     container_name: superset_worker_beat
     command: ["/app/docker/docker-bootstrap.sh", "beat"]
     env_file:
@@ -266,9 +273,8 @@ services:
       SUPERSET_LOG_LEVEL: "${SUPERSET_LOG_LEVEL:-info}"
 
   superset-tests-worker:
-    build:
-      <<: *common-build
     image: *common-image
+    pull_policy: never # built by superset-init; see the x-common-image comment
     container_name: superset_tests_worker
     command: ["/app/docker/docker-bootstrap.sh", "worker"]
     env_file:
