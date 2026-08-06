@@ -69,6 +69,28 @@ x-common-build: &common-build
 # See DEPLOYMENT.md ("Which service builds").
 x-common-image: &common-image lauretta-superset-nondev:latest
 
+# docker/.env sets DEV_MODE=true, and it is an env_file shared by all three modes, so
+# this one inherits it at *runtime*. The `DEV_MODE: "false"` in x-common-build above
+# is a build arg and does not help: it only controls whether the node stage runs the
+# frontend build, and the final image carries no DEV_MODE of its own (the Dockerfile
+# ENV lives in the superset-node-ci stage, which never reaches the python image).
+#
+# At runtime the flag is read only by docker/docker-bootstrap.sh, which reinstalls
+# the app in editable mode with `uv pip install -e .` when it is "true" and the
+# container is root — which all four services here are. That rebuilds
+# apache-superset from /app and fetches setuptools and wheel from PyPI on every
+# single boot. Merely wasteful with internet access; fatal without it, and it fails
+# in superset-init before any migration runs:
+#
+#   × Failed to build `apache-superset @ file:///app`
+#   ╰─▶ Failed to fetch: `https://pypi.org/simple/setuptools/`
+#
+# Mode 3 escapes this by running as `superset` rather than root, not by setting the
+# flag. Editable installs are pointless here regardless: unlike mode 1, this file
+# does not bind-mount ./superset, so there is no live source to install against.
+x-common-env: &common-env
+  DEV_MODE: "false"
+
 services:
   redis:
     image: redis:7
@@ -109,6 +131,7 @@ services:
         condition: service_completed_successfully
     volumes: *superset-volumes
     environment:
+      <<: *common-env
       SUPERSET_LOG_LEVEL: "${SUPERSET_LOG_LEVEL:-info}"
 
   superset-init:
@@ -132,6 +155,7 @@ services:
     healthcheck:
       disable: true
     environment:
+      <<: *common-env
       SUPERSET_LOAD_EXAMPLES: "${SUPERSET_LOAD_EXAMPLES:-yes}"
       SUPERSET_LOG_LEVEL: "${SUPERSET_LOG_LEVEL:-info}"
 
@@ -158,6 +182,7 @@ services:
           "celery -A superset.tasks.celery_app:app inspect ping -d celery@$$HOSTNAME",
         ]
     environment:
+      <<: *common-env
       SUPERSET_LOG_LEVEL: "${SUPERSET_LOG_LEVEL:-info}"
 
   superset-worker-beat:
@@ -179,6 +204,7 @@ services:
     healthcheck:
       disable: true
     environment:
+      <<: *common-env
       SUPERSET_LOG_LEVEL: "${SUPERSET_LOG_LEVEL:-info}"
 
 volumes:

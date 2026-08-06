@@ -34,8 +34,21 @@ if [ "$CYPRESS_CONFIG" == "true" ]; then
     export SUPERSET__SQLALCHEMY_DATABASE_URI=postgresql+psycopg2://superset:superset@db:5432/superset_cypress
     PORT=8081
 fi
-if [[ "$DATABASE_DIALECT" == postgres* ]] && [ "$(whoami)" = "root" ]; then
+if [[ "$DATABASE_DIALECT" == postgres* ]] && [ "$(whoami)" = "root" ] && \
+   ! python -c "import psycopg2" > /dev/null 2>&1; then
     # older images may not have the postgres dev requirements installed
+    #
+    # Skipped when the driver is already importable, which it is in every image this
+    # repo builds: the `dev` stage installs .[postgres] (Dockerfile) and `production`
+    # installs .[postgres,thumbnails]. Without the guard this runs on any root
+    # container -- modes 1 and 2, but not 3, which runs as `superset` -- and
+    # `uv pip install -e .[postgres]` rebuilds apache-superset from /app, so uv
+    # fetches setuptools and wheel from PyPI for build-system.requires. On an
+    # air-gapped host that is a hard failure in superset-init, which calls this
+    # script before running any migration:
+    #
+    #   Failed to build `apache-superset @ file:///app`
+    #   Failed to fetch: `https://pypi.org/simple/setuptools/`
     echo "Installing postgres requirements"
     if command -v uv > /dev/null 2>&1; then
         # Use uv in newer images
