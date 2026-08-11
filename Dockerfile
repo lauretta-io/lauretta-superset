@@ -34,6 +34,11 @@ ARG BUILD_TRANSLATIONS
 ENV BUILD_TRANSLATIONS=${BUILD_TRANSLATIONS}
 ARG DEV_MODE="false"           # Skip frontend build in dev mode
 ENV DEV_MODE=${DEV_MODE}
+# Baked into the bundle by webpack (superset-frontend/webpack.config.js), so it has
+# to be a build arg rather than a runtime env var. Set to "false" by
+# docker-compose-secure.yml to drop the scarf.sh telemetry pixel.
+ARG SCARF_ANALYTICS
+ENV SCARF_ANALYTICS=${SCARF_ANALYTICS}
 
 COPY docker/ /app/docker/
 # Arguments for build configuration
@@ -179,6 +184,22 @@ RUN --mount=type=cache,target=${SUPERSET_HOME}/.cache/uv \
         echo "Skipping browser installation"; \
     fi
 
+# playwright above runs as root, leaving ${SUPERSET_HOME}/.cache root-owned inside
+# a home directory the `superset` user owns. Containers that run as that user then
+# cannot create anything under it — fontconfig and matplotlib caches fail silently,
+# a Playwright bump cannot fetch a newer browser build, and Selenium Manager cannot
+# write .cache/selenium at all. Only the two directories are chowned, not their
+# contents: a recursive chown would rewrite the ~280 MB chromium into a new layer,
+# and the browser is already world-readable and executable.
+#
+# mkdir -p because neither directory is guaranteed to exist. When INCLUDE_CHROMIUM
+# and INCLUDE_FIREFOX are both false the block above installs nothing, so there is no
+# ms-playwright at all, and .cache survives only as the mountpoint left by the uv
+# cache. Creating them first keeps this one RUN correct for every combination of the
+# two build args instead of failing the build for the combination dev happens to use.
+RUN mkdir -p ${SUPERSET_HOME}/.cache/ms-playwright \
+    && chown superset:superset ${SUPERSET_HOME}/.cache ${SUPERSET_HOME}/.cache/ms-playwright
+
 # Copy required files for Python build
 COPY pyproject.toml setup.py MANIFEST.in README.md ./
 COPY superset-frontend/package.json superset-frontend/
@@ -262,3 +283,21 @@ USER root
 RUN uv pip install .[postgres]
 USER superset
 CMD ["/app/docker/entrypoints/docker-ci.sh"]
+
+######################################################################
+# Production image...
+######################################################################
+# Used by docker-compose-secure.yml. Based on `lean` rather than `dev` so the
+# image carries neither requirements/development.txt nor the git/build-essential
+# toolchain, which keeps the CVE surface small.
+#
+# The postgres driver has to be baked in here: docker-bootstrap.sh only installs
+# it when running as root, and the secure stack runs as the `superset` user.
+#
+# `thumbnails` pulls in Pillow. It is in requirements/development.txt but not
+# base.txt, so without it this image would silently lose chart/dashboard thumbnails
+# and PDF export relative to the dev-stage images ("No PIL installation found").
+FROM lean AS production
+USER root
+RUN uv pip install .[postgres,thumbnails]
+USER superset

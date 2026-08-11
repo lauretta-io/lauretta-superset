@@ -66,19 +66,25 @@ docker-compose -f docker-compose-non-dev.yml up -d --build
 
 After setup, your dashboards should be visible immediately in the Superset UI under the "Dashboards" menu.
 
-### Dev vs. prod
-There are actually two ways to spin up a superset instance
-1. **Development**: `docker compose up` --> uses `docker-compose.yml`
+### Deployment modes
+There are three ways to spin up a superset instance, one per compose file. See
+[`DEPLOYMENT.md`](../DEPLOYMENT.md) for the full comparison.
+1. **dev**: `docker compose up` --> uses `docker-compose.yml`
     - this spins up with `superset_node` container which allows hot-module reloading (HMR) and will rebuild the app as changes are made
     - accessed via http://localhost:9000
     - only available via localhost, blocks access from other hosts
     - use this for development and testing changes
 
-2. **Production**: `docker compose -f docker-compose-non-dev.yml up -d --build`
+2. **nondev**: `docker compose -f docker-compose-non-dev.yml up -d --build`
     - builds the app before serving, after build changes will require rebuild to take effect
     - accessed via http://localhost:8088
     - allows access from other hosts
-    - use this for client-facing deployed instances
+    - plain HTTP, runs as root, development defaults — use this on a trusted network only
+
+3. **secure**: `docker compose -f docker-compose-secure.yml up -d --build`
+    - hardened: non-root containers, HTTPS via a host nginx reverse proxy, authenticated Redis, secrets from a gitignored `docker/.env-secure`
+    - accessed via https://your-domain
+    - use this for client-facing deployed instances; setup steps are in [`DEPLOYMENT.md`](../DEPLOYMENT.md)
 
 ---
 

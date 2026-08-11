@@ -2,6 +2,20 @@ import json, os, zipfile, yaml, subprocess, uuid, shutil, re, glob, string, rand
 
 CONFIG_PATH = "/app/lauretta/dashboards/config.json"
 
+def redact_uri(uri):
+    """Mask the password in a SQLAlchemy URI so it is safe to print.
+
+    The URIs this script builds carry the real credentials from config.json, and
+    everything printed here lands in the terminal and in any captured CI log.
+    Masks with the same 'X' * 10 that Superset's PASSWORD_MASK uses.
+
+    The password segment is matched greedily, to the last '@' rather than the
+    first: config.json values are interpolated into the URI without escaping, so
+    a password containing '@' would otherwise have its tail printed. This can
+    over-mask a URI whose query string contains '@', which is the safe direction
+    to fail for something that only ever feeds a print."""
+    return re.sub(r"://([^:/@]+):.*@", lambda m: f"://{m.group(1)}:{'X' * 10}@", uri)
+
 def check_dashboard_exists(zip_path):
     """Check if the dashboard from the given ZIP has already been imported into Superset.
     Reads the dashboard UUID from the zip then queries the Dashboard model.
@@ -920,7 +934,11 @@ def update_database_yaml_credentials(extract_dir, conn_config, db_display_name, 
             db_data['extra'] = extra
             print(f"🕐 Set extra.engine_params.connect_args.options=-c timezone={timezone} in {fname}")
         yaml_str = yaml.dump(db_data, default_flow_style=False, allow_unicode=True, sort_keys=False)
-        print(f"\n📄 Database YAML [{fname}] before zip/import:\n{'─'*60}\n{yaml_str}{'─'*60}\n")
+        # The file on disk needs the real credentials — Superset's importer rejects a
+        # masked password — but the copy we echo does not. Redact only the printed one.
+        shown = dict(db_data, sqlalchemy_uri=redact_uri(db_data['sqlalchemy_uri']))
+        shown_str = yaml.dump(shown, default_flow_style=False, allow_unicode=True, sort_keys=False)
+        print(f"\n📄 Database YAML [{fname}] before zip/import:\n{'─'*60}\n{shown_str}{'─'*60}\n")
         with open(fpath, 'w') as f:
             f.write(yaml_str)
         print(f"🔐 Updated database credentials in {fname}")
@@ -1025,7 +1043,7 @@ def update_via_superset_shell():
         new_name = conn_config.get("database_display_name", conn_config.get("database_name", "Database"))
         new_uri = f"postgresql+psycopg2://{conn_config['username']}:{conn_config['password']}@{conn_config['host']}:{conn_config['port']}/{conn_config['db']}"
         target_db_uuid = generate_database_uuid(dash.get("path"), conn_config)
-        print(f"\n🔍 NEW URI: {new_uri}")
+        print(f"\n🔍 NEW URI: {redact_uri(new_uri)}")
         print(f"🧩 TARGET DB UUID: {target_db_uuid}")
         # Step 1: Trace UUID from file ZIP
         source_db_uuid = None
@@ -1071,7 +1089,11 @@ def update_via_superset_shell():
                 "    if database:",
                 "        print(f'Updating existing database: {database.database_name}')",
                 "        database.database_name = target_name",
-                "        database.sqlalchemy_uri = target_uri",
+                # set_sqlalchemy_uri(), not a plain assignment: the setter moves the
+                # password out of the URI into the encrypted `password` column and
+                # leaves PASSWORD_MASK behind. Assigning the attribute directly
+                # stores the credential in plaintext in the metadata database.
+                "        database.set_sqlalchemy_uri(target_uri)",
                 "        # Merge engine_params into existing extra",
                 "        try:",
                 "            existing_extra = json.loads(database.extra) if database.extra else {}",
@@ -1082,7 +1104,10 @@ def update_via_superset_shell():
                 "        database.extra = json.dumps(existing_extra)",
                 "    else:",
                 "        print(f'Database with UUID {target_uuid} not found. Creating new one...')",
-                "        database = Database(database_name=target_name, sqlalchemy_uri=target_uri, uuid=target_uuid, extra=target_extra)",
+                # Same reason: the constructor kwarg would assign the attribute
+                # directly, so the URI is set through the setter instead.
+                "        database = Database(database_name=target_name, uuid=target_uuid, extra=target_extra)",
+                "        database.set_sqlalchemy_uri(target_uri)",
                 "        db.session.add(database)",
                 "    db.session.commit()",
                 "    refreshed = db.session.query(Database).filter_by(uuid=target_uuid).first()",

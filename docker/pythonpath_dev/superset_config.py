@@ -26,15 +26,38 @@ import os
 import sys
 import uuid
 import re
+from functools import wraps
 from pathlib import Path
+from urllib.parse import quote
 
 from datetime import timedelta
 
 from celery.schedules import crontab
 from flask import abort, send_file, jsonify, request, session
 from flask_caching.backends.filesystemcache import FileSystemCache
+from flask_login import current_user
 
 logger = logging.getLogger()
+
+
+def _require_authenticated_user(view):
+    """Reject anonymous callers with a JSON 401.
+
+    Deliberately not flask_login's @login_required: that hands off to
+    login_manager.unauthorized(), which builds a redirect with url_for("login").
+    Flask-AppBuilder registers the login endpoint as "AuthDBView.login", so the
+    lookup raises BuildError and the route returns 500 instead of rejecting
+    cleanly. These are JSON endpoints, so 401 is the right answer anyway.
+    """
+
+    @wraps(view)
+    def wrapper(*args, **kwargs):
+        if not getattr(current_user, "is_authenticated", False):
+            return jsonify(error="Authentication required"), 401
+        return view(*args, **kwargs)
+
+    return wrapper
+
 
 DATABASE_DIALECT = os.getenv("DATABASE_DIALECT")
 DATABASE_USER = os.getenv("DATABASE_USER")
@@ -66,6 +89,17 @@ REDIS_HOST = os.getenv("REDIS_HOST", "redis")
 REDIS_PORT = os.getenv("REDIS_PORT", "6379")
 REDIS_CELERY_DB = os.getenv("REDIS_CELERY_DB", "0")
 REDIS_RESULTS_DB = os.getenv("REDIS_RESULTS_DB", "1")
+# Empty in dev/nondev mode, where Redis has no `requirepass`. The secure stack sets
+# it, and every Redis URL/connection below has to carry it or caching, Celery and
+# server-side sessions all fail to authenticate.
+REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "")
+
+
+def redis_url(db: str | int) -> str:
+    """Redis URL for `db`, with credentials only when a password is configured."""
+    auth = f":{quote(REDIS_PASSWORD, safe='')}@" if REDIS_PASSWORD else ""
+    return f"redis://{auth}{REDIS_HOST}:{REDIS_PORT}/{db}"
+
 
 RESULTS_BACKEND = FileSystemCache("/app/superset_home/sqllab")
 
@@ -77,18 +111,20 @@ CACHE_CONFIG = {
     "CACHE_REDIS_PORT": REDIS_PORT,
     "CACHE_REDIS_DB": REDIS_RESULTS_DB,
 }
+if REDIS_PASSWORD:
+    CACHE_CONFIG["CACHE_REDIS_PASSWORD"] = REDIS_PASSWORD
 DATA_CACHE_CONFIG = CACHE_CONFIG
 
 
 class CeleryConfig:
-    broker_url = f"redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_CELERY_DB}"
+    broker_url = redis_url(REDIS_CELERY_DB)
     imports = (
         "superset.sql_lab",
         "superset.tasks.scheduler",
         "superset.tasks.thumbnails",
         "superset.tasks.cache",
     )
-    result_backend = f"redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_RESULTS_DB}"
+    result_backend = redis_url(REDIS_RESULTS_DB)
     worker_prefetch_multiplier = 1
     task_acks_late = False
     beat_schedule = {
@@ -109,11 +145,47 @@ class CeleryConfig:
 
 CELERY_CONFIG = CeleryConfig
 
+
+# Is Playwright available in this image?
+#
+# Dockerfile installs it, and the chromium it drives, only when INCLUDE_CHROMIUM or
+# INCLUDE_FIREFOX is true. That is the default, but docker-compose.yml overrides it
+# to false for dev so a development build does not pull ~280 MB of browser it will
+# probably never use. So the answer differs per mode, and is a property of the image
+# rather than of the deployment.
+try:
+    import playwright  # noqa: F401
+
+    _HAS_PLAYWRIGHT = True
+except ModuleNotFoundError:
+    _HAS_PLAYWRIGHT = False
+
 FEATURE_FLAGS = {
     "ALERT_REPORTS": True,
     "ALERT_REPORT_TABS": True,
     "ALLOW_ADHOC_SUBQUERY": True,
     "ENABLE_TEMPLATE_PROCESSING": True,
+    # Take screenshots with Playwright rather than Selenium, wherever Playwright is
+    # in the image.
+    #
+    # No image ships chromedriver, so the Selenium path depends on Selenium Manager
+    # fetching one at runtime into $HOME/.cache/selenium. That works in modes 1 and
+    # 2, which run as root, and fails with EACCES in secure mode, where the process
+    # is uid 1000 and .cache is root-owned. Playwright only reads the chromium
+    # already in the image, so it needs neither a download nor write access.
+    #
+    # Keyed on availability rather than on mode. superset/utils/webdriver.py imports
+    # playwright at module import time when this is on, and playwright is an optional
+    # extra (pyproject.toml "playwright = [...]"), so turning it on unconditionally
+    # makes any image built without it die at init with ModuleNotFoundError. Keying
+    # it this way means nondev and secure both get Playwright — so report behaviour
+    # in nondev actually predicts secure — while a dev image built without browsers
+    # falls back to Selenium instead of failing. `INCLUDE_CHROMIUM=true docker
+    # compose up --build` gives a dev image that opts into the same engine.
+    #
+    # Secure mode does not tolerate the fallback: superset_config_secure.py refuses
+    # to start if Playwright is missing, because Selenium cannot work as uid 1000.
+    "PLAYWRIGHT_REPORTS_AND_THUMBNAILS": _HAS_PLAYWRIGHT,
 }
 ALERT_REPORTS_NOTIFICATION_DRY_RUN = False
 SCREENSHOT_LOCATE_WAIT = 100
@@ -176,7 +248,22 @@ LOG_LEVEL = getattr(logging, log_level_text.upper(), logging.INFO)
 LAURETTA_IMAGES_DIR = Path("/app/lauretta/images")
 LAURETTA_CUSTOM_IMAGES_DIR = Path("/app/lauretta/images/customs")
 LAURETTA_TEMP_IMAGES_DIR = Path("/app/lauretta/images/tmp")
-ALLOWED_FLOOR_IMAGE_EXTENSIONS = {".jpeg", ".jpg", ".png", ".gif", ".webp"}
+# Accepted upload extensions, each mapped to a test of its magic bytes. One dict
+# rather than a set plus a lookup table: membership is what makes an extension
+# allowed and the value is what confirms the bytes match, so adding an extension
+# without a signature for it is not expressible.
+#
+# The check confirms an upload really is the type its filename claims, so the
+# Content-Type that send_file derives from the extension can't disagree with the
+# bytes on disk. Deliberately dependency-free: Pillow is only in
+# requirements/development.txt, so it is absent from the lean-based production image.
+ALLOWED_FLOOR_IMAGE_EXTENSIONS = {
+    ".jpg": lambda head: head.startswith(b"\xff\xd8\xff"),
+    ".jpeg": lambda head: head.startswith(b"\xff\xd8\xff"),
+    ".png": lambda head: head.startswith(b"\x89PNG\r\n\x1a\n"),
+    ".gif": lambda head: head.startswith((b"GIF87a", b"GIF89a")),
+    ".webp": lambda head: head[:4] == b"RIFF" and head[8:12] == b"WEBP",
+}
 
 """
 By default, the app will use the standard Superset banner. 
@@ -425,7 +512,11 @@ def FLASK_APP_MUTATOR(app):
        sqla.event.listen(Slice, "before_delete", _on_slice_delete)
        sqla.event.listen(Slice, "before_update", _on_slice_update)
 
+   # NOTE: these routes are registered straight onto the Flask app, so they bypass
+   # FAB's permission layer entirely. @_require_authenticated_user is what keeps
+   # them from being anonymously reachable — do not remove it.
    @app.get("/api/v1/lauretta/floors")
+   @_require_authenticated_user
    def lauretta_floors_list():
        """Return the list of floors from config.json."""
        config_path = Path("/app/lauretta/dashboards/config.json")
@@ -446,6 +537,7 @@ def FLASK_APP_MUTATOR(app):
        return jsonify(all_floors)
 
    @app.get("/api/v1/lauretta/images/<path:floor_ref>")
+   @_require_authenticated_user
    def lauretta_floor_image(floor_ref: str):
        image_path = _resolve_floor_image(floor_ref)
        if not image_path:
@@ -453,6 +545,7 @@ def FLASK_APP_MUTATOR(app):
        return send_file(image_path) 
 
    @app.post("/api/v1/lauretta/images/upload")
+   @_require_authenticated_user
    def lauretta_floor_image_upload():
        image_file = request.files.get("file")
        if not image_file or not image_file.filename:
@@ -462,6 +555,17 @@ def FLASK_APP_MUTATOR(app):
        suffix = Path(original_name).suffix.lower()
        if suffix not in ALLOWED_FLOOR_IMAGE_EXTENSIONS:
            return abort(400, description="Unsupported image extension")
+
+       # The extension alone says nothing about the contents — check the magic bytes
+       # match, so we never serve a non-image back under an image Content-Type.
+       image_file.stream.seek(0)
+       head = image_file.stream.read(32)
+       image_file.stream.seek(0)
+       if not ALLOWED_FLOOR_IMAGE_EXTENSIONS[suffix](head):
+           return abort(
+               400,
+               description=f"File contents are not a valid {suffix.lstrip('.')} image",
+           )
 
        safe_stem = re.sub(r"[^A-Za-z0-9._-]+", "_", Path(original_name).stem).strip("._")
        if not safe_stem:
@@ -505,3 +609,22 @@ try:
     )
 except ImportError:
     logger.info("Using default Docker config...")
+
+#
+# Hardened overrides for the secure deployment (docker-compose-secure.yml).
+#
+# Loaded LAST, after superset_config_docker, so that a stale local override file
+# can never silently weaken a secure deployment's security settings.
+#
+# Enabled by SUPERSET_SECURE_MODE=true, which is set only in docker/.env-secure.
+# That file also extends PYTHONPATH with /app/docker/pythonpath_secure so this
+# import resolves. Modes 1 (dev) and 2 (nondev) never take this branch.
+#
+if os.getenv("SUPERSET_SECURE_MODE", "").strip().lower() in {"1", "true", "yes"}:
+    import superset_config_secure
+    from superset_config_secure import *  # noqa
+
+    logger.info(
+        f"Loaded hardened secure configuration at "
+        f"[{superset_config_secure.__file__}]"
+    )
