@@ -1,0 +1,10 @@
+# Ignore all files in dashboards except README and zip files
+*
+!*.zip
+!README.md
+!.gitignore
+!config.example.json
+
+# But DO ignore the actual config file with passwords
+config.json
+

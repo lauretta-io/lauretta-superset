@@ -119,6 +119,12 @@ docker/requirements-local.txt
 
 cache/
 docker/*local*
+# --- lauretta: deployment secrets (ported from lauretta-superset-main) ---
+# The .example templates are committed with placeholders; the real files never are.
+docker/.env-local
+!docker/.env-local.example
+docker/.env-secure
+!docker/.env-secure.example
 docker/superset-websocket/config.json
 docker-compose.override.yml
 
