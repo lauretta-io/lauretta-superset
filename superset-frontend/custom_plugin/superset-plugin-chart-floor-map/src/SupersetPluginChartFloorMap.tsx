@@ -222,7 +222,7 @@ const getFloorImageUrl = (imageFilename?: string): string => {
 
 const Styles = styled.div<{ height: number; width: number }>`
   padding: 0;
-  border-radius: ${({ theme }) => theme.gridUnit * 2}px;
+  border-radius: ${({ theme }) => theme.sizeUnit * 2}px;
   height: ${({ height }) => height}px;
   width: ${({ width }) => width}px;
   overflow: hidden;

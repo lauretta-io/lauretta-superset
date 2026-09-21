@@ -41,30 +41,30 @@ const Styles = styled.div`
       position: sticky;
       top: 0;
       z-index: 2;
-      background: ${theme.colors.grayscale.light4};
-      color: ${theme.colors.grayscale.dark1};
-      font-weight: ${theme.typography.weights.bold};
-      font-size: ${theme.typography.sizes.s}px;
+      background: ${theme.colorBgLayout};
+      color: ${theme.colorText};
+      font-weight: ${theme.fontWeightStrong};
+      font-size: ${theme.fontSizeSM}px;
       text-transform: uppercase;
       letter-spacing: 0.5px;
-      padding: ${theme.gridUnit * 3}px ${theme.gridUnit * 2}px;
+      padding: ${theme.sizeUnit * 3}px ${theme.sizeUnit * 2}px;
       text-align: left;
-      border-bottom: 1px solid ${theme.colors.grayscale.light2};
+      border-bottom: 1px solid ${theme.colorBorder};
     }
 
     tbody tr {
-      border-bottom: 1px solid ${theme.colors.grayscale.light3};
+      border-bottom: 1px solid ${theme.colorBorderSecondary};
       transition: background-color 0.15s ease;
     }
 
     tbody tr:hover {
-      background-color: ${theme.colors.grayscale.light5};
+      background-color: ${theme.colorBgContainer};
     }
 
     tbody td {
-      padding: ${theme.gridUnit * 3}px ${theme.gridUnit * 2}px;
-      font-size: ${theme.typography.sizes.m}px;
-      color: ${theme.colors.grayscale.dark2};
+      padding: ${theme.sizeUnit * 3}px ${theme.sizeUnit * 2}px;
+      font-size: ${theme.fontSize}px;
+      color: ${theme.colorTextHeading};
       vertical-align: middle;
     }
 
@@ -81,8 +81,8 @@ const Styles = styled.div`
       width: 28px;
       height: 28px;
       border-radius: 50%;
-      font-weight: ${theme.typography.weights.bold};
-      font-size: ${theme.typography.sizes.s}px;
+      font-weight: ${theme.fontWeightStrong};
+      font-size: ${theme.fontSizeSM}px;
     }
 
     .rank-1 {
@@ -101,8 +101,8 @@ const Styles = styled.div`
     }
 
     .rank-default {
-      background: ${theme.colors.grayscale.light3};
-      color: ${theme.colors.grayscale.dark1};
+      background: ${theme.colorFillQuaternary};
+      color: ${theme.colorText};
     }
 
     .count-cell {
@@ -113,13 +113,13 @@ const Styles = styled.div`
     .count-value {
       display: flex;
       align-items: center;
-      gap: ${theme.gridUnit * 2}px;
-      font-weight: ${theme.typography.weights.bold};
-      color: ${theme.colors.primary.base};
+      gap: ${theme.sizeUnit * 2}px;
+      font-weight: ${theme.fontWeightStrong};
+      color: ${theme.colorPrimary};
     }
 
     .count-icon {
-      color: ${theme.colors.primary.light1};
+      color: ${theme.colorPrimaryHover};
     }
 
     .journey-nodes {
@@ -128,49 +128,49 @@ const Styles = styled.div`
       min-width: 0;
       flex-wrap: wrap;
       align-items: center;
-      gap: ${theme.gridUnit}px;
+      gap: ${theme.sizeUnit}px;
       cursor: pointer;
-      padding: ${theme.gridUnit}px;
-      border-radius: ${theme.gridUnit}px;
+      padding: ${theme.sizeUnit}px;
+      border-radius: ${theme.sizeUnit}px;
       transition: background-color 0.15s ease;
     }
 
     .journey-nodes:hover {
-      background-color: ${theme.colors.primary.light5};
+      background-color: ${theme.colorPrimaryBg};
     }
 
     .node-chip {
       display: inline-flex;
       align-items: center;
-      padding: ${theme.gridUnit}px ${theme.gridUnit * 2}px;
-      background: ${theme.colors.grayscale.light4};
-      border: 1px solid ${theme.colors.grayscale.light2};
-      border-radius: ${theme.gridUnit}px;
-      font-size: ${theme.typography.sizes.s}px;
-      color: ${theme.colors.grayscale.dark1};
-      font-weight: ${theme.typography.weights.normal};
+      padding: ${theme.sizeUnit}px ${theme.sizeUnit * 2}px;
+      background: ${theme.colorBgLayout};
+      border: 1px solid ${theme.colorBorder};
+      border-radius: ${theme.sizeUnit}px;
+      font-size: ${theme.fontSizeSM}px;
+      color: ${theme.colorText};
+      font-weight: ${theme.fontWeightNormal};
     }
 
     .node-arrow {
-      color: ${theme.colors.grayscale.base};
-      font-size: ${theme.typography.sizes.s}px;
+      color: ${theme.colorTextSecondary};
+      font-size: ${theme.fontSizeSM}px;
     }
 
     .more-nodes {
       display: inline-flex;
       align-items: center;
-      padding: ${theme.gridUnit}px ${theme.gridUnit * 2}px;
-      background: ${theme.colors.grayscale.light3};
-      border-radius: ${theme.gridUnit}px;
-      color: ${theme.colors.primary.base};
-      font-size: ${theme.typography.sizes.s}px;
-      font-weight: ${theme.typography.weights.medium};
+      padding: ${theme.sizeUnit}px ${theme.sizeUnit * 2}px;
+      background: ${theme.colorFillQuaternary};
+      border-radius: ${theme.sizeUnit}px;
+      color: ${theme.colorPrimary};
+      font-size: ${theme.fontSizeSM}px;
+      font-weight: ${theme.fontWeightStrong};
     }
 
     .click-hint {
-      color: ${theme.colors.primary.base};
-      font-size: ${theme.typography.sizes.xs}px;
-      margin-left: ${theme.gridUnit * 2}px;
+      color: ${theme.colorPrimary};
+      font-size: ${theme.fontSizeXS}px;
+      margin-left: ${theme.sizeUnit * 2}px;
       opacity: 0;
       transition: opacity 0.15s ease;
     }
@@ -181,8 +181,8 @@ const Styles = styled.div`
 
     .empty-state {
       text-align: center;
-      padding: ${theme.gridUnit * 4}px;
-      color: ${theme.colors.grayscale.base};
+      padding: ${theme.sizeUnit * 4}px;
+      color: ${theme.colorTextSecondary};
       font-style: italic;
     }
 
@@ -200,7 +200,7 @@ const Styles = styled.div`
       }
 
       .count-value {
-        font-size: ${theme.typography.sizes.s}px;
+        font-size: ${theme.fontSizeSM}px;
       }
 
       .count-icon {

@@ -16,7 +16,7 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import React, { useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { css, styled } from '@apache-superset/core/theme';
 import {
   SupersetPluginChartCustomerJourneyProps,
@@ -29,7 +29,7 @@ import JourneyModal from './components/JourneyModal';
 
 const Styles = styled.div`
   ${({ theme }) => css`
-    font-family: ${theme.typography.families.sansSerif};
+    font-family: ${theme.fontFamily};
     height: 100%;
     overflow: hidden;
     display: flex;

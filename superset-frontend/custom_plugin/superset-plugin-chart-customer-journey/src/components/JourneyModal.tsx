@@ -33,11 +33,11 @@ const Styles = styled.div`
     align-items: center;
     justify-content: center;
     z-index: 1000;
-    padding: ${theme.gridUnit * 5}px;
+    padding: ${theme.sizeUnit * 5}px;
 
     .modal-content {
-      background: ${theme.colors.grayscale.light5};
-      border-radius: ${theme.gridUnit * 2}px;
+      background: ${theme.colorBgContainer};
+      border-radius: ${theme.sizeUnit * 2}px;
       width: min(96vw, 900px);
       max-height: 90vh;
       overflow-y: auto;
@@ -46,33 +46,33 @@ const Styles = styled.div`
     }
 
     .modal-header {
-      padding: ${theme.gridUnit * 4}px ${theme.gridUnit * 8}px
-        ${theme.gridUnit * 4}px ${theme.gridUnit * 5}px;
-      border-bottom: 1px solid ${theme.colors.grayscale.light2};
+      padding: ${theme.sizeUnit * 4}px ${theme.sizeUnit * 8}px
+        ${theme.sizeUnit * 4}px ${theme.sizeUnit * 5}px;
+      border-bottom: 1px solid ${theme.colorBorder};
       display: flex;
       justify-content: flex-start;
       align-items: center;
-      background: ${theme.colors.grayscale.light4};
+      background: ${theme.colorBgLayout};
     }
 
     .modal-title {
-      font-size: ${theme.typography.sizes.l}px;
-      font-weight: ${theme.typography.weights.bold};
-      color: ${theme.colors.grayscale.dark2};
+      font-size: ${theme.fontSizeLG}px;
+      font-weight: ${theme.fontWeightStrong};
+      color: ${theme.colorTextHeading};
       margin: 0;
     }
 
     .close-btn {
       position: absolute;
-      top: ${theme.gridUnit * 2}px;
-      right: ${theme.gridUnit * 2}px;
+      top: ${theme.sizeUnit * 2}px;
+      right: ${theme.sizeUnit * 2}px;
       width: 34px;
       height: 34px;
       border-radius: 50%;
-      border: 1px solid ${theme.colors.grayscale.light2};
+      border: 1px solid ${theme.colorBorder};
       background: rgba(255, 255, 255, 0.92);
       font-size: 22px;
-      color: ${theme.colors.grayscale.dark1};
+      color: ${theme.colorText};
       cursor: pointer;
       padding: 0;
       line-height: 1;
@@ -84,50 +84,50 @@ const Styles = styled.div`
 
     .close-btn:hover {
       background: white;
-      border-color: ${theme.colors.primary.light1};
-      color: ${theme.colors.primary.base};
+      border-color: ${theme.colorPrimaryBorderHover};
+      color: ${theme.colorPrimary};
     }
 
     .modal-body {
-      padding: ${theme.gridUnit * 5}px;
+      padding: ${theme.sizeUnit * 5}px;
     }
 
     .count-pill {
       display: inline-flex;
       align-items: center;
-      gap: ${theme.gridUnit}px;
-      padding: ${theme.gridUnit * 2}px ${theme.gridUnit * 3}px;
-      background: ${theme.colors.primary.light5};
-      border: 1px solid ${theme.colors.primary.light2};
-      border-radius: ${theme.gridUnit * 2}px;
-      color: ${theme.colors.primary.dark1};
-      font-size: ${theme.typography.sizes.m}px;
-      font-weight: ${theme.typography.weights.bold};
-      margin-bottom: ${theme.gridUnit * 4}px;
+      gap: ${theme.sizeUnit}px;
+      padding: ${theme.sizeUnit * 2}px ${theme.sizeUnit * 3}px;
+      background: ${theme.colorPrimaryBg};
+      border: 1px solid ${theme.colorPrimaryBorder};
+      border-radius: ${theme.sizeUnit * 2}px;
+      color: ${theme.colorPrimaryActive};
+      font-size: ${theme.fontSize}px;
+      font-weight: ${theme.fontWeightStrong};
+      margin-bottom: ${theme.sizeUnit * 4}px;
     }
 
     .journey-path {
       display: flex;
       flex-wrap: wrap;
       align-items: center;
-      gap: ${theme.gridUnit * 2}px;
-      padding: ${theme.gridUnit * 4}px;
+      gap: ${theme.sizeUnit * 2}px;
+      padding: ${theme.sizeUnit * 4}px;
       background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%);
-      border: 1px solid ${theme.colors.grayscale.light2};
-      border-radius: ${theme.gridUnit * 2}px;
+      border: 1px solid ${theme.colorBorder};
+      border-radius: ${theme.sizeUnit * 2}px;
     }
 
     .path-node {
       display: inline-flex;
       align-items: center;
-      gap: ${theme.gridUnit}px;
-      padding: ${theme.gridUnit * 2}px ${theme.gridUnit * 3}px;
-      background: ${theme.colors.primary.light4};
-      border: 1px solid ${theme.colors.primary.light2};
-      border-radius: ${theme.gridUnit * 2}px;
-      font-size: ${theme.typography.sizes.m}px;
-      color: ${theme.colors.primary.dark1};
-      font-weight: ${theme.typography.weights.medium};
+      gap: ${theme.sizeUnit}px;
+      padding: ${theme.sizeUnit * 2}px ${theme.sizeUnit * 3}px;
+      background: ${theme.colorPrimaryBg};
+      border: 1px solid ${theme.colorPrimaryBorder};
+      border-radius: ${theme.sizeUnit * 2}px;
+      font-size: ${theme.fontSize}px;
+      color: ${theme.colorPrimaryActive};
+      font-weight: ${theme.fontWeightStrong};
       box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
     }
 
@@ -138,16 +138,16 @@ const Styles = styled.div`
       width: 22px;
       height: 22px;
       border-radius: 50%;
-      background: ${theme.colors.primary.base};
+      background: ${theme.colorPrimary};
       color: white;
-      font-size: ${theme.typography.sizes.s}px;
-      font-weight: ${theme.typography.weights.bold};
+      font-size: ${theme.fontSizeSM}px;
+      font-weight: ${theme.fontWeightStrong};
     }
 
     .path-connector {
-      color: ${theme.colors.grayscale.base};
-      font-size: ${theme.typography.sizes.l}px;
-      font-weight: ${theme.typography.weights.bold};
+      color: ${theme.colorTextSecondary};
+      font-size: ${theme.fontSizeLG}px;
+      font-weight: ${theme.fontWeightStrong};
     }
   `}
 `;

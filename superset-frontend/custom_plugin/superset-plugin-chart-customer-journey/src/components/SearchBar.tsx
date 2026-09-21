@@ -22,9 +22,9 @@ import { matchesSearchQuery } from '../utils/search';
 
 const Styles = styled.div`
   ${({ theme }) => css`
-    background: ${theme.colors.grayscale.light5};
-    border-bottom: 1px solid ${theme.colors.grayscale.light2};
-    padding: ${theme.gridUnit * 3}px;
+    background: ${theme.colorBgContainer};
+    border-bottom: 1px solid ${theme.colorBorder};
+    padding: ${theme.sizeUnit * 3}px;
 
     .search-container {
       position: relative;
@@ -34,32 +34,32 @@ const Styles = styled.div`
       display: flex;
       flex-wrap: wrap;
       align-items: center;
-      gap: ${theme.gridUnit}px;
-      padding: ${theme.gridUnit}px ${theme.gridUnit * 2}px;
+      gap: ${theme.sizeUnit}px;
+      padding: ${theme.sizeUnit}px ${theme.sizeUnit * 2}px;
       min-height: 40px;
-      border: 1px solid ${theme.colors.grayscale.light2};
-      border-radius: ${theme.gridUnit}px;
+      border: 1px solid ${theme.colorBorder};
+      border-radius: ${theme.sizeUnit}px;
       background: white;
       cursor: text;
       transition: all 0.15s ease;
     }
 
     .search-select-box:focus-within {
-      border-color: ${theme.colors.primary.base};
-      box-shadow: 0 0 0 2px ${theme.colors.primary.light4};
+      border-color: ${theme.colorPrimary};
+      box-shadow: 0 0 0 2px ${theme.colorPrimaryBg};
     }
 
     .search-tag {
       display: inline-flex;
       align-items: center;
-      gap: ${theme.gridUnit}px;
-      padding: ${theme.gridUnit}px ${theme.gridUnit * 2}px;
-      background: ${theme.colors.primary.light4};
-      border: 1px solid ${theme.colors.primary.light2};
-      border-radius: ${theme.gridUnit}px;
-      font-size: ${theme.typography.sizes.s}px;
-      color: ${theme.colors.primary.dark1};
-      font-weight: ${theme.typography.weights.medium};
+      gap: ${theme.sizeUnit}px;
+      padding: ${theme.sizeUnit}px ${theme.sizeUnit * 2}px;
+      background: ${theme.colorPrimaryBg};
+      border: 1px solid ${theme.colorPrimaryBorder};
+      border-radius: ${theme.sizeUnit}px;
+      font-size: ${theme.fontSizeSM}px;
+      color: ${theme.colorPrimaryActive};
+      font-weight: ${theme.fontWeightStrong};
     }
 
     .search-tag-remove {
@@ -71,7 +71,7 @@ const Styles = styled.div`
       border-radius: 50%;
       background: transparent;
       border: none;
-      color: ${theme.colors.primary.base};
+      color: ${theme.colorPrimary};
       cursor: pointer;
       font-size: 14px;
       line-height: 1;
@@ -80,8 +80,8 @@ const Styles = styled.div`
     }
 
     .search-tag-remove:hover {
-      background: ${theme.colors.primary.light3};
-      color: ${theme.colors.primary.dark1};
+      background: ${theme.colorPrimaryBgHover};
+      color: ${theme.colorPrimaryActive};
     }
 
     .search-input-inline {
@@ -89,14 +89,14 @@ const Styles = styled.div`
       min-width: 120px;
       border: none;
       outline: none;
-      font-size: ${theme.typography.sizes.m}px;
-      color: ${theme.colors.grayscale.dark2};
+      font-size: ${theme.fontSize}px;
+      color: ${theme.colorTextHeading};
       background: transparent;
-      padding: ${theme.gridUnit}px 0;
+      padding: ${theme.sizeUnit}px 0;
     }
 
     .search-input-inline::placeholder {
-      color: ${theme.colors.grayscale.light1};
+      color: ${theme.colorTextTertiary};
     }
 
     .search-clear-btn {
@@ -106,16 +106,16 @@ const Styles = styled.div`
       align-self: center;
       border: none;
       background: transparent;
-      color: ${theme.colors.primary.base};
-      font-size: ${theme.typography.sizes.s}px;
-      font-weight: ${theme.typography.weights.medium};
+      color: ${theme.colorPrimary};
+      font-size: ${theme.fontSizeSM}px;
+      font-weight: ${theme.fontWeightStrong};
       cursor: pointer;
-      padding: ${theme.gridUnit}px;
+      padding: ${theme.sizeUnit}px;
       white-space: nowrap;
     }
 
     .search-clear-btn:hover {
-      color: ${theme.colors.primary.dark1};
+      color: ${theme.colorPrimaryActive};
       text-decoration: underline;
     }
 
@@ -124,10 +124,10 @@ const Styles = styled.div`
       top: 100%;
       left: 0;
       right: 0;
-      margin-top: ${theme.gridUnit}px;
+      margin-top: ${theme.sizeUnit}px;
       background: white;
-      border: 1px solid ${theme.colors.grayscale.light2};
-      border-radius: ${theme.gridUnit}px;
+      border: 1px solid ${theme.colorBorder};
+      border-radius: ${theme.sizeUnit}px;
       box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
       max-height: 280px;
       overflow-y: auto;
@@ -137,10 +137,10 @@ const Styles = styled.div`
     .search-result-item {
       display: flex;
       align-items: center;
-      padding: ${theme.gridUnit * 2}px ${theme.gridUnit * 3}px;
+      padding: ${theme.sizeUnit * 2}px ${theme.sizeUnit * 3}px;
       cursor: pointer;
       transition: background-color 0.1s ease;
-      border-bottom: 1px solid ${theme.colors.grayscale.light3};
+      border-bottom: 1px solid ${theme.colorBorderSecondary};
     }
 
     .search-result-item:last-child {
@@ -149,29 +149,29 @@ const Styles = styled.div`
 
     .search-result-item:hover,
     .search-result-item.active {
-      background: ${theme.colors.primary.light5};
+      background: ${theme.colorPrimaryBg};
     }
 
     .search-result-item.active {
-      outline: 1px solid ${theme.colors.primary.light2};
+      outline: 1px solid ${theme.colorPrimaryBorder};
     }
 
     .search-result-name {
-      font-weight: ${theme.typography.weights.medium};
-      color: ${theme.colors.grayscale.dark2};
+      font-weight: ${theme.fontWeightStrong};
+      color: ${theme.colorTextHeading};
     }
 
     .search-no-results {
-      padding: ${theme.gridUnit * 3}px;
+      padding: ${theme.sizeUnit * 3}px;
       text-align: center;
-      color: ${theme.colors.grayscale.base};
+      color: ${theme.colorTextSecondary};
       font-style: italic;
     }
 
     .search-hint {
-      font-size: ${theme.typography.sizes.xs}px;
-      color: ${theme.colors.grayscale.light1};
-      margin-top: ${theme.gridUnit}px;
+      font-size: ${theme.fontSizeXS}px;
+      color: ${theme.colorTextTertiary};
+      margin-top: ${theme.sizeUnit}px;
     }
   `}
 `;
