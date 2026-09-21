@@ -272,6 +272,8 @@ export default function transformProps(
     yAxisTitleMargin,
     yAxisTitlePosition,
     zoomable,
+    dataZoomStart = TIMESERIES_CONSTANTS.dataZoomStart,
+    dataZoomEnd = TIMESERIES_CONSTANTS.dataZoomEnd,
     stackDimension,
   }: EchartsTimeseriesFormData = { ...DEFAULT_FORM_DATA, ...formData };
 
@@ -1159,8 +1161,8 @@ export default function transformProps(
       ? [
           {
             type: 'slider',
-            start: TIMESERIES_CONSTANTS.dataZoomStart,
-            end: TIMESERIES_CONSTANTS.dataZoomEnd,
+            start: dataZoomStart,
+            end: dataZoomEnd,
             bottom: TIMESERIES_CONSTANTS.zoomBottom,
             yAxisIndex: isHorizontal ? 0 : undefined,
           },

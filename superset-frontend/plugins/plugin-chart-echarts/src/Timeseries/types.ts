@@ -90,6 +90,10 @@ export type EchartsTimeseriesFormData = QueryFormData & {
   xAxisBounds: [number | undefined | null, number | undefined | null];
   yAxisBounds: [number | undefined | null, number | undefined | null];
   zoomable: boolean;
+  // Optional: charts saved before this control existed carry neither, and
+  // transformProps falls back to TIMESERIES_CONSTANTS for both.
+  dataZoomStart?: number;
+  dataZoomEnd?: number;
   richTooltip: boolean;
   xAxisLabelRotation: number;
   xAxisLabelInterval: number | string;
