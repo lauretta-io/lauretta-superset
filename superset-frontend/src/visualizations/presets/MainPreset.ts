@@ -85,6 +85,8 @@ import {
 } from 'src/chartCustomizations/components';
 import { PivotTableChartPlugin as PivotTableChartPluginV2 } from '@superset-ui/plugin-chart-pivot-table';
 import { HandlebarsChartPlugin } from '@superset-ui/plugin-chart-handlebars';
+import { SupersetPluginChartCustomerJourney } from 'superset-plugin-chart-customer-journey';
+import { SupersetPluginChartFloorMap } from 'superset-plugin-chart-floor-map';
 import { ChartCustomizationPlugins, FilterPlugins } from 'src/constants';
 import AgGridTableChartPlugin from '@superset-ui/plugin-chart-ag-grid-table';
 import TimeTableChartPlugin from '../TimeTable';
@@ -209,6 +211,12 @@ export default class MainPreset extends Preset {
             },
           ],
         }).configure({ key: VizType.Cartodiagram }),
+        new SupersetPluginChartCustomerJourney().configure({
+          key: 'ext-customer-journey',
+        }),
+        new SupersetPluginChartFloorMap().configure({
+          key: 'ext-floor-map',
+        }),
         ...experimentalPlugins,
         ...agGridTablePlugin,
       ],

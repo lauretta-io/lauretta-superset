@@ -34,7 +34,8 @@
   "workspaces": [
     "packages/*",
     "plugins/*",
-    "src/setup/*"
+    "src/setup/*",
+    "custom_plugin/*"
   ],
   "scripts": {
     "_prettier": "prettier './({src,spec,cypress-base,plugins,packages,.storybook}/**/*{.js,.jsx,.ts,.tsx,.css,.scss,.sass}|package.json)'",
@@ -225,6 +226,8 @@
     "scroll-into-view-if-needed": "^3.1.0",
     "simple-zstd": "^1.4.2",
     "stream-browserify": "^3.0.0",
+    "superset-plugin-chart-customer-journey": "file:./custom_plugin/superset-plugin-chart-customer-journey",
+    "superset-plugin-chart-floor-map": "file:./custom_plugin/superset-plugin-chart-floor-map",
     "tinycolor2": "^1.4.2",
     "urijs": "^1.19.8",
     "use-event-callback": "^0.1.0",
