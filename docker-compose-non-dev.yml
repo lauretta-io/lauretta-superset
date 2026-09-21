@@ -16,24 +16,76 @@
 #
 
 # -----------------------------------------------------------------------
-# We don't support docker compose for production environments.
-# If you choose to use this type of deployment make sure to
-# create you own docker environment file (docker/.env) with your own
-# unique random secure passwords and SECRET_KEY.
+# Nondev deployment: locally hosted over plain HTTP. See DEPLOYMENT.md.
 #
-# For verbose logging during development:
-# - Set SUPERSET_LOG_LEVEL=debug in docker/.env-local for detailed Superset logs
+#   docker compose -f docker-compose-non-dev.yml up -d --build
+#
+# Serves a pre-built frontend bundle through gunicorn instead of the webpack dev
+# server, so it is not development-shaped - but it is not hardened either: plain
+# HTTP, root containers, and the development defaults in docker/.env. Use it on a
+# trusted network only. For anything internet-facing use docker-compose-secure.yml.
+#
+# For verbose logging: set SUPERSET_LOG_LEVEL=debug in docker/.env-local.
 # -----------------------------------------------------------------------
+
+# Same project name as docker-compose.yml on purpose: the two modes share volumes,
+# so a nondev stack picks up whatever a dev stack created. Pinned rather than
+# derived from the directory name, which is Compose's fallback.
+# docker-compose-secure.yml uses lauretta-superset-secure and stays separate.
+name: lauretta-superset
+
 x-superset-volumes:
   &superset-volumes # /app/pythonpath_docker will be appended to the PYTHONPATH in the final container
   - ./docker:/app/docker
   - superset_home:/app/superset_home
+  - ./lauretta:/app/lauretta
+  - ./lauretta/branding:/app/superset/static/assets/branding
 
 x-common-build: &common-build
   context: .
   target: dev
+  args:
+    # Must be false, or the superset-node stage skips `npm ci` + `npm run build`
+    # and the image ships an empty /app/superset/static/assets. This mode serves
+    # the bundle from the image (unlike docker-compose.yml, which proxies /static
+    # to a webpack dev server), so without it every asset 404s and the UI is
+    # unusable. It happens to be the Dockerfile default - pinned here so a change
+    # to that default cannot silently break this mode.
+    DEV_MODE: "false"
   cache_from:
     - apache/superset-cache:3.10-slim-trixie
+
+# Image tags are pinned explicitly across all three compose files, as
+# lauretta-superset-<mode>. Left implicit, Compose derives the tag from the project
+# name plus the service name - and this file and docker-compose.yml share both, so
+# they collided on one tag and silently overwrote each other despite building with
+# opposite DEV_MODE values. See DEPLOYMENT.md ("Image tags").
+#
+# Only superset-init carries a `build:` block; the others reference the image it
+# produces and are marked `pull_policy: never`. See DEPLOYMENT.md ("Which service
+# builds").
+x-common-image: &common-image lauretta-superset-nondev:latest
+
+# docker/.env sets DEV_MODE=true, and it is an env_file shared by all three modes, so
+# this one inherits it at *runtime*. The `DEV_MODE: "false"` in x-common-build above
+# is a build arg and does not help: it only controls whether the node stage runs the
+# frontend build, and the final image carries no DEV_MODE of its own.
+#
+# At runtime the flag is read by docker/docker-bootstrap.sh, which reinstalls the app
+# in editable mode with `uv pip install -e .` when it is "true" and the container is
+# root. That rebuilds apache-superset from /app and fetches setuptools and wheel from
+# PyPI on boot. Merely wasteful with internet access; fatal without it, and it fails
+# in superset-init before any migration runs:
+#
+#   x Failed to build `apache-superset @ file:///app`
+#   `-> Failed to fetch: `https://pypi.org/simple/setuptools/`
+#
+# 6.x narrowed this to skip worker and beat, but superset and superset-init still hit
+# it. Mode 3 escapes by running as `superset` rather than root, not by setting the
+# flag. Editable installs are pointless here regardless: unlike mode 1, this file
+# does not bind-mount ./superset, so there is no live source to install against.
+x-common-env: &common-env
+  DEV_MODE: "false"
 
 services:
   redis:
@@ -62,10 +114,12 @@ services:
         required: true
       - path: docker/.env-local # optional override
         required: false
-    build:
-      <<: *common-build
+    image: *common-image
+    pull_policy: never # built by superset-init; see the x-common-image comment
     container_name: superset_app
     command: ["/app/docker/docker-bootstrap.sh", "app-gunicorn"]
+    environment:
+      <<: *common-env
     user: "root"
     restart: unless-stopped
     ports:
@@ -79,7 +133,10 @@ services:
     container_name: superset_init
     build:
       <<: *common-build
+    image: *common-image
     command: ["/app/docker/docker-init.sh"]
+    environment:
+      <<: *common-env
     env_file:
       - path: docker/.env # default
         required: true
@@ -96,10 +153,12 @@ services:
       disable: true
 
   superset-worker:
-    build:
-      <<: *common-build
+    image: *common-image
+    pull_policy: never # built by superset-init; see the x-common-image comment
     container_name: superset_worker
     command: ["/app/docker/docker-bootstrap.sh", "worker"]
+    environment:
+      <<: *common-env
     env_file:
       - path: docker/.env # default
         required: true
@@ -119,10 +178,12 @@ services:
         ]
 
   superset-worker-beat:
-    build:
-      <<: *common-build
+    image: *common-image
+    pull_policy: never # built by superset-init; see the x-common-image comment
     container_name: superset_worker_beat
     command: ["/app/docker/docker-bootstrap.sh", "beat"]
+    environment:
+      <<: *common-env
     env_file:
       - path: docker/.env # default
         required: true

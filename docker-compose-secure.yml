@@ -65,6 +65,12 @@ x-superset-build: &superset-build
     # 404s. Already the Dockerfile default; pinned so a change there cannot break
     # this mode silently.
     DEV_MODE: "false"
+    # Alerts and reports screenshot through Playwright, which needs a browser in
+    # the image. Superset 6.0 flipped the Dockerfile default from "true" to
+    # "false" (UPDATING.md, PR 34258) to keep the lean layer lean, so this can no
+    # longer be left implicit: without it the secure image builds fine and every
+    # scheduled report fails at runtime.
+    INCLUDE_CHROMIUM: "true"
 
 # Pinned rather than derived from the project name, to match the lauretta-superset-<mode>
 # scheme the other two compose files use. See DEPLOYMENT.md ("Image tags").

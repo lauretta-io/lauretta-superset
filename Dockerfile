@@ -34,6 +34,11 @@ ARG BUILD_TRANSLATIONS
 ENV BUILD_TRANSLATIONS=${BUILD_TRANSLATIONS}
 ARG DEV_MODE="false"           # Skip frontend build in dev mode
 ENV DEV_MODE=${DEV_MODE}
+# Baked into the bundle by webpack (superset-frontend/webpack.config.js), so it has
+# to be a build arg rather than a runtime env var. Set to "false" by
+# docker-compose-secure.yml to drop the scarf.sh telemetry pixel.
+ARG SCARF_ANALYTICS
+ENV SCARF_ANALYTICS=${SCARF_ANALYTICS}
 
 COPY docker/ /app/docker/
 # Arguments for build configuration
@@ -179,6 +184,13 @@ RUN --mount=type=cache,target=${SUPERSET_HOME}/.cache/uv \
         echo "Skipping browser installation"; \
     fi
 
+# The uv cache mounts above create ${SUPERSET_HOME}/.cache as root, after the
+# chown at user creation has already run. Containers running as `superset` then
+# cannot write under it, and fontconfig, matplotlib and Selenium Manager caches
+# fail silently. Not recursive: nothing inside needs to change hands.
+RUN mkdir -p ${SUPERSET_HOME}/.cache \
+    && chown superset:superset ${SUPERSET_HOME}/.cache
+
 # Copy required files for Python build
 COPY pyproject.toml setup.py MANIFEST.in README.md ./
 COPY superset-frontend/package.json superset-frontend/
@@ -283,3 +295,21 @@ USER root
 RUN uv pip install .[duckdb]
 USER superset
 CMD ["/app/docker/entrypoints/docker-ci.sh"]
+
+######################################################################
+# Production image...
+######################################################################
+# Used by docker-compose-secure.yml. Based on `lean` rather than `dev` so the
+# image carries neither requirements/development.txt nor the git/build-essential
+# toolchain, which keeps the CVE surface small.
+#
+# The postgres driver has to be baked in here: docker-bootstrap.sh only installs
+# it when running as root, and the secure stack runs as the `superset` user.
+#
+# `thumbnails` pulls in Pillow. Note that as of 6.0 Pillow is a required
+# dependency rather than optional, and the `thumbnails` extra is deprecated for
+# removal in 7.0 -- revisit this line then.
+FROM lean AS production
+USER root
+RUN uv pip install .[postgres,thumbnails]
+USER superset
