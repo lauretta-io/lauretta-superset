@@ -56,7 +56,7 @@ x-superset-build: &superset-build
   context: .
   target: production
   cache_from:
-    - apache/superset-cache:3.10-slim-bookworm
+    - apache/superset-cache:3.10-slim-trixie
   args:
     # Drops the scarf.sh telemetry pixel from the frontend bundle. Must be a build
     # arg — webpack bakes it in (superset-frontend/webpack.config.js).
@@ -146,7 +146,7 @@ services:
 
   db:
     <<: *superset-env
-    image: postgres:15
+    image: postgres:17
     container_name: superset_db_secure
     restart: unless-stopped
     # No published ports.
