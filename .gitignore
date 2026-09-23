@@ -126,6 +126,13 @@ docker/.env-local
 docker/.env-secure
 !docker/.env-secure.example
 docker/superset-websocket/config.json
+
+# Database dumps from mode migrations and Postgres major-version upgrades. These
+# carry dbs.password, dbs.encrypted_extra and the ssh_tunnels credential columns,
+# still encrypted but present. DEPLOYMENT.md writes them outside the repo; this is
+# the backstop for when someone runs the commands from the repo root anyway.
+*.dump
+*.sql
 docker-compose.override.yml
 
 .temp_cache

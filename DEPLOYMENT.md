@@ -393,14 +393,14 @@ data directory is corruption territory. Stop one before starting the other.
 #    this also works on a stack that is failing to start.
 docker compose -f docker-compose-non-dev.yml up -d db
 docker compose -f docker-compose-non-dev.yml exec -T db \
-    pg_dump -U superset -d superset > migrate.sql
+    pg_dump -U superset -d superset > "$HOME/migrate.sql"   # outside the repo
 docker compose -f docker-compose-non-dev.yml down
 
 # 2. Restore into the secure stack. Let it keep its OWN generated DB password —
 #    the volume is empty, so initdb applies the value from docker/.env-secure.
 docker compose -f docker-compose-secure.yml up -d db
 docker compose -f docker-compose-secure.yml exec -T db \
-    psql -U superset -d superset < migrate.sql
+    psql -U superset -d superset < "$HOME/migrate.sql"
 ```
 
 The dump carries `dbs.password`, `dbs.encrypted_extra`, `dbs.server_cert`, the
@@ -437,6 +437,282 @@ sudo chown -R 1000:1000 lauretta/images
 Nothing in the Redis volume needs migrating: cache, Celery broker and (in mode 3)
 server-side sessions. Let the secure stack build its own — it requires a password
 the other modes do not set.
+
+---
+
+## Upgrading to a newer upstream release
+
+Moving the fork from one Apache Superset release to the next. This is a different
+operation from "Migrating between modes" above: that moves *data* between stacks,
+this moves *our changes* onto a new upstream base.
+
+### The branch model
+
+One long-lived branch, with tags marking everything else:
+
+```
+lauretta-superset-main   the live line: an upstream release tag + our commits
+synced/<version>         immutable marker of the release we are currently on
+archive/<version>-fork   a lineage that was abandoned rather than carried forward
+```
+
+The branch name deliberately carries no version. A name like `current/<version>-fork`
+asserts two things — "this is the live line" and "this is based on that release" —
+and they stop agreeing the moment you upgrade. Renaming a default branch breaks every clone,
+open PR, CI reference and doc link, so the stable thing gets the stable name and the
+version lives on a tag, which is immutable and free.
+
+`synced/<version>` is not decoration. It is the base argument to the rebase below,
+so it is what lets you upgrade without having to remember which tag you were on.
+
+### Why this is a rebase and not a merge
+
+Upstream tags releases on **release branches cut from master**, not on master
+itself. So release tags are not ancestors of one another, and a tag-to-tag merge
+does not mean what it looks like:
+
+```
+merge-base(6.0.0, 6.1.0)         2025-08-18   the 6.0 branch point, not 6.0.0
+commits on 6.0.0 not in 6.1.0           247   release-branch work: RC fixes,
+                                              cherry-picks, changelog churn
+commits on 6.1.0 not in 6.0.0          1886
+```
+
+`git merge <new>` would three-way against that branch point and treat those couple
+of hundred release-branch commits as *our* side — commits nobody here wrote, many of
+them cherry-picks of fixes that also reached master as different SHAs, which collide
+as duplicate changes. Against that, our own divergence is a handful of commits over
+~90 files. Rebasing replays only what we actually own.
+
+It also keeps the branch at a shape worth having: *N commits on top of release tag
+X*, so `git log <tag>..HEAD` is always exactly our divergence and nothing else.
+
+### Steps
+
+Two placeholders throughout: `<old>` is the release you are currently on — the one
+`synced/<old>` already points at — and `<new>` is the release you are moving to.
+
+```bash
+# 1. Fetch just the tag you are moving to. Explicitly, and with --no-tags: git
+#    auto-follows tags otherwise, and upstream still carries ~60 release tags plus a
+#    decade of airbnb_prod.*, superset-helm-chart-* and v2021.*. Our local tags are
+#    kept aligned with origin (archive/* and synced/* only), and one careless fetch
+#    undoes that. Set it once per clone so a plain fetch cannot:
+#
+#      git config remote.upstream.tagOpt --no-tags
+#
+git fetch --no-tags upstream tag <new>
+
+# 2. Preserve the current line before rewriting it. This is the rollback point and
+#    the next upgrade's base.
+git tag synced/<old> lauretta-superset-main   # if not already tagged
+git push origin synced/<old>
+
+# 3. Replay our commits onto the new release.
+git rebase --onto <new> synced/<old> lauretta-superset-main
+```
+
+Conflicts land only in files we modify. Resolve them against the *new* upstream
+code rather than reapplying the old patch — upstream refactors, and a change that
+was a one-line edit against `<old>` may need re-implementing against `<new>`. Where upstream has
+since solved the problem a patch existed for, drop the patch instead of porting it.
+
+Then verify before publishing. The frontend gates, in the order upstream CI runs
+them, from clean build output:
+
+```bash
+cd superset-frontend
+rm -rf packages/*/lib packages/*/esm plugins/*/lib plugins/*/esm
+find packages plugins -name '*.tsbuildinfo' -delete
+npm install && npm run plugins:build && npm run type && npm run build
+```
+
+The clean step is not optional. `tsc` resolves workspace packages through their
+built `lib/*.d.ts`, so stale output from a previous build makes the type check
+pass against the *old* declarations — a green run that proves nothing. Deleting
+`lib/`/`esm/` without also deleting `.tsbuildinfo` is worse: tsc then believes the
+projects are current, skips rebuilding them, and every plugin fails with `TS6305`
+pointing at outputs that no longer exist.
+
+Then boot each mode and work through "Verification" below. Finally:
+
+```bash
+git push --force-with-lease origin lauretta-superset-main
+git tag synced/<new> && git push origin synced/<new>
+```
+
+The force-push is inherent to rebasing. Tell anyone with a clone: their `git pull`
+will fail rather than silently mismerge, and the fix is
+`git fetch && git reset --hard origin/lauretta-superset-main` after saving local work.
+
+### The metadata database is a separate migration
+
+Two independent things can change in one upstream release, and they want doing in
+order, not together:
+
+- **The Postgres major version.** 6.1 moved the compose files from `postgres:15` to
+  `postgres:17`. Postgres will not start on a data directory written by another major
+  version — it fails with `database files are incompatible with server`, and there is
+  no in-place upgrade. See "Upgrading the Postgres major version" below.
+- **Superset's own schema.** `superset-init` runs `superset db upgrade`, applying the
+  Alembic chain for every release in between. Some of those migrations rewrite chart
+  params rather than just moving columns.
+
+Restore the old schema onto the new Postgres first, *then* let Superset migrate it.
+Doing both at once leaves you unable to tell which half failed. Run the whole thing
+against a restored copy before touching production.
+
+Note that migrations only run against the metadata database. A dashboard ZIP
+exported from an older release is imported as-is, so a chart carrying renamed form
+data keeps the old keys and the new code simply ignores them.
+
+### Upgrading the Postgres major version
+
+Needed whenever an upstream release moves the `image: postgres:N` pin and you have an
+existing volume. A fresh stack needs none of this — `initdb` simply creates the
+cluster at the new version.
+
+The names below differ per mode, because Compose prefixes volumes with the project
+name and the compose files pin their own container names. `<old-pg>` is the major version the volume was written by,
+`<new-pg>` the one the compose file now pins.
+
+| | dev / nondev | secure |
+|---|---|---|
+| project | `lauretta-superset` | `lauretta-superset-secure` |
+| volume | `lauretta-superset_db_home` | `lauretta-superset-secure_db_home` |
+| db container | `superset_db` | `superset_db_secure` |
+| init container | `superset_init` | `superset_init_secure` |
+| compose file | `docker-compose.yml` / `-non-dev.yml` | `docker-compose-secure.yml` |
+
+Check what you actually have before starting — the volume records its own version:
+
+```bash
+docker volume ls --format '{{.Name}}' | grep db_home
+docker run --rm -v <volume>:/d alpine cat /d/PG_VERSION
+```
+
+Stop the stack first. A running app writing to the database mid-dump gives you a
+torn snapshot, and two Postgres containers over one data directory is corruption
+territory.
+
+```bash
+# Somewhere outside the repo to hold the dump and the tarball. Both contain the
+# metadata database — dbs.password, dbs.encrypted_extra and the ssh_tunnels columns
+# are encrypted but present — so they do not belong next to tracked files. *.dump
+# and *.sql are gitignored as a backstop, but the repo is still the wrong home.
+# Note both files land root-owned: the containers below write as root.
+export DUMPDIR="$HOME/superset-migration" && mkdir -p "$DUMPDIR"
+
+# 0. Back up the raw volume. Everything below is reversible without this, but it is
+#    the only copy that survives a mistake in step 3.
+docker run --rm -v <volume>:/from -v "$DUMPDIR":/to alpine \
+    tar czf /to/db_home-pg<old-pg>-$(date +%F).tar.gz -C /from .
+
+# 1. Bring the old cluster up on its own, using the OLD image. No POSTGRES_* vars
+#    are needed: the image only consumes them when it has to run initdb, which it
+#    does not on an existing data directory.
+docker run -d --name pg_src -v <volume>:/var/lib/postgresql/data postgres:<old-pg>
+docker logs -f pg_src      # wait for "database system is ready to accept connections"
+
+# 2. Dump it with the NEW client. The direction matters: pg_dump reads servers older
+#    than itself but not newer, so only the <new-pg> client can read a <old-pg>
+#    server — which is why this is a second container rather than `docker exec`.
+#    -Fc is the custom format: compressed, and restorable with pg_restore.
+#
+#    `--network container:pg_src` shares that container's network stack, so 127.0.0.1
+#    reaches its Postgres. That avoids creating a user-defined network, and it also
+#    avoids needing the password: the cluster's pg_hba.conf trusts 127.0.0.1 and only
+#    demands scram-sha-256 from other hosts.
+docker run --rm --network container:pg_src -v "$DUMPDIR":/out postgres:<new-pg> \
+    pg_dump -h 127.0.0.1 -U superset -d superset -Fc -f /out/superset-pg<old-pg>.dump
+
+docker rm -f pg_src
+```
+
+```bash
+# 3. Keep the old cluster under a second name, then clear the volume. Renaming beats
+#    deleting: rollback becomes one copy instead of a tar restore.
+docker volume create <volume>_pg<old-pg>_old
+docker run --rm -v <volume>:/from -v <volume>_pg<old-pg>_old:/to alpine \
+    sh -c 'cp -a /from/. /to/'
+docker volume rm <volume>
+
+# 4. Let Compose create the cluster fresh at the new version. `up -d db` starts
+#    Postgres without the app, so nothing writes while you restore.
+docker compose -f <compose-file> up -d db
+docker logs -f <db-container>     # wait for "ready to accept connections"
+
+# 5. Restore, joining the db container's network stack the same way. --no-owner
+#    because initdb already created the superset role from the env file; replaying
+#    the dump's ownership records adds nothing.
+docker run --rm --network container:<db-container> -v "$DUMPDIR":/in postgres:<new-pg> \
+    pg_restore -h 127.0.0.1 -U superset -d superset --no-owner /in/superset-pg<old-pg>.dump
+```
+
+`pg_restore` warning lines about objects that already exist are expected — `initdb`
+created the role and the empty database before the restore ran. Errors are not; read
+them rather than assuming.
+
+Confirm the cluster is what you think it is, and that the data arrived:
+
+```bash
+docker run --rm -v <volume>:/d alpine cat /d/PG_VERSION          # -> <new-pg>
+docker compose -f <compose-file> exec -T db \
+    psql -U superset -d superset -c '\dt' | tail -5
+```
+
+Only then bring the rest of the stack up, which is where `superset-init` applies the
+Alembic chain:
+
+```bash
+docker compose -f <compose-file> up -d
+docker logs -f <init-container>
+```
+
+**Rolling back.** The old cluster is still on disk until you remove it:
+
+```bash
+docker compose -f <compose-file> down
+docker volume rm <volume>
+docker volume create <volume>
+docker run --rm -v <volume>_pg<old-pg>_old:/from -v <volume>:/to alpine \
+    sh -c 'cp -a /from/. /to/'
+# then pin image: postgres:<old-pg> back in the compose file before starting
+```
+
+Keep `<volume>_pg<old-pg>_old` until you have actually used the upgraded stack —
+charts rendering, saved database connections still connecting. Remove it once you
+are satisfied; it is a full second copy of the metadata.
+
+**Do not carry a dump across modes.** Each mode has its own
+`SUPERSET_SECRET_KEY`, and that key decrypts every stored database-connection
+password. A dump restored into a mode with a different key leaves those columns
+undecryptable, and it fails at query time rather than at restore — so it looks like
+it worked. "Migrating between modes" above covers the supported route, via
+`re-encrypt-secrets`.
+
+### Why the 5.0 → 6.1 upgrade did not use this procedure
+
+It could not. That fork descended from a lineage where Superset's 2017 history had
+been rewritten, so it shared only a November 2017 merge-base with upstream — every
+release tag was unreachable and no rebase or merge was possible. The fix was a
+one-off replant: branch from the 6.1.0 tag and re-apply the fork's ~90 files by
+hand. `archive/5.0.0-fork` preserves that lineage; it is kept reachable but is not
+mergeable and should not be branched from.
+
+The branch this produced descends cleanly from `6.1.0`, so that cost is spent. From
+here the procedure above applies.
+
+### Keeping the next one cheap
+
+The work scales with how much upstream code the fork edits in place, not with how
+much code it adds. New files under `lauretta/`, `docker/pythonpath_secure/` and
+`superset-frontend/custom_plugin/` cost nothing at upgrade time — they carry over
+untouched. Edits to upstream files are what conflict.
+
+The in-tree patches to `plugin-chart-echarts` are the expensive part for that
+reason. Moving that work into `custom_plugin/` as a forked plugin would take the
+conflict surface for it to zero.
 
 ---
 
@@ -541,7 +817,7 @@ docker run --rm -v "$PWD:/src" zricethezav/gitleaks:latest detect -s /src
 **Rebuild on a schedule.** Base-image and Python CVEs accumulate over time; a scan
 that passes today will not pass in two months on an unchanged image. Rebuild
 periodically and track [Superset security advisories](https://superset.apache.org/docs/security/)
-for patch releases. Current version: 5.0.0.
+for patch releases. Current version: 6.1.0.
 
 **Never regenerate `SUPERSET_SECRET_KEY` on a live stack without re-encrypting.**
 It is the AES key for `dbs.password`, `dbs.encrypted_extra`, `dbs.server_cert`, the
