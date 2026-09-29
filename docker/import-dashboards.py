@@ -109,7 +109,7 @@ def create_default_dataset_template(db_uuid):
         {% set floor_filter = filter_values('floor_id') %}
         WITH property_footfall AS (
             SELECT
-            SUM(pd.footfall_zo) AS prop_footfall_zo,
+            SUM(pd.footfall_zo_ingress) AS prop_footfall_zo,  -- NOTE: ingress as footfall_zo for property
             SUM(pd.footfall_reid) AS prop_footfall_reid
             FROM property.property_summary{{ suffix }} pd
             WHERE 1=1
@@ -159,7 +159,7 @@ def create_default_dataset_template(db_uuid):
                     FROM (
                         SELECT
                         unit_id,
-                        SUM(footfall_zo) AS footfall_zo,
+                        SUM(footfall_zo_ingress) AS footfall_zo,  -- NOTE: ingress as footfall_zo for units
                         SUM(footfall_reid) AS footfall_reid,
                         MAX({{ t_col }}) AS event_time
                         FROM property.unit_summary{{ suffix }}
@@ -189,7 +189,7 @@ def create_default_dataset_template(db_uuid):
                     FROM (
                         SELECT
                         public_space_id,
-                        SUM(footfall_zo) AS footfall_zo,
+                        SUM(footfall_zo_ingress) AS footfall_zo,  -- NOTE: ingress as footfall_zo for public spaces
                         SUM(footfall_reid) AS footfall_reid,
                         MAX({{ t_col }}) AS event_time
                         FROM property.public_space_summary{{ suffix }}
@@ -216,7 +216,7 @@ def create_default_dataset_template(db_uuid):
                     FROM (
                         SELECT
                         entrance_id,
-                        SUM(footfall_zo) AS footfall_zo,
+                        SUM(footfall_zo_egress) AS footfall_zo,  -- NOTE: egress as footfall_zo for entrances
                         SUM(footfall_reid) AS footfall_reid,
                         MAX({{ t_col }}) AS event_time
                         FROM property.entrance_summary{{ suffix }}
@@ -243,7 +243,7 @@ def create_default_dataset_template(db_uuid):
                     FROM (
                         SELECT
                         escalator_id,
-                        SUM(footfall_zo) AS footfall_zo,
+                        SUM(footfall_zo_egress) AS footfall_zo,  -- NOTE: egress as footfall_zo for escalators
                         SUM(footfall_reid) AS footfall_reid,
                         MAX({{ t_col }}) AS event_time
                         FROM property.escalator_summary{{ suffix }}
@@ -270,7 +270,7 @@ def create_default_dataset_template(db_uuid):
                     FROM (
                         SELECT
                         lift_lobby_id,
-                        SUM(footfall_zo) AS footfall_zo,
+                        SUM(footfall_zo_egress) AS footfall_zo,  -- NOTE: egress as footfall_zo for lift lobbies
                         SUM(footfall_reid) AS footfall_reid,
                         MAX({{ t_col }}) AS event_time
                         FROM property.lift_lobby_summary{{ suffix }}
