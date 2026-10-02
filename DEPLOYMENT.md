@@ -572,115 +572,52 @@ Needed whenever an upstream release moves the `image: postgres:N` pin and you ha
 existing volume. A fresh stack needs none of this — `initdb` simply creates the
 cluster at the new version.
 
-The names below differ per mode, because Compose prefixes volumes with the project
-name and the compose files pin their own container names. `<old-pg>` is the major version the volume was written by,
-`<new-pg>` the one the compose file now pins.
-
-| | dev / nondev | secure |
-|---|---|---|
-| project | `lauretta-superset` | `lauretta-superset-secure` |
-| volume | `lauretta-superset_db_home` | `lauretta-superset-secure_db_home` |
-| db container | `superset_db` | `superset_db_secure` |
-| init container | `superset_init` | `superset_init_secure` |
-| compose file | `docker-compose.yml` / `-non-dev.yml` | `docker-compose-secure.yml` |
-
-Check what you actually have before starting — the volume records its own version:
+`scripts/upgrade-postgres.sh` does the whole thing for any mode. It works out the
+project, volume and container names from the compose file, and the old version from
+the volume's own `PG_VERSION`:
 
 ```bash
-docker volume ls --format '{{.Name}}' | grep db_home
-docker run --rm -v <volume>:/d alpine cat /d/PG_VERSION
+./scripts/upgrade-postgres.sh nondev        # or: dev, secure
 ```
 
-Stop the stack first. A running app writing to the database mid-dump gives you a
-torn snapshot, and two Postgres containers over one data directory is corruption
-territory.
-
-```bash
-# Somewhere outside the repo to hold the dump and the tarball. Both contain the
-# metadata database — dbs.password, dbs.encrypted_extra and the ssh_tunnels columns
-# are encrypted but present — so they do not belong next to tracked files. *.dump
-# and *.sql are gitignored as a backstop, but the repo is still the wrong home.
-# Note both files land root-owned: the containers below write as root.
-export DUMPDIR="$HOME/superset-migration" && mkdir -p "$DUMPDIR"
-
-# 0. Back up the raw volume. Everything below is reversible without this, but it is
-#    the only copy that survives a mistake in step 3.
-docker run --rm -v <volume>:/from -v "$DUMPDIR":/to alpine \
-    tar czf /to/db_home-pg<old-pg>-$(date +%F).tar.gz -C /from .
-
-# 1. Bring the old cluster up on its own, using the OLD image. No POSTGRES_* vars
-#    are needed: the image only consumes them when it has to run initdb, which it
-#    does not on an existing data directory.
-docker run -d --name pg_src -v <volume>:/var/lib/postgresql/data postgres:<old-pg>
-docker logs -f pg_src      # wait for "database system is ready to accept connections"
-
-# 2. Dump it with the NEW client. The direction matters: pg_dump reads servers older
-#    than itself but not newer, so only the <new-pg> client can read a <old-pg>
-#    server — which is why this is a second container rather than `docker exec`.
-#    -Fc is the custom format: compressed, and restorable with pg_restore.
-#
-#    `--network container:pg_src` shares that container's network stack, so 127.0.0.1
-#    reaches its Postgres. That avoids creating a user-defined network, and it also
-#    avoids needing the password: the cluster's pg_hba.conf trusts 127.0.0.1 and only
-#    demands scram-sha-256 from other hosts.
-docker run --rm --network container:pg_src -v "$DUMPDIR":/out postgres:<new-pg> \
-    pg_dump -h 127.0.0.1 -U superset -d superset -Fc -f /out/superset-pg<old-pg>.dump
-
-docker rm -f pg_src
-```
-
-```bash
-# 3. Keep the old cluster under a second name, then clear the volume. Renaming beats
-#    deleting: rollback becomes one copy instead of a tar restore.
-docker volume create <volume>_pg<old-pg>_old
-docker run --rm -v <volume>:/from -v <volume>_pg<old-pg>_old:/to alpine \
-    sh -c 'cp -a /from/. /to/'
-docker volume rm <volume>
-
-# 4. Let Compose create the cluster fresh at the new version. `up -d db` starts
-#    Postgres without the app, so nothing writes while you restore.
-docker compose -f <compose-file> up -d db
-docker logs -f <db-container>     # wait for "ready to accept connections"
-
-# 5. Restore, joining the db container's network stack the same way. --no-owner
-#    because initdb already created the superset role from the env file; replaying
-#    the dump's ownership records adds nothing.
-docker run --rm --network container:<db-container> -v "$DUMPDIR":/in postgres:<new-pg> \
-    pg_restore -h 127.0.0.1 -U superset -d superset --no-owner /in/superset-pg<old-pg>.dump
-```
-
-`pg_restore` warning lines about objects that already exist are expected — `initdb`
-created the role and the empty database before the restore ran. Errors are not; read
-them rather than assuming.
-
-Confirm the cluster is what you think it is, and that the data arrived:
-
-```bash
-docker run --rm -v <volume>:/d alpine cat /d/PG_VERSION          # -> <new-pg>
-docker compose -f <compose-file> exec -T db \
-    psql -U superset -d superset -c '\dt' | tail -5
-```
-
-Only then bring the rest of the stack up, which is where `superset-init` applies the
-Alembic chain:
+It stops the stack and backs up the raw volume as a tarball. Then it starts the old
+cluster on its own and dumps every database with the *new* `pg_dump`: pg_dump reads
+servers older than itself but not newer. It keeps the old cluster as a second volume,
+`<project>_db_home_pg<old>_old`, and lets Compose create a fresh cluster at the new
+version. Finally it restores the dumps and compares table counts before and after.
+It leaves only `db` running. Superset's own migrations happen when you start the rest:
 
 ```bash
 docker compose -f <compose-file> up -d
-docker logs -f <init-container>
+docker compose -f <compose-file> logs -f superset-init
 ```
+
+Options: `--dump-dir DIR` (default `~/superset-pg-upgrade`) for the tarball and dumps,
+`-y` to skip the confirmation. Keep the dump dir out of the repo. Both files contain
+the metadata database, with `dbs.password`, `dbs.encrypted_extra` and the
+`ssh_tunnels` columns encrypted but present. The script creates the directory as `0700`.
+
+**Air-gapped hosts.** The script never pulls. It uses exactly two images,
+`postgres:<old>` and `postgres:<new>`, and does its tar/cp work in the new one (it is
+Debian-based), so no alpine or other helper image is involved. The old image is
+normally still local from the stack it ran. Stage the new one beforehand:
+
+```bash
+docker save postgres:17 | gzip > postgres-17.tar.gz    # on a connected host
+gunzip -c postgres-17.tar.gz | docker load              # on the air-gapped host
+```
+
+A missing image fails before anything is touched. Running the script again on an
+already-upgraded volume is a no-op.
 
 **Rolling back.** The old cluster is still on disk until you remove it:
 
 ```bash
-docker compose -f <compose-file> down
-docker volume rm <volume>
-docker volume create <volume>
-docker run --rm -v <volume>_pg<old-pg>_old:/from -v <volume>:/to alpine \
-    sh -c 'cp -a /from/. /to/'
-# then pin image: postgres:<old-pg> back in the compose file before starting
+./scripts/upgrade-postgres.sh <mode> --rollback
+# then pin image: postgres:<old> back in the compose file before starting
 ```
 
-Keep `<volume>_pg<old-pg>_old` until you have actually used the upgraded stack —
+Keep `<project>_db_home_pg<old>_old` until you have actually used the upgraded stack —
 charts rendering, saved database connections still connecting. Remove it once you
 are satisfied; it is a full second copy of the metadata.
 
