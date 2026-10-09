@@ -345,6 +345,44 @@ the import resolves. Modes 1 and 2 never take that branch.
 To change a setting for **all** modes, edit layer 1. To change it for the secure
 deployment only, edit layer 3.
 
+### Gunicorn worker
+
+Modes 2 and 3 run gunicorn with `lauretta_gunicorn.TimeoutThreadWorker`
+(`docker/pythonpath_dev/lauretta_gunicorn.py`) instead of stock `gthread`. Mode 1
+runs the Flask dev server and is unaffected.
+
+Stock `gthread` never times out a connection that has not sent a complete request.
+Port scanners leave exactly those behind, and they hang the app permanently in two
+ways:
+
+- **Silent connections** are parked in the worker's event loop forever. At
+  `worker_connections` (1000) the worker stops accepting, healthchecks included.
+- **Partial requests** (bytes but no line break, e.g. RDP probes) block a thread in
+  `recv()` forever. With every thread held, nothing is served.
+
+`--timeout` and `--keep-alive` cover neither case. The custom worker closes
+connections that send nothing within `SERVER_SOCKET_TIMEOUT` seconds (default 15).
+It also applies that timeout to each socket read and write, so a stalled client
+frees its thread. Slow queries are unaffected: they wait on the database, not the
+socket.
+
+Wiring (no upstream script edited, no rebuild needed):
+
+- `docker/.env` sets `SERVER_WORKER_CLASS`, which `run-server.sh` already passes to
+  `--worker-class`. It also sets worker recycling (`WORKER_MAX_REQUESTS`) as a
+  backstop; `docker/.env-secure` overrides those values.
+- The module is on `PYTHONPATH` via the mounted `pythonpath_dev`, and is
+  allow-listed in that directory's `.gitignore`.
+- `docker/docker-healthcheck.sh` gives `curl` a `--max-time 10`. Without it, probes
+  against a hung app never exit and pile up, one per interval.
+
+Env changes need a recreate, not a restart:
+`docker compose -f <compose-file> up -d --no-deps superset`.
+
+The worker subclasses gunicorn internals, and its `accept()` is a copy of gunicorn
+23.0.0's plus one line. When an upgrade bumps gunicorn, diff it against the new
+`ThreadWorker.accept` and run the worker check in "Verification".
+
 ---
 
 ## Migrating between modes
@@ -684,6 +722,12 @@ docker compose -f docker-compose-secure.yml exec superset id -u         # 1000
 
 # App healthy
 curl -sSf http://127.0.0.1:8088/health
+
+# Modes 2 and 3: the timeout worker is loaded (see "Gunicorn worker"), and closes a
+# silent connection after SERVER_SOCKET_TIMEOUT (~15s) instead of hanging.
+# Container is superset_app, or superset_app_secure in mode 3.
+docker logs superset_app 2>&1 | grep "Using worker"   # lauretta_gunicorn.TimeoutThreadWorker
+time bash -c 'exec 3<>/dev/tcp/127.0.0.1/8088; cat <&3'
 
 # Celery reaches password-protected Redis. If REDIS_PASSWORD were missing from any
 # of the cache/broker/session/ratelimit URLs, this is where it would surface.

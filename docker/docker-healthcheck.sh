@@ -16,4 +16,6 @@
 # limitations under the License.
 #
 
-curl -f "http://localhost:${SUPERSET_PORT}/${SUPERSET_APP_ROOT/\//}/health" || exit 1
+# --max-time: without it, a probe against a hung app never exits and probes pile up,
+# one per healthcheck interval.
+curl -f --max-time 10 "http://localhost:${SUPERSET_PORT}/${SUPERSET_APP_ROOT/\//}/health" || exit 1
