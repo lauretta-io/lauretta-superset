@@ -195,6 +195,13 @@ FEATURE_FLAGS = {
     # Secure mode does not tolerate the fallback: superset_config_secure.py refuses
     # to start if Playwright is missing, because Selenium cannot work as uid 1000.
     "PLAYWRIGHT_REPORTS_AND_THUMBNAILS": _HAS_PLAYWRIGHT,
+    # Enables the "Superset meta database" engine (superset://), which exposes
+    # tables from every configured database connection as virtual tables. This
+    # lets a single virtual dataset JOIN across multiple connections in one SQL
+    # query, which a dataset bound to one ordinary connection cannot do. The
+    # connection still has to be added under Database Connections, and queries
+    # only see tables the current user can already access.
+    "ENABLE_SUPERSET_META_DB": True,
 }
 ALERT_REPORTS_NOTIFICATION_DRY_RUN = False
 SCREENSHOT_LOCATE_WAIT = 100
