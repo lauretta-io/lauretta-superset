@@ -158,8 +158,8 @@ Messages printed by `docker/import-dashboards.py`:
 | `⚠️ Missing or invalid connections config for dashboard: <path>` | The entry has no `connections` object. Add one with `host`, `port`, `username`, `password`, `db`. |
 | `⚠️ Could not read dashboard UUID from zip: <error>` | The ZIP is corrupt or not a Superset export. Re-export it. |
 | `⚠️ No dashboard UUID found in zip — treating as new` | No dashboard YAML with a UUID. Re-export if unexpected; otherwise the import continues as a first-time setup. |
-| `⚠️ Error checking dashboard existence: <stderr>` | The script could not query the metadata database. Check `superset-init` got through migrations. |
-| `✅ Dashboard already exists in database — only updating database connection.` | Normal on every restart after the first. Changes to `floors` are not applied — see [04](04-dashboards-and-floor-maps.md). |
+| `⚠️ Error checking dashboard existence: <stderr>` | The script could not query the metadata database. Check `superset-init` got through migrations. The import then treats the dashboard as new and, if it did exist, replaces it — UI layout edits are lost. See "What it does for each dashboard" in [04](04-dashboards-and-floor-maps.md). |
+| `✅ Dashboard already exists in database — only updating database connection.` | Normal on every start after the first: only the connection is synced. Changes to `floors` and new template versions are not applied — see "The import pipeline" in [04](04-dashboards-and-floor-maps.md). |
 | `ℹ️ No floors configured, skipping floor map generation` | Informational. Add `floors` if the dashboard needs floor maps. |
 | `⚠️ No databases/ folder in extracted ZIP` / `⚠️ No datasets/ folder in extracted ZIP` | Incomplete export. Re-export from Superset. |
 | `⚠️ No dashboard YAML found` / `⚠️ Could not resolve ROOT/GRID in dashboard layout` | The ZIP has no usable `dashboards/*.yaml` layout, so floor charts cannot be placed. Re-export. |
@@ -176,6 +176,22 @@ To rerun the import by hand with full output:
 ```bash
 docker compose -f <compose-file> exec superset python /app/docker/import-dashboards.py
 ```
+
+### Dashboard changes didn't apply
+
+- **Edited `floors`, or replaced a template ZIP, and restarted.** The dashboard
+  already exists, so only its connection was synced. See "What this means in
+  practice" in [04](04-dashboards-and-floor-maps.md) for how to force a full import
+  — a new template version needs its charts and datasets removed too, not just the
+  dashboard.
+- **Edited `config.json` and rebooted the host.** A reboot does not rerun
+  `superset-init`. Run `docker compose -f <compose-file> up -d superset-init`.
+
+### A dashboard shows another property's data
+
+Two `config.json` entries use the same dashboard template on one instance. The
+import does not support that; see "One template, one property per instance" in
+[04](04-dashboards-and-floor-maps.md). Run one instance per property.
 
 ### A data connection fails
 

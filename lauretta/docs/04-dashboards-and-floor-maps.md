@@ -4,8 +4,10 @@
 
 Standard Superset expects you to import dashboards and enter database passwords by
 hand in the UI. Here, every dashboard listed in `lauretta/dashboards/config.json` is
-imported automatically each time the stack starts, with its database connection
-filled in and, optionally, one Floor Map chart generated per floor.
+imported automatically the first time the stack starts, with its database connection
+filled in and, optionally, one Floor Map chart generated per floor. Later starts keep
+the connections in sync with `config.json` but leave existing dashboards alone — see
+"The import pipeline".
 
 ## config.json
 
@@ -80,21 +82,19 @@ alone. So:
 
 ## The import pipeline
 
+### When it runs
+
 `docker/docker-init.sh` runs `docker/import-dashboards.py` inside `superset-init`,
-after migrations, admin creation and `superset init`. For each entry in `config.json`:
+after migrations, admin creation and `superset init`.
 
-1. Derive the target database UUID from `path`.
-2. Read the dashboard UUID from the ZIP and check whether it already exists in the
-   metadata database.
-3. **Already imported** → update only the database connection (name, URI, timezone)
-   and move on. Charts, layout and floor maps are left as they are.
-4. **New** → extract the ZIP; if `floors` is set, generate the Floor Map dataset and
-   charts and add them to the layout; write the real credentials into
-   `databases/*.yaml` and the UUID into every `datasets/*.yaml`; re-zip to a
-   temporary `<name>.imported.zip`; run `superset import-dashboards`; delete the
-   temporary files. Your original ZIP is never modified.
+`superset-init` runs on **every** `docker compose -f <compose-file> up`, not only the
+first, and the app waits for it to finish. It does **not** run when:
 
-Run it again by restarting the init container:
+- the host reboots — Docker restarts the app, worker and beat
+  (`restart: unless-stopped`), but `superset-init` has no restart policy;
+- only the app is restarted (`docker compose -f <compose-file> restart superset`).
+
+To run it on demand:
 
 ```bash
 docker compose -f <compose-file> up -d superset-init
@@ -107,11 +107,71 @@ Or directly, against a running stack:
 docker compose -f <compose-file> exec superset python /app/docker/import-dashboards.py
 ```
 
-> **Changing `floors` on an imported dashboard does nothing.** Step 3 skips the
-> dashboard because its UUID already exists. To regenerate floor charts, the
-> dashboard has to be imported as new: either delete it in the UI and rerun the
-> import, or start from an empty metadata database (`down -v` — this deletes every
-> dashboard on the stack).
+### What it does for each dashboard
+
+For each entry in `config.json`, the script derives the connection UUID from `path`,
+reads the **dashboard's** UUID from the ZIP, and looks that dashboard up in the
+metadata database. That lookup alone decides what happens. Whether the database
+connection already exists does not.
+
+| Dashboard UUID already in the metadata DB? | What happens |
+|---|---|
+| **No** — first start, empty metadata DB, or the dashboard was deleted | **Full import.** Extract the ZIP; if `floors` is set, generate the Floor Map dataset and charts and add them to the layout; write the real credentials into `databases/*.yaml` and the connection UUID into every `datasets/*.yaml`; re-zip to a temporary `<name>.imported.zip`; run `superset import-dashboards`; delete the temporary files. Your original ZIP is never modified. Any connections, datasets and charts in the ZIP that already exist, matched by UUID — for example left behind after the dashboard was deleted — are kept exactly as they are; Superset's importer never overwrites them. |
+| **Yes** | **Connection sync only.** The dashboard, its charts and its floor maps are left untouched. The connection is updated from `config.json` — name, URI, timezone — or recreated if it has been deleted. |
+
+The connection sync runs on every start, which is how a password change in
+`config.json` takes effect.
+
+> **When the check fails, the import assumes "No".** The script treats a dashboard
+> as new not only when it is absent, but also when the ZIP has no dashboard UUID
+> (`⚠️ No dashboard UUID found in zip — treating as new`) or the lookup itself
+> errors (`⚠️ Error checking dashboard existence`). In the second case the dashboard
+> may exist: the full import then replaces it — Superset imports the dashboard
+> itself with overwrite on — losing any layout edits made in the UI. The floor maps
+> are regenerated with new UUIDs, so the old floor-map charts and dataset are left
+> behind unused. If either message appears, check the dashboard before trusting the
+> result.
+
+### What this means in practice
+
+- **Edits made in the UI survive restarts.** Once a dashboard exists, the import
+  never overwrites its layout, charts or filters.
+- **Changing `floors` on an imported dashboard does nothing.** Floor maps are
+  generated only on a full import.
+- **A newer version of a template ZIP does not reach an existing deployment.** A
+  re-export of the same dashboard keeps its UUID, so the import sees it as already
+  present and skips it — even if the ZIP's file name and `path` change.
+- **To force a full import**, the dashboard has to be absent. Two ways:
+  - **Delete it in the UI** and rerun the import. This is enough to regenerate floor
+    maps: they are created with new UUIDs, so the new ones are imported (the old floor
+    charts and their dataset stay behind and can be deleted). It is **not** enough to
+    apply a new template version: the template's own charts and datasets still
+    exist, and the import reuses them unchanged. Delete those too, or use the next
+    option.
+  - **Start from an empty metadata database.** `down -v` empties it, and deletes every
+    dashboard, chart, user and saved connection on the stack — take a backup first
+    ([07](07-operations.md)).
+
+### One template, one property per instance
+
+The import cannot place the same dashboard template twice on one instance, for
+example two properties both using `property_dashboard_template_v6.zip`:
+
+- **Same `path` in two entries.** Both entries get the same connection UUID. The first
+  is imported; the second finds the dashboard present and syncs the connection, so
+  the shared connection ends up with the **second** entry's credentials. The first
+  property's dashboard then queries the second property's database.
+- **A copy of the ZIP under another name.** The connections are separate, but the
+  dashboard UUID inside the ZIP is the same, so the second entry is skipped as
+  already imported. Its connection is created with no dashboard using it.
+
+Exporting the dashboard again under a new dashboard UUID does not help either: the
+export still carries the template's dataset UUIDs, and the import reuses existing
+datasets unchanged, so the second dashboard's template charts would query the first
+property's database. Only the generated floor maps, which get fresh UUIDs, would be
+correct.
+
+**Run one instance per property.**
 
 Customer Journey charts are not generated; they are imported as they are in the ZIP.
 
