@@ -16,7 +16,8 @@
 #
 
 # -----------------------------------------------------------------------
-# Hardened deployment. See DEPLOYMENT.md for setup and verification.
+# Hardened deployment. See lauretta/docs/06-secure-mode.md for setup and
+# lauretta/docs/09-verification-and-troubleshooting.md for verification.
 #
 #   docker compose -f docker-compose-secure.yml up -d --build
 #
@@ -35,7 +36,7 @@
 # Distinct project name so this stack never shares volumes, networks or container
 # names with a dev/nondev stack started from the same directory. Modes 1 and 2 both
 # pin lauretta-superset; the -secure suffix is what keeps this stack's data separate.
-# See DEPLOYMENT.md ("Migrating between modes") for moving data across that boundary.
+# See lauretta/docs/07-operations.md ("Migrating between modes") for moving data across that boundary.
 name: lauretta-superset-secure
 
 x-superset-volumes: &superset-volumes
@@ -73,7 +74,7 @@ x-superset-build: &superset-build
     INCLUDE_CHROMIUM: "true"
 
 # Pinned rather than derived from the project name, to match the lauretta-superset-<mode>
-# scheme the other two compose files use. See DEPLOYMENT.md ("Image tags").
+# scheme the other two compose files use. See lauretta/docs/10-development.md ("Image tags").
 #
 # Only superset-init carries a `build:` block; the others reference the image it
 # produces and are marked `pull_policy: never`. Compose builds through `buildx bake`,
@@ -82,7 +83,7 @@ x-superset-build: &superset-build
 # Docker 29 installs) rejects the duplicate with `already exists`; the legacy overlay2
 # store silently tolerates it. superset-init is the only service that can build alone,
 # because every other service depends_on it.
-# See DEPLOYMENT.md ("Which service builds").
+# See lauretta/docs/10-development.md ("Which service builds").
 x-superset-image: &superset-image lauretta-superset-secure:latest
 
 # Containers that run as the `superset` user from the start need no capabilities at

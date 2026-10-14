@@ -16,7 +16,7 @@
 #
 
 # -----------------------------------------------------------------------
-# Nondev deployment: locally hosted over plain HTTP. See DEPLOYMENT.md.
+# Nondev deployment: locally hosted over plain HTTP. See lauretta/docs/02-deployment-modes.md.
 #
 #   docker compose -f docker-compose-non-dev.yml up -d --build
 #
@@ -59,10 +59,10 @@ x-common-build: &common-build
 # lauretta-superset-<mode>. Left implicit, Compose derives the tag from the project
 # name plus the service name - and this file and docker-compose.yml share both, so
 # they collided on one tag and silently overwrote each other despite building with
-# opposite DEV_MODE values. See DEPLOYMENT.md ("Image tags").
+# opposite DEV_MODE values. See lauretta/docs/10-development.md ("Image tags").
 #
 # Only superset-init carries a `build:` block; the others reference the image it
-# produces and are marked `pull_policy: never`. See DEPLOYMENT.md ("Which service
+# produces and are marked `pull_policy: never`. See lauretta/docs/10-development.md ("Which service
 # builds").
 x-common-image: &common-image lauretta-superset-nondev:latest
 

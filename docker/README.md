@@ -82,7 +82,7 @@ frontend build. The app on `:8088` therefore serves HTML with no assets behind i
 renders unstyled; `:9000` is the webpack dev server, which serves the assets and
 proxies everything else to the app. `:8088` is the right port for
 `docker-compose-non-dev.yml`, which bakes the bundle into the image. See
-[`DEPLOYMENT.md`](../DEPLOYMENT.md).
+[`lauretta/docs/02-deployment-modes.md`](../lauretta/docs/02-deployment-modes.md).
 
 ### Running Multiple Instances
 
@@ -119,7 +119,7 @@ Don't forget to reload the page to take the new frontend into account though.
 
 ## Production
 
-It is possible to run Superset in non-development mode by using [`docker-compose-non-dev.yml`](../docker-compose-non-dev.yml). This file excludes the volumes needed for development. For a hardened, internet-facing deployment see [`docker-compose-secure.yml`](../docker-compose-secure.yml) and [`DEPLOYMENT.md`](../DEPLOYMENT.md).
+It is possible to run Superset in non-development mode by using [`docker-compose-non-dev.yml`](../docker-compose-non-dev.yml). This file excludes the volumes needed for development. For a hardened, internet-facing deployment see [`docker-compose-secure.yml`](../docker-compose-secure.yml) and [`lauretta/docs/06-secure-mode.md`](../lauretta/docs/06-secure-mode.md).
 
 ## Resource Constraints
 

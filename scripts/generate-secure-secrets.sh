@@ -43,7 +43,7 @@ Refusing to overwrite it. Rotating SUPERSET_SECRET_KEY on a stack that already h
 a database will make its stored database-connection passwords undecryptable.
 
 To rotate deliberately, set the new key in ${TARGET} by hand, then re-encrypt with
-the old one passed on the command line — see DEPLOYMENT.md
+the old one passed on the command line — see lauretta/docs/07-operations.md
 
 To start over from scratch, remove the file and its volumes first.
 EOF

@@ -16,7 +16,7 @@
 # limitations under the License.
 #
 # Moves a stack's metadata database onto the Postgres major version its compose
-# file pins, by dump and restore. See DEPLOYMENT.md ("Upgrading the Postgres major
+# file pins, by dump and restore. See lauretta/docs/07-operations.md ("Upgrading the Postgres major
 # version") for the reasoning behind each step.
 #
 #   ./scripts/upgrade-postgres.sh <dev|nondev|secure> [options]
