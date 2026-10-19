@@ -41,7 +41,7 @@
 #
 # Two kinds of variables:
 #   * compose interpolation (shell environment or --env-file), read by compose itself:
-#       SUPERSET_IMAGE        prebuilt image (tag or sha256:<id>)  default
+#       SUPERSET_IMAGE        prebuilt image, a local tag          default
 #                             lauretta-superset-secure:latest
 #       SUPERSET_HA_ENV_FILE  the container env file below        default docker/.env-ha.local
 #       SUPERSET_SUBNET       fixed compose subnet: the database's pg_hba must know it

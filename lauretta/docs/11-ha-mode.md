@@ -92,7 +92,11 @@ from outside.
    nodes × `SERVER_WORKER_AMOUNT` × (`DATABASE_POOL_SIZE` + `DATABASE_MAX_OVERFLOW`) + a
    few; 2 × 4 × (5 + 5) = 80 fits PostgreSQL's default of 100.
 2. **Image.** The secure-mode image (06); HA mode never builds or pulls it. Point
-   `SUPERSET_IMAGE` at it (a tag or `sha256:<id>`), the same on every node.
+   `SUPERSET_IMAGE` at its local tag, the same on every node. To prove two nodes hold the same
+   image, compare the image layers, not `docker image inspect {{.Id}}`: the Id is the manifest
+   digest in the containerd image store and the config digest in the classic overlay2 store, so
+   one image has two Ids. Same image = same output of
+   `docker image inspect -f '{{json .RootFS.Layers}}' <tag>` on every node.
 3. **Env file.** `cp docker/.env-ha.example docker/.env-ha.local; chmod 600 docker/.env-ha.local`,
    fill it in. **Byte-identical on every node.**
 4. **TLS.** `SUPERSET_TLS_DIR/{cert.pem,key.pem}`, the same on every node; `cert.pem`
