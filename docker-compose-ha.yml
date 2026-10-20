@@ -1,0 +1,236 @@
+#
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+
+# -----------------------------------------------------------------------
+# HA (active-active) deployment: the same stack on two or more nodes, all
+# sharing one PostgreSQL metadata database that fails over between hosts.
+# Set up via lauretta/docs/11-ha-mode.md.
+#
+#   docker compose -f docker-compose-ha.yml run --rm --no-deps superset \
+#       /app/docker/docker-init-ha.sh                # once, on ONE node
+#   docker compose -f docker-compose-ha.yml up -d    # every node
+#
+# Builds on secure mode (docker-compose-secure.yml): same image, same hardening,
+# same secure config, which docker/pythonpath_ha/superset_config_ha.py imports and
+# then overrides. Differences:
+#   * no `db`: the metadata database is external, reached through a multi-host
+#     libpq connection (TLS, verify-full, read-write host only)
+#   * no superset-init: migrations, `superset init` and dashboard imports never run at
+#     start (two nodes would race); docker/docker-init-ha.sh does them once
+#   * no Celery worker or beat: alerts, reports and thumbnails are off
+#   * redis is a node-local cache only: no persistence, nothing shared lives there
+#   * nginx runs here and terminates TLS; it also serves /ready (readiness for DNS
+#     health checks) and, on 127.0.0.1 only, an internal server for host-side checks
+#   * the image is prebuilt and never pulled or built here (SUPERSET_IMAGE)
+#   * restart policy is a variable: a cluster manager that owns the lifecycle sets
+#     SUPERSET_RESTART=no
+#
+# Two kinds of variables:
+#   * compose interpolation (shell environment or --env-file), read by compose itself:
+#       SUPERSET_IMAGE        prebuilt image, a local tag          default
+#                             lauretta-superset-secure:latest
+#       SUPERSET_HA_ENV_FILE  the container env file below        default docker/.env-ha.local
+#       SUPERSET_SUBNET       fixed compose subnet: the database's pg_hba must know it
+#       SUPERSET_TLS_DIR      directory with cert.pem (full chain) and key.pem
+#       SUPERSET_PG_CA        CA file that verifies the metadata servers' certificates
+#       SUPERSET_READY_DIR    host directory holding ready.json (the readiness status)
+#       SUPERSET_HTTPS_PORT   published HTTPS port                default 443
+#       SUPERSET_HTTPS_BIND   address it is published on          default 0.0.0.0
+#       SUPERSET_PROBE_PORT   internal server, on 127.0.0.1 only  default 8089
+#       SUPERSET_HA_NETWORK   compose network name                default lauretta-superset-ha
+#       SUPERSET_RESTART      restart policy of every container   default unless-stopped
+#       SUPERSET_REDIS_IMAGE / SUPERSET_NGINX_IMAGE                defaults redis:7,
+#                             nginx:1.27-alpine; SUPERSET_PULL_POLICY (default missing)
+#                             applies to these two only
+#   * container environment, from SUPERSET_HA_ENV_FILE (template:
+#     docker/.env-ha.example): secrets and the metadata connection.
+# -----------------------------------------------------------------------
+name: lauretta-superset-ha
+
+x-superset-volumes: &superset-volumes
+  - ./docker:/app/docker:ro
+  - superset_home:/app/superset_home
+  # Read-write: the floor-map upload endpoint writes into lauretta/images. These files
+  # are per node; see "Floor-map uploads" in lauretta/docs/11-ha-mode.md.
+  - ./lauretta:/app/lauretta
+  - ./lauretta/branding:/app/superset/static/assets/branding:ro
+  # Long syntax: never let docker create a missing file as a directory.
+  - type: bind
+    source: ${SUPERSET_PG_CA:?set SUPERSET_PG_CA to the metadata CA file}
+    target: /app/pgca/ca.pem
+    read_only: true
+    bind:
+      create_host_path: false
+
+x-superset-env: &superset-env
+  env_file:
+    - path: docker/.env # committed defaults
+      required: true
+    - path: ${SUPERSET_HA_ENV_FILE:-docker/.env-ha.local} # secrets + connection
+      required: true
+  # Wins over both env files: the mode switches cannot be weakened from them.
+  environment:
+    SUPERSET_SECURE_MODE: "true"
+    SUPERSET_HA_MODE: "true"
+    PYTHONPATH: /app/pythonpath:/app/docker/pythonpath_dev:/app/docker/pythonpath_secure:/app/docker/pythonpath_ha
+    SUPERSET_CONFIG_PATH: /app/docker/pythonpath_ha/superset_config_ha.py
+    FLASK_DEBUG: "false"
+    DEV_MODE: "false"
+    SUPERSET_ENV: production
+    SUPERSET_LOAD_EXAMPLES: "no"
+    CYPRESS_CONFIG: "false"
+    REDIS_HOST: redis
+    REDIS_PORT: "6379"
+    DATABASE_SSLROOTCERT: /app/pgca/ca.pem
+
+x-hardening: &hardening
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "5"
+
+services:
+  redis:
+    <<: *hardening
+    image: ${SUPERSET_REDIS_IMAGE:-redis:7}
+    pull_policy: ${SUPERSET_PULL_POLICY:-missing}
+    restart: ${SUPERSET_RESTART:-unless-stopped}
+    # Cache, results and rate-limit counters only (sessions live in the metadata
+    # database), so nothing is persisted: a lost cache costs a re-query.
+    # $$REDIS_PASSWORD: expanded by the container shell (see docker-compose-secure.yml).
+    command:
+      - sh
+      - -c
+      - exec redis-server --requirepass "$$REDIS_PASSWORD" --appendonly no --save ""
+    env_file:
+      - path: ${SUPERSET_HA_ENV_FILE:-docker/.env-ha.local}
+        required: true
+    tmpfs:
+      - /data
+    healthcheck:
+      test: ["CMD-SHELL", 'redis-cli -a "$$REDIS_PASSWORD" --no-auth-warning ping | grep -q PONG']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+      start_interval: 2s
+    # The official image starts as root and drops to `redis` via gosu.
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+      - DAC_OVERRIDE
+    pids_limit: 256
+    mem_limit: 1g
+
+  superset:
+    <<: [*superset-env, *hardening]
+    image: ${SUPERSET_IMAGE:-lauretta-superset-secure:latest}
+    pull_policy: never
+    user: "superset"
+    restart: ${SUPERSET_RESTART:-unless-stopped}
+    # Waits for a writable metadata database, then gunicorn (docker/docker-ha-web.sh).
+    command: ["/app/docker/docker-ha-web.sh"]
+    # Not published: only nginx reaches it, on the compose network.
+    depends_on:
+      redis:
+        condition: service_healthy
+    # The data sources on the node itself (e.g. a local read replica).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes: *superset-volumes
+    healthcheck:
+      # X-Forwarded-Proto keeps Talisman's force_https from answering with a redirect,
+      # which curl -f would count as healthy.
+      test: ["CMD-SHELL", "curl -fsS -o /dev/null --max-time 8 -H 'X-Forwarded-Proto: https' http://localhost:8088/health"]
+      interval: 10s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+      start_interval: 3s
+    pids_limit: 512
+    mem_limit: 4g
+
+  nginx:
+    <<: *hardening
+    # 1.27 or later: the official image ships the njs module that /ready needs.
+    image: ${SUPERSET_NGINX_IMAGE:-nginx:1.27-alpine}
+    pull_policy: ${SUPERSET_PULL_POLICY:-missing}
+    restart: ${SUPERSET_RESTART:-unless-stopped}
+    # service_started, not service_healthy: /ready must answer (503) while Superset is
+    # still waiting for its database, or a DNS health check sees a closed port instead.
+    depends_on:
+      superset:
+        condition: service_started
+    ports:
+      - "${SUPERSET_HTTPS_BIND:-0.0.0.0}:${SUPERSET_HTTPS_PORT:-443}:8443"
+      - "127.0.0.1:${SUPERSET_PROBE_PORT:-8089}:8082"
+    environment:
+      NGINX_ENTRYPOINT_QUIET_LOGS: "1"
+    volumes:
+      - ./docker/nginx/superset-ha.conf:/etc/nginx/nginx.conf:ro
+      - ./docker/nginx/superset-ha-ready.js:/etc/nginx/njs/superset-ha-ready.js:ro
+      - type: bind
+        source: ${SUPERSET_TLS_DIR:?set SUPERSET_TLS_DIR}/cert.pem
+        target: /etc/nginx/tls/cert.pem
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${SUPERSET_TLS_DIR:?set SUPERSET_TLS_DIR}/key.pem
+        target: /etc/nginx/tls/key.pem
+        read_only: true
+        bind:
+          create_host_path: false
+      # A directory, not the file: the producer replaces ready.json by rename, and a
+      # file bind mount would keep showing the old inode.
+      - type: bind
+        source: ${SUPERSET_READY_DIR:?set SUPERSET_READY_DIR}
+        target: /run/superset-ha
+        read_only: true
+        bind:
+          create_host_path: false
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8081/nginx-health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+      start_interval: 2s
+    # Master runs as root (reads the 0600 key, binds), workers drop to `nginx`.
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+    pids_limit: 128
+    mem_limit: 256m
+
+volumes:
+  superset_home:
+    external: false
+
+networks:
+  default:
+    name: ${SUPERSET_HA_NETWORK:-lauretta-superset-ha}
+    ipam:
+      config:
+        - subnet: ${SUPERSET_SUBNET:?set SUPERSET_SUBNET (the metadata pg_hba allows it)}
