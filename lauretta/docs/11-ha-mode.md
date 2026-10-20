@@ -122,17 +122,18 @@ open the same URL on another with the same cookie (or through DNS): still logged
 Stop the web on **every** node, run the one-shot init once, then start them all.
 Never run two Superset versions against one metadata database.
 
-## Floor-map uploads (open issue)
+## Floor-map uploads (disabled)
 
 The upload endpoint writes into `lauretta/images/` **on the node that served the
-request**. Nothing copies it, so in active-active an image uploaded through node A is
-missing on node B: the chart shows a broken image whenever B serves it, and deleting the
-chart on B leaves A's file behind. Until this is solved, upload floor maps through one
-node and copy `lauretta/images/` to the others by hand. Options:
-- a shared volume (NFS or similar) for `lauretta/images`, at the cost of a new single
-  point of failure;
-- storing images in the metadata database (code change in the shared config);
-- a sync job between nodes (rsync on change), accepting a short window.
+request**, and nothing copies it, so in active-active an image uploaded through node A
+would be missing on node B. HA mode therefore **blocks** `POST
+/api/v1/lauretta/images/upload` in nginx (403 with a JSON message). Add floor maps to
+`lauretta/images/` in this repository instead: the export ships them to every node.
+
+If UI uploads are needed later, the preferred option is storing the images in the
+metadata database (replicated with everything else) with a local copy per node. A shared
+volume adds a single point of failure; a sync job between nodes leaves a window in which
+a chart save on one node cannot find a file uploaded on the other.
 
 ## Known limits
 
