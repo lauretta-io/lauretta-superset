@@ -26,6 +26,7 @@ upstream files when the fork is rebased onto a new release.
 | [08 Upgrading upstream](08-upgrading-upstream.md) | Moving the fork onto a newer Superset release |
 | [09 Verification and troubleshooting](09-verification-and-troubleshooting.md) | Health checks, scanners, import log messages |
 | [10 Development](10-development.md) | Custom plugins, upstream patches, image tags and builds |
+| [12 Security audit trail](12-audit-trail.md) | Logins, account, role and data changes: what is recorded, where, tamper protection |
 
 ## Reading paths
 

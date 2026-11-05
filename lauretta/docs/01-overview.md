@@ -68,7 +68,8 @@ lauretta-superset/
 │   ├── .env-secure.example           ← template for mode 3 secrets
 │   ├── pythonpath_dev/
 │   │   ├── superset_config.py        ← (edited) shared config for all modes
-│   │   └── lauretta_gunicorn.py      ← timeout-aware gunicorn worker
+│   │   ├── lauretta_gunicorn.py      ← timeout-aware gunicorn worker
+│   │   └── lauretta_audit.py         ← security audit trail (see 12)
 │   ├── pythonpath_secure/
 │   │   └── superset_config_secure.py ← hardened overrides, mode 3 only
 │   └── nginx/superset-secure.conf    ← host reverse proxy for mode 3
