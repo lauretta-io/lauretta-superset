@@ -108,7 +108,8 @@ from outside.
    ```bash
    docker compose -f docker-compose-ha.yml run --rm --no-deps superset /app/docker/docker-init-ha.sh
    ```
-   `db upgrade`, the admin user (only if missing), `superset init`, the session table, and
+   `db upgrade`, the audit table ([12](12-audit-trail.md)), the admin user (only if
+   missing), `superset init`, the session table, and
    with `HA_IMPORT_DASHBOARDS=yes` the dashboard import ([04](04-dashboards-and-floor-maps.md)).
    Idempotent.
 7. **Start every node:** `docker compose -f docker-compose-ha.yml up -d`.

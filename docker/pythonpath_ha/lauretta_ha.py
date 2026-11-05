@@ -39,6 +39,8 @@ from flask import Blueprint, abort, jsonify, request
 logger = logging.getLogger(__name__)
 
 SESSION_TABLE = "ha_sessions"
+# lauretta_audit.TABLE_NAME, repeated so this module stays importable on its own.
+AUDIT_TABLE = "lauretta_audit_log"
 
 # Set by docker/docker-init-ha.sh. The init runs `superset db upgrade` before the session
 # table exists, so the runtime check in init_sessions() must not apply there.
@@ -195,8 +197,8 @@ def create_session_table(app) -> None:
 def wait_for_metadata(once: bool = False) -> int:
     """docker/docker-ha-web.sh: block until a writable metadata database answers.
 
-    0 = writable and the session table exists; 1 = not writable (once=True only);
-    2 = the session table is missing (the one-shot init has not run).
+    0 = writable and the session and audit tables exist; 1 = not writable (once=True
+    only); 2 = a table is missing (the one-shot init has not run).
     """
     import time
 
@@ -210,7 +212,10 @@ def wait_for_metadata(once: bool = False) -> int:
     while True:
         try:
             with engine.connect() as conn:
-                has_table = inspect(conn).has_table(SESSION_TABLE)
+                inspector = inspect(conn)
+                missing = [
+                    t for t in (SESSION_TABLE, AUDIT_TABLE) if not inspector.has_table(t)
+                ]
             break
         except Exception as exc:  # noqa: BLE001 -- any failure: not writable (yet)
             if once:
@@ -221,8 +226,8 @@ def wait_for_metadata(once: bool = False) -> int:
                       "waiting", flush=True)
                 last_log = now
             time.sleep(5)
-    if not has_table:
-        print(f"HA web: session table {SESSION_TABLE!r} is missing: run the one-shot init "
+    if missing:
+        print(f"HA web: table(s) {', '.join(missing)} missing: run the one-shot init "
               "(docker/docker-init-ha.sh) on one node first", flush=True)
         return 2
     if not once:
