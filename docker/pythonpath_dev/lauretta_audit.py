@@ -903,9 +903,28 @@ def _object_record(ev: dict[str, Any]) -> Optional[dict[str, Any]]:
 
 
 def _build_records(session: Session) -> list[dict[str, Any]]:
+    """A bug here must not lose an event or fail the change: degrade to a bare row."""
     records, pairs, events = _describe(session)
-    records += _link_records(pairs, events)
-    records += [r for ev in events.values() if (r := _object_record(ev)) is not None]
+    try:
+        records += _link_records(pairs, events)
+    except Exception:  # noqa: BLE001
+        logger.exception("audit: could not describe a role or group link change")
+        records.append(
+            _record("audit", "audit.incomplete", details={"lost": "link changes"})
+        )
+    for ev in events.values():
+        try:
+            record = _object_record(ev)
+        except Exception:  # noqa: BLE001
+            logger.exception("audit: could not describe a change")
+            record = _record(
+                SECURITY_CATEGORIES.get(ev["table"], "data"),
+                f"{SECURITY_CATEGORIES.get(ev['table'], 'data')}.{ev['op']}",
+                target_type=ev["table"],
+                details={"error": "details unavailable"},
+            )
+        if record is not None:
+            records.append(record)
     return records
 
 
@@ -938,6 +957,10 @@ def _after_flush(session: Session, _flush_context: Any) -> None:
 
 
 def _after_commit(session: Session) -> None:
+    # Also fired when a savepoint is released (the savepoint is still current then);
+    # print only when the outermost transaction commits.
+    if session.get_nested_transaction() is not None:
+        return
     if pending := session.info.pop(_PENDING, None):
         _emit_stdout([r for _, records in pending for r in records])
 
