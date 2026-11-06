@@ -26,6 +26,7 @@ upstream files when the fork is rebased onto a new release.
 | [08 Upgrading upstream](08-upgrading-upstream.md) | Moving the fork onto a newer Superset release |
 | [09 Verification and troubleshooting](09-verification-and-troubleshooting.md) | Health checks, scanners, import log messages |
 | [10 Development](10-development.md) | Custom plugins, upstream patches, image tags and builds |
+| [11 HA mode](11-ha-mode.md) | Mode 4: active-active on two or more nodes, `/ready`, running under raib-ha |
 
 ## Reading paths
 
@@ -35,5 +36,6 @@ upstream files when the fork is rebased onto a new release.
 | Move an existing dev/nondev stack to secure | 06 → 07 → 09 | Read "Migrating between modes" in 07 alongside 06's setup: the secret-key decision is made before the first start. |
 | Run an existing deployment | 07 → 09 | Backups, secret rotation, Postgres upgrades, troubleshooting. Read 07 before the stack holds data you care about. |
 | Onboard a property / manage dashboards | 01 → 04 → 05 | |
+| Run Superset in HA mode under raib-ha | 06 → 11 | Install by raib-ha's `ha/PRODUCTION_GUIDE.md`; 11 says what it takes from this repo. |
 | Change the code | 01 → 10 → 03 | Read 08 before editing upstream files: every in-place edit is a future rebase conflict. |
 | Upgrade to a new Superset release | 08 → 07 → 10 → 09 | 07 for the Postgres major-version step, 10 for the in-tree patches that will conflict, 09 to re-verify each mode. |
