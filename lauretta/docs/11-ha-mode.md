@@ -130,12 +130,12 @@ section only says what it takes from this repo.
   not used. The one-shot init runs only through raib-ha's `provision.sh`, which also writes a
   temporary `config.json` for the dashboard import. Never `up`, `run` or `down` this compose file
   on a raib-ha node.
-- **Not this checkout.** The nodes run an export of one commit of this branch, made with raib-ha's
-  `raib_superset.py export-source --repo <this checkout> --sha <full commit id>` and unpacked to
-  `/opt/lauretta-superset` (`LAURETTA_SUPERSET_DIR`, commit pinned as `LAURETTA_SUPERSET_SHA`).
-  It holds `docker-compose-ha.yml`, `docker/`, `lauretta/` and a manifest; raib-ha refuses to
-  start if a listed file differs. Any checkout that contains the commit can export it: the
-  checkout itself does not have to be on this branch.
+- **This checkout, as it is** (raib-ha D46, 2026-11-10). The nodes run `/home/lauretta/lauretta-superset`
+  directly (`LAURETTA_SUPERSET_DIR`; no export, no commit pin). Keep it on this branch, at the
+  same commit on both nodes. raib-ha mounts `lauretta/` read-only. A change to
+  `docker-compose-ha.yml`, `docker/` or `lauretta/branding` goes live on a Superset restart, one
+  node at a time (raib-ha guide §8.21). New dashboard zips need raib-ha's provision re-run.
+  Changes under `superset/` or `superset-frontend/` are inside the image: rebuild and retag it.
 - **Images: reuse the secure-mode build, never rebuild on site.** HA mode adds no image code
   (only files under `docker/`, which are mounted), so the image `docker-compose-secure.yml`
   builds is the right one, if it is recent enough. Check it holds the 6.1 fork:
@@ -158,12 +158,12 @@ section only says what it takes from this repo.
   container, so a secure-mode server usually has no `nginx:1.27-alpine` image: it must be
   carried in as a saved image.
 - **Floor maps: no UI uploads** (nginx answers 403, see below). New floor maps go into
-  `lauretta/images/` on this branch and reach the nodes through the export. When moving an
-  existing deployment, copy its uploaded maps (`lauretta/images/customs/`, runtime state, not in
-  git) into `/opt/lauretta-superset/lauretta/images/customs/` on **both** nodes, owned by uid
-  1000 (`superset`); otherwise the migrated Floor Map charts lose their images. raib-ha's check
-  ignores files that are not in the manifest. Deleting a Floor Map chart, or changing its image,
-  deletes the old `customs/` file only on the node that served the request.
+  `lauretta/images/` on this branch. When moving an existing deployment, copy its uploaded maps
+  (`lauretta/images/customs/`, runtime state, git-ignored) into `lauretta/images/customs/` of
+  this checkout on **both** nodes, readable by uid 1000 (`superset`); otherwise the migrated
+  Floor Map charts lose their images. raib-ha mounts `lauretta/` read-only, so deleting a
+  Floor Map chart or changing its image leaves the old `customs/` file in place (remove it by hand
+  on both nodes if needed).
 - **Moving from secure mode on the same host:** keep the old `SUPERSET_SECRET_KEY` (it decrypts
   the stored connection passwords), stop the secure stack and its host nginx site before raib-ha
   starts this stack (both want the HTTPS port), and move the metadata as raib-ha's guide §6 says.
