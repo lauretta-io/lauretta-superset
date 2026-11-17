@@ -16,7 +16,8 @@
 # limitations under the License.
 #
 # Moves a stack's metadata database onto the Postgres major version its compose
-# file pins, by dump and restore. See lauretta/docs/07-operations.md ("Upgrading the Postgres major
+# file selects with POSTGRES_IMAGE (default postgres:18), by dump and restore.
+# See lauretta/docs/07-operations.md ("Upgrading the Postgres major
 # version") for the reasoning behind each step.
 #
 #   ./scripts/upgrade-postgres.sh <dev|nondev|secure> [options]
@@ -28,10 +29,10 @@
 #   -y, --yes        do not ask for confirmation
 #
 # Works offline. Only two images are used, and both must already be local:
-# postgres:<old> to read the existing cluster and postgres:<new> for everything
-# else. Nothing is pulled. To stage them on an air-gapped host:
+# postgres:<old> runs the old cluster and tar/cp; POSTGRES_IMAGE handles the rest.
+# To stage the official images on an air-gapped host:
 #
-#   docker save postgres:15 postgres:17 | gzip > pg.tar.gz     # connected host
+#   docker save postgres:17 postgres:18 | gzip > pg.tar.gz     # connected host
 #   gunzip -c pg.tar.gz | docker load                            # air-gapped host
 #
 # Stops the stack and leaves only `db` running afterwards; starting the rest (which
@@ -96,14 +97,14 @@ docker compose version > /dev/null 2>&1 || die "the docker compose plugin is req
 COMPOSE_CONFIG="$(compose config)" || die "${COMPOSE_FILE} does not parse; is its env file present?"
 PROJECT="$(sed -n 's/^name: //p' <<< "${COMPOSE_CONFIG}")"
 VOLUME="${PROJECT}_db_home"
-NEW_IMAGE="$(compose config --images db)"
+NEW_IMAGE="$(compose config --images db | sort -u)"
 NEW_PG="${NEW_IMAGE##*:}"
 NEW_PG="${NEW_PG%%[.-]*}"
 PG_USER="$(sed -n 's/^ *POSTGRES_USER: *//p' <<< "${COMPOSE_CONFIG}" | head -n1 | tr -d '"')"
 PG_USER="${PG_USER:-postgres}"
 SRC_CONTAINER="${PROJECT}-pg-upgrade-src"
 
-[[ "${NEW_IMAGE}" == postgres:* && "${NEW_PG}" =~ ^[0-9]+$ ]] \
+[[ "${NEW_IMAGE}" =~ ^(postgres|dhi\.io/postgres):[0-9]+ && "${NEW_PG}" =~ ^[0-9]+$ ]] \
     || die "cannot tell the Postgres major version from db's image '${NEW_IMAGE}'"
 
 require_image() {
@@ -117,10 +118,9 @@ EOF
     exit 1
 }
 
-# Every helper container uses the new Postgres image (Debian-based, so it has sh,
-# tar and cp), so the upgrade needs no image beyond the two Postgres versions.
+# Helpers run as root; tar/cp uses the old official image because DHI has no tar.
 helper() {
-    docker run --rm --pull never --entrypoint sh "$@"
+    docker run --rm --pull never --user 0:0 --entrypoint sh "$@"
 }
 
 volume_exists() {
@@ -128,11 +128,16 @@ volume_exists() {
 }
 
 pg_version_of() {
-    helper -v "$1":/d:ro "${NEW_IMAGE}" -c 'cat /d/PG_VERSION 2>/dev/null || true'
+    helper -v "$1":/d:ro "${NEW_IMAGE}" -c '
+        if [ -f /d/PG_VERSION ]; then
+            cat /d/PG_VERSION
+        else
+            cat /d/*/data/PG_VERSION 2>/dev/null | head -n 1
+        fi'
 }
 
 copy_volume() {
-    helper -v "$1":/from:ro -v "$2":/to "${NEW_IMAGE}" -c 'cp -a /from/. /to/'
+    helper -v "$2":/from:ro -v "$3":/to "$1" -c 'cp -a /from/. /to/'
 }
 
 confirm() {
@@ -191,6 +196,7 @@ rollback() {
     [ "$(wc -l <<< "${old_volumes}")" -eq 1 ] || die "several candidates, remove all but one: ${old_volumes}"
     old_volume="${old_volumes}"
     old_pg="$(pg_version_of "${old_volume}")"
+    require_image "postgres:${old_pg}"
 
     cat << EOF
 
@@ -206,15 +212,14 @@ EOF
         docker volume rm "${VOLUME}" > /dev/null
     fi
     docker volume create "${VOLUME}" > /dev/null
-    copy_volume "${old_volume}" "${VOLUME}"
+    copy_volume "postgres:${old_pg}" "${old_volume}" "${VOLUME}"
 
     cat << EOF
 
 Done. ${VOLUME} is a Postgres ${old_pg} cluster again; ${old_volume} is kept.
-Before starting, pin the old version in ${COMPOSE_FILE}, or Postgres refuses the
-data directory:
-
-    image: postgres:${old_pg}
+Before starting, restore the pre-upgrade db service definition from git in
+${COMPOSE_FILE}: image postgres:${old_pg}, volume at /var/lib/postgresql/data,
+no user, no PGDATA, and the initdb.d mount.
 
 then: docker compose -f ${COMPOSE_FILE} up -d
 EOF
@@ -264,15 +269,21 @@ EOF
 
     log "Backing up the raw volume"
     local tarball="db_home-pg${old_pg}-${stamp}.tar.gz"
-    helper -v "${VOLUME}":/from:ro -v "${DUMP_DIR}":/to "${NEW_IMAGE}" \
+    helper -v "${VOLUME}":/from:ro -v "${DUMP_DIR}":/to "${old_image}" \
         -c "tar czf /to/${tarball} -C /from . && chown ${owner} /to/${tarball}"
     echo "    ${DUMP_DIR}/${tarball}"
 
     log "Starting the old cluster on its own (${old_image})"
     docker rm -f "${SRC_CONTAINER}" > /dev/null 2>&1 || true
     trap 'docker rm -f "${SRC_CONTAINER}" > /dev/null 2>&1 || true' EXIT
-    docker run -d --pull never --name "${SRC_CONTAINER}" \
-        -v "${VOLUME}":/var/lib/postgresql/data "${old_image}" > /dev/null
+    if helper -v "${VOLUME}":/d:ro "${NEW_IMAGE}" -c 'test -f /d/PG_VERSION'; then
+        docker run -d --pull never --name "${SRC_CONTAINER}" \
+            -v "${VOLUME}":/var/lib/postgresql/data "${old_image}" > /dev/null
+    else
+        docker run -d --pull never --name "${SRC_CONTAINER}" --user 70:70 \
+            -v "${VOLUME}":/var/lib/postgresql \
+            -e "PGDATA=/var/lib/postgresql/${old_pg}/data" "${old_image}" > /dev/null
+    fi
     wait_ready "${SRC_CONTAINER}"
 
     # Every database is carried over, not just the metadata one: the examples
@@ -289,9 +300,9 @@ EOF
     # new image's client, in a second container sharing the old one's network.
     log "Dumping with the Postgres ${NEW_PG} client"
     for db in ${databases}; do
-        docker run --rm --pull never --user "${owner}" \
+        docker run --rm --pull never --user "${owner}" --entrypoint pg_dump \
             --network "container:${SRC_CONTAINER}" -v "${DUMP_DIR}":/out "${NEW_IMAGE}" \
-            pg_dump -h 127.0.0.1 -U "${PG_USER}" -d "${db}" -Fc \
+            -h 127.0.0.1 -U "${PG_USER}" -d "${db}" -Fc \
             -f "/out/${db}-pg${old_pg}-${stamp}.dump"
         echo "    ${db}: ${tables_before[${db}]} tables -> ${DUMP_DIR}/${db}-pg${old_pg}-${stamp}.dump"
     done
@@ -302,7 +313,7 @@ EOF
     # A copy under a second name makes rollback one copy instead of a tar restore.
     log "Keeping the old cluster as ${old_volume}"
     docker volume create "${old_volume}" > /dev/null
-    copy_volume "${VOLUME}" "${old_volume}"
+    copy_volume "${old_image}" "${VOLUME}" "${old_volume}"
     [ "$(pg_version_of "${old_volume}")" = "${old_pg}" ] || die "copy to ${old_volume} looks incomplete; ${VOLUME} left untouched"
     docker volume rm "${VOLUME}" > /dev/null
 
@@ -313,17 +324,18 @@ EOF
     [ -n "${db_container}" ] || die "db did not start; see: docker compose -f ${COMPOSE_FILE} logs db"
     wait_ready "${db_container}"
 
-    # initdb has already created POSTGRES_DB, and the init scripts the examples
-    # database and its role. Owners are kept, so each role a dump names must exist.
+    compose run --rm --no-deps db-init
+
+    # Restore after db-init creates the examples role.
     log "Restoring"
     local failed=()
     for db in ${databases}; do
         if [ -z "$(psql_in "${db_container}" postgres -c "SELECT 1 FROM pg_database WHERE datname = '${db}'")" ]; then
             docker exec "${db_container}" createdb -U "${PG_USER}" "${db}"
         fi
-        if ! docker run --rm --pull never --user "${owner}" \
+        if ! docker run --rm --pull never --user "${owner}" --entrypoint pg_restore \
             --network "container:${db_container}" -v "${DUMP_DIR}":/in:ro "${NEW_IMAGE}" \
-            pg_restore -h 127.0.0.1 -U "${PG_USER}" -d "${db}" \
+            -h 127.0.0.1 -U "${PG_USER}" -d "${db}" \
             "/in/${db}-pg${old_pg}-${stamp}.dump"; then
             failed+=("${db} (pg_restore reported errors, see above)")
             continue

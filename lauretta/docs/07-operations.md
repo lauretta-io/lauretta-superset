@@ -168,25 +168,67 @@ the other modes do not set.
 
 ---
 
-## Upgrading the Postgres major version
+## Choosing the Postgres image
 
-Needed whenever an upstream release moves the `image: postgres:N` pin and you have an
-existing volume. A fresh stack needs none of this — `initdb` simply creates the
-cluster at the new version.
-
-`scripts/upgrade-postgres.sh` does the whole thing for any mode. It works out the
-project, volume and container names from the compose file, and the old version from
-the volume's own `PG_VERSION`:
+The metadata database defaults to `postgres:18`. Set `POSTGRES_IMAGE` in your shell
+or the repo-root `.env` to select the Docker Hardened Image (DHI) instead:
 
 ```bash
+export POSTGRES_IMAGE=dhi.io/postgres:18
+docker login dhi.io
+docker pull "$POSTGRES_IMAGE"
+```
+
+Keep that selection for both the upgrade script and subsequent Compose commands.
+Unset `POSTGRES_IMAGE` (and remove it from the repo-root `.env`, if set) to return
+to the official image. This setting is read by Compose; putting it in
+`docker/.env-local` or `docker/.env-secure` does not select the image.
+
+Both images use the same volume mounted at `/var/lib/postgresql`, with
+`PGDATA=/var/lib/postgresql/18/data` and `user: "70:70"` pinned in every db
+service. Their default data paths and user IDs differ; these pins let either image
+read and write the same Postgres 18 cluster without changing ownership.
+
+`db-perms` (`db-perms-light` in the light stack) runs as root before db on every
+start. It creates `/var/lib/postgresql/18/data` and sets owner `70:70`, so either
+image can start on a fresh volume or after an image switch. It refuses a volume
+that still holds a pre-18 cluster and points to `scripts/upgrade-postgres.sh`.
+In the secure stack, only this one-shot service gets `CHOWN`, `DAC_OVERRIDE` and
+`FOWNER`.
+
+`db-init` (`db-init-light` in the light stack) replaces the `initdb.d` mount. It
+waits for Postgres, then idempotently creates the examples role, examples database
+and `superset_cypress` database. Superset initialization waits for it to finish.
+This runs with either image, including DHI, whose entrypoint does not run
+`/docker-entrypoint-initdb.d`.
+
+## Upgrading the Postgres major version
+
+Existing Postgres 17 volumes need a dump and restore before starting the Postgres
+18 db service. Changing the image alone cannot upgrade a data directory. A fresh
+stack needs none of this — `initdb` simply creates the cluster at the new version.
+
+`scripts/upgrade-postgres.sh` covers dev, nondev and secure modes. It works out the
+project, volume and container names from the compose file, and the old version
+from the volume's own `PG_VERSION`. First select the new image as above. The script
+never pulls, so pull the latest Postgres 18 image (18.7 or later) before running it
+and bringing up the rest of the stack:
+
+```bash
+docker pull "${POSTGRES_IMAGE:-postgres:18}"
 ./scripts/upgrade-postgres.sh nondev        # or: dev, secure
 ```
+
+An older Postgres 18 minor cannot restore dumps of a Postgres 17.12 or newer
+cluster. The script stops with `Restore incomplete` and the error
+`unrecognized parameter "pg_attver"`, leaving the old cluster untouched.
 
 It stops the stack and backs up the raw volume as a tarball. Then it starts the old
 cluster on its own and dumps every database with the *new* `pg_dump`: pg_dump reads
 servers older than itself but not newer. It keeps the old cluster as a second volume,
 `<project>_db_home_pg<old>_old`, and lets Compose create a fresh cluster at the new
-version. Finally it restores the dumps and compares table counts before and after.
+version. It runs `db-init` so the examples role exists before restoring the dumps,
+then compares table counts before and after.
 It leaves only `db` running. Superset's own migrations happen when you start the rest:
 
 ```bash
@@ -200,14 +242,19 @@ the metadata database, with `dbs.password`, `dbs.encrypted_extra` and the
 `ssh_tunnels` columns encrypted but present. The script creates the directory as `0700`.
 
 **Air-gapped hosts.** The script never pulls. It uses exactly two images,
-`postgres:<old>` and `postgres:<new>`, and does its tar/cp work in the new one (it is
-Debian-based), so no alpine or other helper image is involved. The old image is
-normally still local from the stack it ran. Stage the new one beforehand:
+`postgres:<old>` and the selected `POSTGRES_IMAGE` (default `postgres:18`), and
+does its tar/cp work in the old official image because DHI has no tar. No alpine
+or other helper image is involved. The old image is normally still local from
+the stack it ran. Stage the official images beforehand:
 
 ```bash
-docker save postgres:17 | gzip > postgres-17.tar.gz    # on a connected host
-gunzip -c postgres-17.tar.gz | docker load              # on the air-gapped host
+docker save postgres:17 postgres:18 | gzip > postgres-17-18.tar.gz
+gunzip -c postgres-17-18.tar.gz | docker load
 ```
+
+Save on the connected host and load on the air-gapped host. For DHI, log in with
+`docker login dhi.io` and pull `dhi.io/postgres:18` on the connected host first,
+then substitute that image for `postgres:18` in the save command.
 
 A missing image fails before anything is touched. Running the script again on an
 already-upgraded volume is a no-op.
@@ -216,12 +263,20 @@ already-upgraded volume is a no-op.
 
 ```bash
 ./scripts/upgrade-postgres.sh <mode> --rollback
-# then pin image: postgres:<old> back in the compose file before starting
 ```
+
+Before `up`, restore the pre-upgrade db service definition from git: image
+`postgres:<old>`, volume at `/var/lib/postgresql/data`, no `user`, no `PGDATA`,
+and the `initdb.d` mount. Merely changing the image leaves the wrong data layout.
 
 Keep `<project>_db_home_pg<old>_old` until you have actually used the upgraded stack —
 charts rendering, saved database connections still connecting. Remove it once you
 are satisfied; it is a full second copy of the metadata.
+
+**Other stacks.** The image-tag stack (`docker-compose-image-tag.yml`) is not
+covered by the script. The light stack has no upgrade path: stop it and remove
+its `<project>_db_home_light` volume, then start it with a fresh Postgres 18
+cluster. Removing that volume discards the light stack's database contents.
 
 **Do not carry a dump across modes.** Each mode has its own
 `SUPERSET_SECRET_KEY`, and that key decrypts every stored database-connection
