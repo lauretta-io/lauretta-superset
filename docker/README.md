@@ -38,6 +38,20 @@ intended for use with local development.
 
 To override environment variables locally, create a `./docker/.env-local` file (git-ignored). This file will be loaded after `.env` and can override any settings.
 
+#### Metadata Database Image
+
+The metadata database uses the official `postgres:18` image by default. To use the Docker Hardened Image `dhi.io/postgres:18` instead, log in with a Docker account that has Docker Hardened Images access, pull the image and create the repo-root `.env`:
+
+```bash
+docker login dhi.io
+docker pull dhi.io/postgres:18
+cp .env.example .env
+```
+
+Then uncomment the `POSTGRES_IMAGE` line in `.env`. If a repo-root `.env` already exists, add `POSTGRES_IMAGE=dhi.io/postgres:18` to it by hand. Compose reads `POSTGRES_IMAGE` only from the shell or the repo-root `.env`; a value in `./docker/.env` or `./docker/.env-local` does not select the image.
+
+An existing Postgres 17 volume must be upgraded with `scripts/upgrade-postgres.sh` first. See [`lauretta/docs/07-operations.md`](../lauretta/docs/07-operations.md#choosing-the-postgres-image).
+
 #### Python Configuration
 
 In order to override configuration settings locally, simply make a copy of [`./docker/pythonpath_dev/superset_config_local.example`](./pythonpath_dev/superset_config_local.example)
