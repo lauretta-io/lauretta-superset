@@ -21,8 +21,12 @@ To use the Docker Hardened Image instead (recommended for production with secure
 ```bash
 docker login dhi.io
 docker pull dhi.io/postgres:18
-export POSTGRES_IMAGE=dhi.io/postgres:18   # or set it in the repo-root .env
+cp .env.example .env
 ```
+
+Uncomment the `POSTGRES_IMAGE` line in `.env`. To use DHI only for the current shell, run `export POSTGRES_IMAGE=dhi.io/postgres:18` instead.
+
+If a repo-root `.env` already exists, add the line by hand instead of copying the template.
 
 Compose reads `POSTGRES_IMAGE` from the shell or the repo-root `.env` only, not from `docker/.env`, `docker/.env-local` or `docker/.env-secure`.
 

@@ -179,6 +179,8 @@ docker login dhi.io
 docker pull "$POSTGRES_IMAGE"
 ```
 
+For a permanent selection, copy `.env.example` to the repo-root `.env` and uncomment the `POSTGRES_IMAGE` line.
+
 Keep that selection for both the upgrade script and subsequent Compose commands.
 Unset `POSTGRES_IMAGE` (and remove it from the repo-root `.env`, if set) to return
 to the official image. This setting is read by Compose; putting it in
