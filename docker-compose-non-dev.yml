@@ -95,18 +95,59 @@ services:
     volumes:
       - redis:/data
 
+  db-perms:
+    image: ${POSTGRES_IMAGE:-postgres:18}
+    user: "0:0"
+    entrypoint:
+      - sh
+      - -c
+      - >-
+        if [ -f /var/lib/postgresql/PG_VERSION ]; then
+        echo "db_home holds a pre-18 cluster; run scripts/upgrade-postgres.sh" >&2;
+        exit 1;
+        fi;
+        mkdir -p /var/lib/postgresql/18/data &&
+        chown -R 70:70 /var/lib/postgresql/18 &&
+        chmod 700 /var/lib/postgresql/18/data
+    volumes:
+      - db_home:/var/lib/postgresql
+    restart: "no"
+
   db:
+    depends_on:
+      db-perms:
+        condition: service_completed_successfully
     env_file:
       - path: docker/.env # default
         required: true
       - path: docker/.env-local # optional override
         required: false
-    image: postgres:17
+    image: ${POSTGRES_IMAGE:-postgres:18}
+    user: "70:70"
+    environment:
+      PGDATA: /var/lib/postgresql/18/data
     container_name: superset_db
     restart: unless-stopped
     volumes:
-      - db_home:/var/lib/postgresql/data
-      - ./docker/docker-entrypoint-initdb.d:/docker-entrypoint-initdb.d
+      - db_home:/var/lib/postgresql
+
+  db-init:
+    env_file:
+      - path: docker/.env
+        required: true
+      - path: docker/.env-local
+        required: false
+    image: ${POSTGRES_IMAGE:-postgres:18}
+    user: "70:70"
+    environment:
+      DATABASE_HOST: db
+    volumes:
+      - ./docker/db-init.sh:/db-init.sh:ro
+    entrypoint: ["bash", "/db-init.sh"]
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_started
 
   superset:
     env_file:
@@ -145,6 +186,8 @@ services:
     depends_on:
       db:
         condition: service_started
+      db-init:
+        condition: service_completed_successfully
       redis:
         condition: service_started
     user: "root"
