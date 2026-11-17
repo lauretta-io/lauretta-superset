@@ -12,6 +12,28 @@ repeated here where the fork changes it.
 All Lauretta documentation lives under `lauretta/` so that it never conflicts with
 upstream files when the fork is rebased onto a new release.
 
+## Metadata database image
+
+Every stack runs its metadata database on Postgres 18. The default image is the official `postgres:18`, which needs no login.
+
+To use the Docker Hardened Image instead (recommended for production with secure mode), a Docker Hardened Images login is required:
+
+```bash
+docker login dhi.io
+docker pull dhi.io/postgres:18
+cp .env.example .env
+```
+
+Uncomment the `POSTGRES_IMAGE` line in `.env`. To use DHI only for the current shell, run `export POSTGRES_IMAGE=dhi.io/postgres:18` instead.
+
+If a repo-root `.env` already exists, add the line by hand instead of copying the template.
+
+Compose reads `POSTGRES_IMAGE` from the shell or the repo-root `.env` only, not from `docker/.env`, `docker/.env-local` or `docker/.env-secure`.
+
+An existing Postgres 17 volume must be upgraded with `scripts/upgrade-postgres.sh` before the stack starts on this version. Pull Postgres 18.7 or later first.
+
+See [Choosing the Postgres image](07-operations.md#choosing-the-postgres-image) and [Upgrading the Postgres major version](07-operations.md#upgrading-the-postgres-major-version) in [07 Operations](07-operations.md).
+
 ## Pages
 
 | Page | Covers |
