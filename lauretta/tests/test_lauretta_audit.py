@@ -226,6 +226,47 @@ class AuditTransactionTest(unittest.TestCase):
         self.assertEqual((self.names(), self.names("notes")), ([], []))
         self.assertEqual(self.printed(), [])
 
+    def test_two_joined_sessions_after_external_rollback(self) -> None:
+        # Codex finding: a joined session's commit after the owner rolled back printed.
+        with self.engine.connect() as conn:
+            outer = conn.begin()
+            with Session(bind=conn) as a:
+                a.add(Thing(name="a"))
+                a.commit()
+            b = Session(bind=conn)
+            b.add(Thing(name="b"))
+            b.flush()
+            outer.rollback()
+            b.commit()
+            b.close()
+        self.assertEqual((self.names(), self.rows(), self.printed()), ([], [], []))
+
+    def test_joined_session_inside_connection_savepoints(self) -> None:
+        # Codex finding: records released into an outer savepoint that is then rolled
+        # back were printed later.
+        with self.engine.connect() as conn:
+            outer = conn.begin()
+            sp1 = conn.begin_nested()
+            conn.begin_nested()
+            with Session(bind=conn) as joined:
+                joined.add(Thing(name="sp"))
+                joined.commit()  # releases the inner savepoint only
+            self.assertEqual(self.printed(), [])
+            sp1.rollback()
+            with Session(bind=conn) as again:
+                again.add(Thing(name="after"))
+                again.commit()
+            outer.commit()
+        self.assertEqual(self.names(), ["after"])
+        self.assertEqual(self.printed(), [])  # joined writes with no owning session: no line
+
+    def test_rollback_after_invalidate_does_not_raise(self) -> None:
+        # Codex finding: the rollback listener reconnected an invalidated connection.
+        with self.engine.connect() as conn:
+            tx = conn.begin()
+            conn.invalidate()
+            tx.rollback()
+
     def test_commit_failure_prints_nothing(self) -> None:
         # Stands in for a failover at COMMIT: the commit raises, nothing is printed.
         with Session(self.engine) as s:
@@ -262,6 +303,35 @@ class AuditTransactionTest(unittest.TestCase):
                     conn.exec_driver_sql(sql)
 
 
+class PoolReuseTest(unittest.TestCase):
+    """A real pool: joined-session records never reach the next checkout."""
+
+    def test_checkin_drops_and_warns(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = _sqlite_engine(os.path.join(tmp, "m.db"))
+            engine = engine.execution_options()  # same pool
+            engine.pool = sa.pool.QueuePool(engine.pool._creator, pool_size=1)
+            Base.metadata.create_all(engine)
+            la.audit_table.create(engine)
+            LINES.lines.clear()
+            with mock.patch.object(la, "_is_metadata", return_value=True):
+                with self.assertLogs(la.logger, "WARNING") as logs:
+                    with engine.connect() as conn:
+                        outer = conn.begin()
+                        with Session(bind=conn) as joined:
+                            joined.add(Thing(name="raw"))
+                            joined.commit()
+                        outer.commit()  # a raw commit: no owning session saw it
+                self.assertIn("without a stdout line", logs.output[0])
+                with engine.connect() as conn:
+                    self.assertNotIn(la._DEFERRED, conn.info)
+                with Session(engine) as s:
+                    s.add(Thing(name="next"))
+                    s.commit()
+            self.assertEqual([l["target_name"] for l in LINES.lines], ["next"])
+            engine.dispose()
+
+
 class RedactionTest(unittest.TestCase):
     def test_uri_password_and_query_credentials(self) -> None:
         got = la._value(
@@ -273,6 +343,8 @@ class RedactionTest(unittest.TestCase):
             self.assertNotIn(secret, got)
         self.assertIn("sslmode=require", got)
         self.assertEqual(la._value("sqlalchemy_uri", None, "sqlite://"), "sqlite://")
+        odbc = "mssql+pyodbc:///?odbc_connect=DRIVER%3D%7Bx%7D%3BUID%3Du%3BPwd%3Dpw4"
+        self.assertNotIn("pw4", la._value("sqlalchemy_uri", None, odbc))
 
     def test_nested_credentials_in_json_text_and_values(self) -> None:
         extra = json.dumps(

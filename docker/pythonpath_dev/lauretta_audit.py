@@ -60,6 +60,7 @@ import hmac
 import json  # noqa: TID251
 import logging
 import os
+import re
 import socket
 import sys
 import uuid
@@ -215,12 +216,14 @@ class _State:
 
 _state = _State()
 
-# session.info key: [(savepoint or None, connection, [records])] written but not yet
-# committed.
+# session.info key: [(savepoint or None, [records])] written but not yet committed, by a
+# session that owns its database transaction (only such a session's commit commits).
 _PENDING = "lauretta_audit_pending"
-# Connection.info key (per DBAPI connection): [records] written through a Session that
-# was joined to a transaction it does not own (Superset's tag listeners do this inside
-# a flush). The owner's next flush on that connection adopts them.
+# Connection.info key (per DBAPI connection): [(root transaction, [records])] written by a
+# Session joined to a transaction it does not own (Superset's tag listeners, inside the
+# owner's flush). The owner's flush in that same transaction adopts them. Any rollback
+# on the connection drops them: a line may then be missing, but never printed for a
+# change that did not commit.
 _DEFERRED = "lauretta_audit_deferred"
 
 
@@ -297,6 +300,7 @@ def _listen() -> None:
     event.listen(Session, "after_soft_rollback", _after_soft_rollback)
     event.listen(Session, "after_transaction_end", _after_transaction_end)
     event.listen(sa.engine.Engine, "rollback", _on_connection_rollback)
+    event.listen(sa.engine.Engine, "rollback_savepoint", _on_savepoint_rollback)
     event.listen(sa.pool.Pool, "checkin", _on_checkin)
 
 
@@ -656,6 +660,10 @@ def _is_sensitive(name: str, column: Any) -> bool:
     return isinstance(getattr(column, "type", None), EncryptedType)
 
 
+# A connection string inside a parameter value, e.g. odbc_connect=...;PWD=...
+_CREDENTIAL_IN_VALUE = re.compile(r"(?i)(pwd|pass(word|wd)?|secret|token)\s*=")
+
+
 def _sensitive_name(name: str) -> bool:
     name = name.lower()
     return name in SENSITIVE_COLUMNS or any(m in name for m in SENSITIVE_MARKERS)
@@ -669,7 +677,8 @@ def _mask_uri(value: Any) -> str:
     try:
         url = make_url_safe(str(value))
         query = {
-            k: (PASSWORD_MASK if _sensitive_name(k) else v) for k, v in url.query.items()
+            k: (PASSWORD_MASK if _sensitive_name(k) or _CREDENTIAL_IN_VALUE.search(str(v)) else v)
+            for k, v in url.query.items()
         }
         if not url.password and query == dict(url.query):
             return str(value)
@@ -1013,43 +1022,56 @@ def _is_metadata(conn: Connection) -> bool:
     return str(conn.engine.url) == str(db.engine.url)
 
 
+def _owns(session: Session, conn: Connection) -> bool:
+    """Whether committing `session` commits `conn`'s database transaction. False for a
+    Session bound to a Connection already in a transaction: SQLAlchemy 1.4 records
+    should_commit=False for it, or, inside a connection savepoint, uses that savepoint
+    (its commit only releases it). Reads an internal, so on any surprise: owns."""
+    try:
+        entry = session.get_transaction()._connections.get(conn)  # noqa: SLF001
+        if entry is None:
+            return True
+        return bool(entry[2]) and not isinstance(entry[1], sa.engine.NestedTransaction)
+    except Exception:  # noqa: BLE001
+        return True
+
+
 def _after_flush(session: Session, _flush_context: Any) -> None:
     if not _state.initialised:
         return
     conn = session.connection()
     if not _is_metadata(conn):
         return
-    # Rows that a Session joined to this transaction wrote during this flush (Superset's
-    # tag listeners): they commit or roll back with this session's transaction.
-    records = conn.info.pop(_DEFERRED, None) or []
+    records: list[dict[str, Any]] = []
     if session.new or session.dirty or session.deleted:
-        new = _build_records(session)
-        if new and _state.db_enabled:
-            _insert(conn, new)  # fails the flush, and the change, if it cannot be written
-        records += new
+        records = _build_records(session)
+        if records and _state.db_enabled:
+            _insert(conn, records)  # fails the flush, and the change, if it cannot be written
+    root = conn.get_transaction()
+    if not _owns(session, conn):
+        if records:
+            conn.info.setdefault(_DEFERRED, []).append((root, records))
+        return
+    # What sessions joined to this transaction wrote during this flush (tag listeners).
+    for txn, deferred in conn.info.pop(_DEFERRED, None) or []:
+        if txn is root:
+            records = deferred + records
+        else:
+            _warn_unprinted(deferred)
     if records:
         session.info.setdefault(_PENDING, []).append(
-            (session.get_nested_transaction(), conn, records)
+            (session.get_nested_transaction(), records)
         )
 
 
 def _after_commit(session: Session) -> None:
     # Also fired when a savepoint is released (the savepoint is still current then);
-    # print only when the outermost transaction commits.
+    # print only when the outermost transaction commits. Only an owning session queues
+    # records, so this commit was the database commit.
     if session.get_nested_transaction() is not None:
         return
-    pending = session.info.pop(_PENDING, None)
-    if not pending:
-        return
-    done: list[dict[str, Any]] = []
-    for _, conn, records in pending:
-        # A Session bound to a Connection whose transaction it did not begin does not
-        # commit it: the rows are not committed yet. Hand them to the connection.
-        if not conn.closed and conn.in_transaction():
-            conn.info.setdefault(_DEFERRED, []).extend(records)
-        else:
-            done.extend(records)
-    _emit_stdout(done)
+    if pending := session.info.pop(_PENDING, None):
+        _emit_stdout([r for _, records in pending for r in records])
 
 
 def _rolled_back_to(previous: SessionTransaction) -> Optional[SessionTransaction]:
@@ -1091,8 +1113,22 @@ def _after_transaction_end(session: Session, transaction: SessionTransaction) ->
         session.info.pop(_PENDING, None)
 
 
+def _drop_deferred(conn: Connection) -> None:
+    # Connection.info on an invalidated connection would try to reconnect.
+    if conn.closed or conn.invalidated:
+        return
+    try:
+        conn.info.pop(_DEFERRED, None)
+    except Exception:  # noqa: BLE001 -- cleanup must never break a rollback
+        logger.debug("audit: could not clear deferred records", exc_info=True)
+
+
 def _on_connection_rollback(conn: Connection) -> None:
-    conn.info.pop(_DEFERRED, None)
+    _drop_deferred(conn)
+
+
+def _on_savepoint_rollback(conn: Connection, _name: str, _context: Any) -> None:
+    _drop_deferred(conn)
 
 
 def _on_checkin(_dbapi_conn: Any, record: Any) -> None:
@@ -1100,11 +1136,16 @@ def _on_checkin(_dbapi_conn: Any, record: Any) -> None:
     # so they get no stdout line (the rows themselves are in the table if committed).
     info = getattr(record, "info", None)
     if info is not None and (lost := info.pop(_DEFERRED, None)):
+        _warn_unprinted([r for _, records in lost for r in records])
+
+
+def _warn_unprinted(records: list[dict[str, Any]]) -> None:
+    if records:
         logger.warning(
             "audit: %d event(s) without a stdout line: their transaction's outcome was "
-            "not observed (ids %s)",
-            len(lost),
-            [r.get("id") for r in lost],
+            "not observed (ids %s; the table has them if they committed)",
+            len(records),
+            [r.get("id") for r in records],
         )
 
 
