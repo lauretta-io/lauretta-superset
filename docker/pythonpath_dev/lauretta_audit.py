@@ -632,6 +632,7 @@ _LABEL_ATTRS = (
     "database_name",
     "column_name",
     "metric_name",
+    "template_name",
     "label",
     "name",
     "short_descr",

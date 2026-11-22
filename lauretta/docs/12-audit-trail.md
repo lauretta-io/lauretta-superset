@@ -119,6 +119,10 @@ session table: a fork migration would conflict on every upstream upgrade
   # audit verify: 2 ids absent (rolled back or deleted), first ranges: ['901-902']
   ```
 
+  After a failover (a standby promoted) the ids jump by about 32: PostgreSQL logs
+  sequence values ahead, and the new primary continues after them. Such a gap at a
+  known failover time is normal.
+
   It exits 1 if any row fails: a changed row, or a row whose `key_id` matches none of
   the keys it knows (pass earlier keys as shown under "Key rotation"; an unknown key is
   also what an edited `key_id` looks like). A changed row fails its HMAC. A deleted row leaves a
