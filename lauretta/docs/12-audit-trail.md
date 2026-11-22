@@ -34,8 +34,10 @@ Each row has:
 | `key_id`, `row_hmac` | Tamper evidence, see below |
 
 **Never stored:** password hashes, database passwords (the password in `sqlalchemy_uri`
-is masked), `encrypted_extra`, certificates, SSH keys, tokens, and any encrypted
-column. These show up as `[REDACTED]`. Long values (dashboard layouts, chart
+is masked, and so is any query parameter named like a credential), `encrypted_extra`,
+certificates, SSH keys, tokens, and any encrypted column. Inside JSON values (for example
+a connection's `extra`), every key whose name contains `password`, `passwd`, `secret`,
+`token`, `credential` or `private_key` is masked too. These show up as `[REDACTED]`. Long values (dashboard layouts, chart
 parameters) are cut at 1000 characters, with the full length and a SHA-256 of the
 whole value, so a value can still be matched against a backup.
 
@@ -164,6 +166,9 @@ docker compose -f <compose-file> exec -e LAURETTA_AUDIT_OLD_KEYS='<old key>' \
 - **Writes outside the application** are not seen: SQL run directly against the metadata
   database, or a data source written by other tools. Use the database's own auditing
   (e.g. `pgaudit`) for that.
+- **Bulk ORM statements** (`query(...).delete()` / `.update()`, for example
+  `superset factory-reset`, off by default behind a feature flag) bypass the per-row
+  hooks and are not itemised. The UI and REST API change rows one by one and are covered.
 - **Side effects written with raw SQL by Superset itself** are covered by their cause,
   not one by one. Deleting a dataset also removes its `datasource access` permission
   from every role, and its columns and metrics. The dataset deletion is recorded, with

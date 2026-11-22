@@ -134,7 +134,7 @@ SENSITIVE_COLUMNS = frozenset(
         "api_key",
     }
 )
-SENSITIVE_MARKERS = ("password", "secret", "token")
+SENSITIVE_MARKERS = ("password", "passwd", "secret", "token", "credential", "private_key")
 REDACTED = "[REDACTED]"
 
 # Bookkeeping columns left out of update diffs and snapshots.
@@ -215,8 +215,13 @@ class _State:
 
 _state = _State()
 
-# session.info key: [(savepoint or None, [records])] written but not yet committed.
+# session.info key: [(savepoint or None, connection, [records])] written but not yet
+# committed.
 _PENDING = "lauretta_audit_pending"
+# Connection.info key (per DBAPI connection): [records] written through a Session that
+# was joined to a transaction it does not own (Superset's tag listeners do this inside
+# a flush). The owner's next flush on that connection adopts them.
+_DEFERRED = "lauretta_audit_deferred"
 
 
 # ---------------------------------------------------------------------------
@@ -278,12 +283,21 @@ def init_app(app: Flask) -> None:
     if not _state.initialised:
         from flask_login import user_logged_out
 
-        event.listen(Session, "after_flush", _after_flush)
-        event.listen(Session, "after_commit", _after_commit)
-        event.listen(Session, "after_soft_rollback", _after_soft_rollback)
+        _listen()
         user_logged_out.connect(_on_logout)
         _state.initialised = True
     logger.info("audit trail active (table: %s)", "yes" if has_table else "no")
+
+
+def _listen() -> None:
+    """The ORM and connection listeners behind the stdout rule: a line is printed only
+    after the database transaction that holds its row has committed."""
+    event.listen(Session, "after_flush", _after_flush)
+    event.listen(Session, "after_commit", _after_commit)
+    event.listen(Session, "after_soft_rollback", _after_soft_rollback)
+    event.listen(Session, "after_transaction_end", _after_transaction_end)
+    event.listen(sa.engine.Engine, "rollback", _on_connection_rollback)
+    event.listen(sa.pool.Pool, "checkin", _on_checkin)
 
 
 def _configure_stdout() -> None:
@@ -637,20 +651,62 @@ def _ref(obj: Any) -> str:
 def _is_sensitive(name: str, column: Any) -> bool:
     from sqlalchemy_utils import EncryptedType
 
-    if name in SENSITIVE_COLUMNS or any(m in name for m in SENSITIVE_MARKERS):
+    if _sensitive_name(name):
         return True
     return isinstance(getattr(column, "type", None), EncryptedType)
 
 
+def _sensitive_name(name: str) -> bool:
+    name = name.lower()
+    return name in SENSITIVE_COLUMNS or any(m in name for m in SENSITIVE_MARKERS)
+
+
 def _mask_uri(value: Any) -> str:
+    """The password and every credential-like query parameter masked."""
     from superset.constants import PASSWORD_MASK
     from superset.databases.utils import make_url_safe
 
     try:
         url = make_url_safe(str(value))
+        query = {
+            k: (PASSWORD_MASK if _sensitive_name(k) else v) for k, v in url.query.items()
+        }
+        if not url.password and query == dict(url.query):
+            return str(value)
+        url = url.set(query=query)
+        if url.password:
+            url = url.set(password=PASSWORD_MASK)
+        return url.render_as_string(hide_password=False)
     except Exception:  # noqa: BLE001
         return REDACTED
-    return str(url.set(password=PASSWORD_MASK)) if url.password else str(value)
+
+
+def _redact(value: Any) -> Any:
+    """Nested dicts/lists with credential-like keys masked (e.g. dbs.extra connect_args)."""
+    if isinstance(value, dict):
+        return {
+            k: (
+                REDACTED
+                if _sensitive_name(str(k)) and v not in (None, "")
+                else _redact(v)
+            )
+            for k, v in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact(v) for v in value]
+    return value
+
+
+def _redact_json_text(value: str) -> str:
+    """A JSON object/array held in a text column (extra, params, ...), redacted."""
+    if not value.lstrip().startswith(("{", "[")):
+        return value
+    try:
+        parsed = json.loads(value)
+    except ValueError:
+        return value
+    redacted = _redact(parsed)
+    return value if redacted == parsed else json.dumps(redacted, sort_keys=True)
 
 
 def _value(name: str, column: Any, value: Any) -> Any:
@@ -661,6 +717,10 @@ def _value(name: str, column: Any, value: Any) -> Any:
         return REDACTED
     if name == "sqlalchemy_uri":
         value = _mask_uri(value)
+    elif isinstance(value, (dict, list)):
+        value = _redact(value)
+    elif isinstance(value, str):
+        value = _redact_json_text(value)
     return _cut_long(_plain(value))
 
 
@@ -784,13 +844,17 @@ def _sql_dml_record(obj: Any) -> Optional[dict[str, Any]]:
         "timed_out",
     }:
         return None
-    sql = obj.executed_sql or obj.sql or ""
-    try:
-        from superset.sql.parse import SQLScript
+    # executed_sql holds only the last block Superset ran; sql is the whole script.
+    sql = obj.sql or obj.executed_sql or ""
+    from superset.sql.parse import SQLScript
 
-        if not SQLScript(sql, obj.database.db_engine_spec.engine).has_mutation():
-            return None
-    except Exception:  # noqa: BLE001 -- unparsable SQL is rejected by Superset itself
+    def mutates(script: str) -> bool:
+        try:
+            return SQLScript(script, obj.database.db_engine_spec.engine).has_mutation()
+        except Exception:  # noqa: BLE001 -- unparsable SQL is rejected by Superset itself
+            return False
+
+    if not any(mutates(s) for s in dict.fromkeys((obj.sql, obj.executed_sql)) if s):
         return None
     # SQL Lab runs statements in a worker thread under a synthetic request ("GET /"),
     # so the client address is not known here; the query's owner is.
@@ -950,21 +1014,23 @@ def _is_metadata(conn: Connection) -> bool:
 
 
 def _after_flush(session: Session, _flush_context: Any) -> None:
-    if not _state.initialised or not (session.new or session.dirty or session.deleted):
+    if not _state.initialised:
         return
     conn = session.connection()
     if not _is_metadata(conn):
         return
-    records = _build_records(session)
-    if not records:
-        return
-    if _state.db_enabled:
-        _insert(
-            conn, records
-        )  # fails the flush, and the change, if it cannot be written
-    session.info.setdefault(_PENDING, []).append(
-        (session.get_nested_transaction(), records)
-    )
+    # Rows that a Session joined to this transaction wrote during this flush (Superset's
+    # tag listeners): they commit or roll back with this session's transaction.
+    records = conn.info.pop(_DEFERRED, None) or []
+    if session.new or session.dirty or session.deleted:
+        new = _build_records(session)
+        if new and _state.db_enabled:
+            _insert(conn, new)  # fails the flush, and the change, if it cannot be written
+        records += new
+    if records:
+        session.info.setdefault(_PENDING, []).append(
+            (session.get_nested_transaction(), conn, records)
+        )
 
 
 def _after_commit(session: Session) -> None:
@@ -972,8 +1038,30 @@ def _after_commit(session: Session) -> None:
     # print only when the outermost transaction commits.
     if session.get_nested_transaction() is not None:
         return
-    if pending := session.info.pop(_PENDING, None):
-        _emit_stdout([r for _, records in pending for r in records])
+    pending = session.info.pop(_PENDING, None)
+    if not pending:
+        return
+    done: list[dict[str, Any]] = []
+    for _, conn, records in pending:
+        # A Session bound to a Connection whose transaction it did not begin does not
+        # commit it: the rows are not committed yet. Hand them to the connection.
+        if not conn.closed and conn.in_transaction():
+            conn.info.setdefault(_DEFERRED, []).extend(records)
+        else:
+            done.extend(records)
+    _emit_stdout(done)
+
+
+def _rolled_back_to(previous: SessionTransaction) -> Optional[SessionTransaction]:
+    """What a rollback of `previous` undid in the database: the innermost savepoint at
+    or above it, or None for the whole transaction. A failed flush rolls back its own
+    sub-transaction, which reaches the database as the enclosing savepoint or root."""
+    txn: Optional[SessionTransaction] = previous
+    while txn is not None:
+        if txn.nested:
+            return txn
+        txn = txn.parent
+    return None
 
 
 def _after_soft_rollback(session: Session, previous: SessionTransaction) -> None:
@@ -981,18 +1069,43 @@ def _after_soft_rollback(session: Session, previous: SessionTransaction) -> None
     pending = session.info.get(_PENDING)
     if not pending:
         return
-    if not previous.nested:
+    boundary = _rolled_back_to(previous)
+    if boundary is None:
         session.info.pop(_PENDING, None)
         return
 
     def inside(txn: Optional[SessionTransaction]) -> bool:
         while txn is not None:
-            if txn is previous:
+            if txn is boundary:
                 return True
             txn = txn.parent
         return False
 
-    session.info[_PENDING] = [(t, r) for t, r in pending if not inside(t)]
+    session.info[_PENDING] = [p for p in pending if not inside(p[0])]
+
+
+def _after_transaction_end(session: Session, transaction: SessionTransaction) -> None:
+    # The outermost transaction ended without a commit having printed its records
+    # (Session.close() rolls back without after_soft_rollback): they never committed.
+    if transaction.parent is None:
+        session.info.pop(_PENDING, None)
+
+
+def _on_connection_rollback(conn: Connection) -> None:
+    conn.info.pop(_DEFERRED, None)
+
+
+def _on_checkin(_dbapi_conn: Any, record: Any) -> None:
+    # Joined-session rows the owner never flushed again: their commit is not observed,
+    # so they get no stdout line (the rows themselves are in the table if committed).
+    info = getattr(record, "info", None)
+    if info is not None and (lost := info.pop(_DEFERRED, None)):
+        logger.warning(
+            "audit: %d event(s) without a stdout line: their transaction's outcome was "
+            "not observed (ids %s)",
+            len(lost),
+            [r.get("id") for r in lost],
+        )
 
 
 # ---------------------------------------------------------------------------
