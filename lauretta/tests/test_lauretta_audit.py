@@ -1,4 +1,9 @@
-"""Tests of the audit trail's transaction rules (docker/pythonpath_dev/lauretta_audit.py).
+# mypy: ignore-errors
+# unittest, not pytest: these run inside the Superset image, which has no pytest
+# (PT009/PT027). S608: f-string SQL here only names this file's own tables.
+# ruff: noqa: PT009, PT027, S608
+"""Tests of the audit trail's transaction rules
+(docker/pythonpath_dev/lauretta_audit.py), plus the gap fixes (GapsTest).
 
 The rules: an audit row is written in the transaction of the change it describes, and
 its stdout (SIEM) line is printed only after that transaction commits; never for a
@@ -24,12 +29,11 @@ import tempfile
 import unittest
 from unittest import mock
 
+import lauretta_audit as la
 import sqlalchemy as sa
 from sqlalchemy import event
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import declarative_base, Session
-
-import lauretta_audit as la
 
 Base = declarative_base()
 
@@ -258,7 +262,7 @@ class AuditTransactionTest(unittest.TestCase):
             s.flush()
             self.assertEqual(self.printed(), [])
             s.commit()
-        printed = sorted((l["target_type"], l["id"]) for l in LINES.lines)
+        printed = sorted((line["target_type"], line["id"]) for line in LINES.lines)
         rows = sorted((r["target_type"], r["id"]) for r in self.rows())
         self.assertEqual(printed, rows)
         self.assertEqual([t for t, _ in rows], ["notes", "things"])
@@ -304,7 +308,9 @@ class AuditTransactionTest(unittest.TestCase):
                 again.commit()
             outer.commit()
         self.assertEqual(self.names(), ["after"])
-        self.assertEqual(self.printed(), [])  # joined writes with no owning session: no line
+        self.assertEqual(
+            self.printed(), []
+        )  # joined writes with no owning session: no line
 
     def test_rollback_after_invalidate_does_not_raise(self) -> None:
         # Codex finding: the rollback listener reconnected an invalidated connection.
@@ -320,7 +326,9 @@ class AuditTransactionTest(unittest.TestCase):
             s.flush()
             conn = s.connection()
             with mock.patch.object(
-                conn.dialect, "do_commit", side_effect=sa.exc.OperationalError("c", {}, Exception("server gone"))
+                conn.dialect,
+                "do_commit",
+                side_effect=sa.exc.OperationalError("c", {}, Exception("server gone")),
             ):
                 with self.assertRaises(sa.exc.OperationalError):
                     s.commit()
@@ -343,10 +351,150 @@ class AuditTransactionTest(unittest.TestCase):
         with Session(self.engine) as s:
             s.add(Thing(name="a"))
             s.commit()
-        for sql in (f"UPDATE {la.TABLE_NAME} SET action='x'", f"DELETE FROM {la.TABLE_NAME}"):
+        for sql in (
+            f"UPDATE {la.TABLE_NAME} SET action='x'",
+            f"DELETE FROM {la.TABLE_NAME}",
+        ):
             with self.assertRaisesRegex(sa.exc.IntegrityError, "append-only"):
                 with self.engine.begin() as conn:
                     conn.exec_driver_sql(sql)
+
+
+class GapsTest(unittest.TestCase):
+    """Bulk statements, raw-SQL side effects in a flush, idle-session sweep."""
+
+    # The same fixture, without inheriting (and re-running) the tests above.
+    setUp = AuditTransactionTest.setUp
+    tearDown = AuditTransactionTest.tearDown
+    rows = AuditTransactionTest.rows
+    names = AuditTransactionTest.names
+
+    def _seed(self, *names: str) -> None:
+        with Session(self.engine) as s:
+            s.add_all([Thing(name=n) for n in names])
+            s.commit()
+        LINES.lines.clear()
+
+    def test_bulk_delete_is_recorded_with_its_rows(self) -> None:
+        self._seed("a", "b", "c")
+        with Session(self.engine) as s:
+            n = (
+                s.query(Thing)
+                .filter(Thing.name.in_(["a", "b"]))
+                .delete(synchronize_session=False)
+            )
+            self.assertEqual(n, 2)
+            self.assertEqual(LINES.lines, [])  # not committed yet
+            s.commit()
+        row = self.rows()[-1]
+        self.assertEqual(row["action"], "data.bulk_delete")
+        self.assertEqual(row["target_type"], "things")
+        details = json.loads(row["details"])
+        self.assertEqual(details["rows"], 2)
+        self.assertEqual(sorted(details["affected"]), [1, 2])
+        self.assertIn("name IN", details["where"])
+        self.assertEqual([line["action"] for line in LINES.lines], ["data.bulk_delete"])
+        self.assertEqual(la._sign(row, la._state.key), row["row_hmac"])
+
+    def test_bulk_update_records_values_and_rollback_prints_nothing(self) -> None:
+        self._seed("a", "b")
+        with Session(self.engine) as s:
+            s.execute(sa.update(Thing).where(Thing.name == "a").values(name="z"))
+            s.rollback()
+        self.assertEqual(LINES.lines, [])
+        self.assertEqual(self.names(), ["a", "b"])
+        with Session(self.engine) as s:
+            s.query(Thing).filter(Thing.name == "a").update(
+                {Thing.name: "z"}, synchronize_session=False
+            )
+            s.commit()
+        details = json.loads(self.rows()[-1]["details"])
+        self.assertEqual(details["values"], {"name": "z"})
+        self.assertEqual(details["affected"], [1])
+        self.assertEqual([line["action"] for line in LINES.lines], ["data.bulk_update"])
+
+    def test_bulk_statement_matching_nothing_is_not_recorded(self) -> None:
+        self._seed("a")
+        before = len(self.rows())
+        with Session(self.engine) as s:
+            s.query(Thing).filter(Thing.name == "nope").delete(
+                synchronize_session=False
+            )
+            s.commit()
+        self.assertEqual(len(self.rows()), before)
+
+    def test_side_records_join_the_flush_that_made_them(self) -> None:
+        # Stands in for Superset's raw-SQL permission removal inside a delete flush.
+        def side(mapper, connection, target):  # noqa: ANN001
+            la._stash_side(
+                connection,
+                [la._record("role", "role.permission_remove", target_name="Gamma")],
+            )
+
+        event.listen(Thing, "after_delete", side)
+        self.addCleanup(event.remove, Thing, "after_delete", side)
+        self._seed("a")
+        with Session(self.engine) as s:
+            s.delete(s.query(Thing).one())
+            s.flush()
+            s.rollback()
+        self.assertEqual(LINES.lines, [])
+        with Session(self.engine) as s:
+            s.delete(s.query(Thing).one())
+            s.commit()
+        self.assertEqual(
+            [r["action"] for r in self.rows()[-2:]],
+            ["role.permission_remove", "data.delete"],
+        )
+        self.assertEqual(
+            [line["action"] for line in LINES.lines],
+            ["role.permission_remove", "data.delete"],
+        )
+
+    def test_idle_sweep_records_one_logout_per_session(self) -> None:
+        from datetime import datetime, timedelta, timezone
+
+        la.sessions_table.create(self.engine)
+        now = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+        life = timedelta(minutes=30)
+        rows = [
+            ("old", now - timedelta(hours=2), now - timedelta(minutes=40)),
+            ("fresh", now - timedelta(hours=1), now - timedelta(minutes=5)),
+            ("edge", now - timedelta(hours=1), now - timedelta(minutes=31)),  # in grace
+        ]
+        with self.engine.begin() as conn:
+            for sid, started, seen in rows:
+                conn.execute(
+                    la.sessions_table.insert().values(
+                        sid=sid,
+                        user_id=7,
+                        username="ann",
+                        ip_address="198.51.100.4",
+                        node="n1",
+                        started_at=started,
+                        last_seen=seen,
+                    )
+                )
+        self.assertEqual(la.sweep_sessions(self.engine, life, now), 1)
+        self.assertEqual(la.sweep_sessions(self.engine, life, now), 0)  # claimed once
+        row = self.rows()[-1]
+        self.assertEqual(row["action"], "auth.logout")
+        self.assertEqual(row["actor_username"], "ann")
+        self.assertEqual(row["ip_address"], "198.51.100.4")
+        self.assertEqual(row["request"], "session idle timeout")
+        self.assertEqual(json.loads(row["details"])["reason"], "idle_timeout")
+        self.assertEqual(
+            la._aware(row["event_time"]), now - timedelta(minutes=40) + life
+        )
+        self.assertEqual(la._sign(row, la._state.key), row["row_hmac"])
+        with self.engine.connect() as conn:
+            ended = dict(
+                conn.execute(
+                    sa.select(la.sessions_table.c.sid, la.sessions_table.c.end_reason)
+                ).fetchall()
+            )
+        self.assertEqual(ended, {"old": "idle_timeout", "fresh": None, "edge": None})
+        self.assertEqual([line["action"] for line in LINES.lines], ["auth.logout"])
 
 
 @unittest.skipUnless(os.environ.get("AUDIT_TEST_PG_URL"), "set AUDIT_TEST_PG_URL")
@@ -379,7 +527,7 @@ class PostgresTest(unittest.TestCase):
         with Session(self.engine) as s:
             s.add(Thing(name="a"))
             s.commit()
-        self.assertEqual([l["target_name"] for l in LINES.lines], ["a"])
+        self.assertEqual([line["target_name"] for line in LINES.lines], ["a"])
         self.assertEqual(self.count(la.TABLE_NAME), 1)
 
     def test_commit_of_aborted_transaction_prints_nothing(self) -> None:
@@ -398,9 +546,11 @@ class PostgresTest(unittest.TestCase):
             s.add(Thing(name="a"))
             s.commit()
         for sql in ("UPDATE", "DELETE FROM", "TRUNCATE"):
-            stmt = {"UPDATE": f"UPDATE {la.TABLE_NAME} SET outcome='x'",
-                    "DELETE FROM": f"DELETE FROM {la.TABLE_NAME}",
-                    "TRUNCATE": f"TRUNCATE {la.TABLE_NAME}"}[sql]
+            stmt = {
+                "UPDATE": f"UPDATE {la.TABLE_NAME} SET outcome='x'",
+                "DELETE FROM": f"DELETE FROM {la.TABLE_NAME}",
+                "TRUNCATE": f"TRUNCATE {la.TABLE_NAME}",
+            }[sql]
             with self.assertRaisesRegex(sa.exc.DBAPIError, "append-only"):
                 with self.engine.begin() as conn:
                     conn.exec_driver_sql(stmt)
@@ -431,7 +581,7 @@ class PoolReuseTest(unittest.TestCase):
                 with Session(engine) as s:
                     s.add(Thing(name="next"))
                     s.commit()
-            self.assertEqual([l["target_name"] for l in LINES.lines], ["next"])
+            self.assertEqual([line["target_name"] for line in LINES.lines], ["next"])
             engine.dispose()
 
 
@@ -451,7 +601,11 @@ class RedactionTest(unittest.TestCase):
 
     def test_nested_credentials_in_json_text_and_values(self) -> None:
         extra = json.dumps(
-            {"engine_params": {"connect_args": {"password": "pw", "sslmode": "verify-full"}}}
+            {
+                "engine_params": {
+                    "connect_args": {"password": "pw", "sslmode": "verify-full"}
+                }
+            }
         )
         got = la._value("extra", None, extra)
         self.assertNotIn('"pw"', got)
@@ -465,7 +619,10 @@ class RedactionTest(unittest.TestCase):
 
 class NodeTest(unittest.TestCase):
     def test_order(self) -> None:
-        env = {"LAURETTA_AUDIT_NODE": "n1", "DATABASE_APPLICATION_NAME": "superset-ha-b"}
+        env = {
+            "LAURETTA_AUDIT_NODE": "n1",
+            "DATABASE_APPLICATION_NAME": "superset-ha-b",
+        }
         with mock.patch.dict(os.environ, env, clear=False):
             self.assertEqual(la._node_name(), "n1")
         with mock.patch.dict(os.environ, {**env, "LAURETTA_AUDIT_NODE": " "}):

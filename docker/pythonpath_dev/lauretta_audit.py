@@ -23,13 +23,18 @@ Every event is written to two places:
   * one JSON line on stdout (logger `lauretta.audit`), for a log shipper / SIEM.
 
 Captured events (see lauretta/docs/12-audit-trail.md for the full list):
-  * auth.login (success and failure, with the reason) and auth.logout
+  * auth.login (success and failure, with the reason) and auth.logout: an explicit
+    logout, or an idle timeout found by the session sweep (lauretta_audit_sessions)
   * user.create / user.update / user.delete
   * role.assign / role.revoke (user <-> role), role.permission_add / _remove,
     role.create / role.update / role.delete, and the group equivalents
   * data.create / data.update / data.delete for every other ORM-mapped table in the
     metadata database (dashboards, charts, datasets, databases, ...), minus the
     bookkeeping tables in EXCLUDED_TABLES
+  * <category>.bulk_update / .bulk_delete: a statement that changes many rows at once
+    (Query.update/delete, session.execute(update(...)))
+  * role.permission_remove for permissions Superset deletes with raw SQL when a
+    dataset or database is deleted or changed
   * data.sql_dml: a SQL Lab statement that writes to a data source
   * data.file_upload: a floor-map image upload
 
@@ -47,6 +52,7 @@ which the stdout copy settles.
 Command line (PYTHONPATH must include this directory, as in every compose mode):
   python -m lauretta_audit create-table   # init scripts; idempotent
   python -m lauretta_audit verify         # recompute every row's HMAC
+  python -m lauretta_audit sweep-sessions # record idle timeouts now (cron; optional)
 """
 
 from __future__ import annotations
@@ -61,19 +67,22 @@ import json  # noqa: TID251
 import logging
 import os
 import re
+import secrets
 import socket
 import sys
+import time
 import uuid
+from collections import OrderedDict
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
-from typing import Any, Optional, TYPE_CHECKING
+from typing import Any, Callable, Optional, TYPE_CHECKING
 
 import sqlalchemy as sa
 from sqlalchemy import event
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.engine import Connection
-from sqlalchemy.orm import Session, SessionTransaction
+from sqlalchemy.orm import ORMExecuteState, Session, SessionTransaction
 
 if TYPE_CHECKING:
     from flask import Flask
@@ -84,14 +93,27 @@ audit_logger = logging.getLogger("lauretta.audit")
 
 TABLE_NAME = "lauretta_audit_log"
 TRIGGER_FUNCTION = "lauretta_audit_log_append_only"
+# Working state, not audit trail: one row per browser login, so that an idle timeout
+# (a session nobody ends) can be recorded as a logout.
+SESSIONS_TABLE = "lauretta_audit_sessions"
+SESSION_SID_KEY = "_lauretta_audit_sid"
+SESSION_SEEN_KEY = "_lauretta_audit_seen"
+# Defaults; each can be overridden in the Superset config under the same name.
+#   TOUCH: how often (seconds) a request refreshes the session's last_seen
+#   SWEEP: how often (seconds) each worker looks for timed-out sessions
+LAURETTA_AUDIT_TOUCH_SECONDS = 60
+LAURETTA_AUDIT_SWEEP_SECONDS = 60
+# Bulk statements: at most this many affected primary keys are listed.
+MAX_BULK_IDS = 1000
+JWT_LOGIN_PATH = "/api/v1/security/login"
 
 # Set by the init scripts (docker/docker-init.sh, docker/docker-init-ha.sh): the CLI
 # commands they run before `create-table` must not fail on the missing table.
 INIT_ENV = "LAURETTA_AUDIT_INIT"
 KEY_ENV = "LAURETTA_AUDIT_HMAC_KEY"
 # The `node` column. In a container the hostname is the container id, which changes on
-# every recreate and does not tell HA nodes apart; HA mode sets DATABASE_APPLICATION_NAME
-# per node (raib-ha: superset-ha-<node>), so that comes next.
+# every recreate and does not tell HA nodes apart; HA mode sets
+# DATABASE_APPLICATION_NAME per node (raib-ha: superset-ha-<node>), so that comes next.
 NODE_ENVS = ("LAURETTA_AUDIT_NODE", "DATABASE_APPLICATION_NAME")
 # `verify` only: comma-separated earlier LAURETTA_AUDIT_HMAC_KEY / SUPERSET_SECRET_KEY.
 OLD_KEYS_ENV = "LAURETTA_AUDIT_OLD_KEYS"
@@ -104,6 +126,7 @@ MAX_VALUE_CHARS = 1000
 EXCLUDED_TABLES = frozenset(
     {
         TABLE_NAME,
+        SESSIONS_TABLE,
         "logs",  # Superset's own event log
         "query",  # SQL Lab history; mutating statements are data.sql_dml instead
         "key_value",  # permalinks, filter state, explore form data
@@ -135,7 +158,14 @@ SENSITIVE_COLUMNS = frozenset(
         "api_key",
     }
 )
-SENSITIVE_MARKERS = ("password", "passwd", "secret", "token", "credential", "private_key")
+SENSITIVE_MARKERS = (
+    "password",
+    "passwd",
+    "secret",
+    "token",
+    "credential",
+    "private_key",
+)
 REDACTED = "[REDACTED]"
 
 # Bookkeeping columns left out of update diffs and snapshots.
@@ -198,6 +228,23 @@ audit_table = sa.Table(
 )
 
 
+sessions_table = sa.Table(
+    SESSIONS_TABLE,
+    _metadata,
+    sa.Column("sid", sa.String(64), primary_key=True),
+    sa.Column("user_id", sa.Integer()),
+    sa.Column("username", sa.String(256)),
+    sa.Column("ip_address", sa.String(64)),
+    sa.Column("user_agent", sa.String(512)),
+    sa.Column("node", sa.String(128)),
+    sa.Column("started_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("last_seen", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("ended_at", sa.DateTime(timezone=True)),
+    sa.Column("end_reason", sa.String(32)),
+    sa.Index("ix_lauretta_audit_sessions_open", "ended_at", "last_seen"),
+)
+
+
 def _node_name() -> str:
     for name in NODE_ENVS:
         if value := os.environ.get(name, "").strip():
@@ -212,6 +259,8 @@ class _State:
     key: bytes = b""
     key_id: str = ""
     node: str = field(default_factory=_node_name)
+    tracking: bool = False  # SESSIONS_TABLE exists: idle timeouts are recorded
+    last_sweep: float = 0.0
 
 
 _state = _State()
@@ -219,16 +268,24 @@ _state = _State()
 # session.info key: [(savepoint or None, [records])] written but not yet committed, by a
 # session that owns its database transaction (only such a session's commit commits).
 _PENDING = "lauretta_audit_pending"
-# Connection.info key (per DBAPI connection): [(root transaction, [records])] written by a
-# Session joined to a transaction it does not own (Superset's tag listeners, inside the
-# owner's flush). The owner's flush in that same transaction adopts them. Any rollback
-# on the connection drops them: a line may then be missing, but never printed for a
-# change that did not commit.
+# Connection.info key (per DBAPI connection): [(root transaction, [records])] written
+# by a Session joined to a transaction it does not own (Superset's tag listeners,
+# inside the owner's flush). The owner's flush in that same transaction adopts them.
+# Any rollback on the connection drops them: a line may then be missing, but never
+# printed for a change that did not commit.
 _DEFERRED = "lauretta_audit_deferred"
 # Connection.info key: [(savepoint names, [records])] queued in this transaction. A
 # savepoint rolled back on the connection (also one the session did not open) empties
 # the record lists it covered, which are the same lists the session will print.
 _OPEN = "lauretta_audit_open"
+# Connection.info key: [records] built inside a flush by Superset's own raw-SQL hooks
+# (permission removals); the same flush's after_flush inserts and queues them.
+_SIDE = "lauretta_audit_side"
+
+# SQL Lab runs a query under a synthetic request; the client that submitted it is
+# remembered here, per query client_id, from the request that created the Query row.
+_SQL_CLIENTS: OrderedDict[str, dict[str, Any]] = OrderedDict()
+_SQL_CLIENTS_MAX = 2000
 
 
 # ---------------------------------------------------------------------------
@@ -260,6 +317,30 @@ def security_manager_class() -> type:
             _audit_login(self, "remote_user", username, user)
             return user
 
+        def _delete_pvm_on_sqla_event(  # pylint: disable=too-many-arguments
+            self,
+            mapper: Any,
+            connection: Connection,
+            permission_name: Optional[str] = None,
+            view_menu_name: Optional[str] = None,
+            pvm: Any = None,
+        ) -> None:
+            # Superset removes the permission from every role with raw SQL, inside
+            # the flush that deletes or changes the dataset/database: read who held
+            # it first.
+            if not pvm and permission_name and view_menu_name:
+                pvm = self.find_permission_view_menu(permission_name, view_menu_name)
+            holders = _permission_holders(connection, pvm) if pvm else []
+            super()._delete_pvm_on_sqla_event(
+                mapper,
+                connection,
+                permission_name=permission_name,
+                view_menu_name=view_menu_name,
+                pvm=pvm,
+            )
+            if holders:
+                _stash_side(connection, _permission_removed_records(mapper, holders))
+
     return LaurettaSecurityManager
 
 
@@ -276,24 +357,30 @@ def init_app(app: Flask) -> None:
     from superset.extensions import db
 
     with app.app_context():
-        has_table = sa_inspect(db.engine).has_table(TABLE_NAME)
-    if not has_table:
+        inspector = sa_inspect(db.engine)
+        missing = [
+            t for t in (TABLE_NAME, SESSIONS_TABLE) if not inspector.has_table(t)
+        ]
+    if missing:
         if os.environ.get(INIT_ENV) != "1":
             raise RuntimeError(
-                f"audit table {TABLE_NAME!r} is missing from the metadata database: "
-                "run the init (docker/docker-init.sh, or docker/docker-init-ha.sh in "
-                "HA mode), which creates it"
+                f"audit table(s) {', '.join(missing)} missing from the metadata "
+                "database: run the init (docker/docker-init.sh, or "
+                "docker/docker-init-ha.sh in HA mode), which creates them"
             )
-        logger.warning("audit table %s missing: events go to stdout only", TABLE_NAME)
-    _state.db_enabled = has_table
+        logger.warning("audit table(s) %s missing: stdout only", ", ".join(missing))
+    _state.db_enabled = TABLE_NAME not in missing
+    _state.tracking = SESSIONS_TABLE not in missing
+    app.before_request(_touch_session)
 
     if not _state.initialised:
-        from flask_login import user_logged_out
+        from flask_login import user_logged_in, user_logged_out
 
         _listen()
+        user_logged_in.connect(_on_login)
         user_logged_out.connect(_on_logout)
         _state.initialised = True
-    logger.info("audit trail active (table: %s)", "yes" if has_table else "no")
+    logger.info("audit trail active (table: %s)", "no" if missing else "yes")
 
 
 def _listen() -> None:
@@ -303,6 +390,7 @@ def _listen() -> None:
     event.listen(Session, "after_commit", _after_commit)
     event.listen(Session, "after_soft_rollback", _after_soft_rollback)
     event.listen(Session, "after_transaction_end", _after_transaction_end)
+    event.listen(Session, "do_orm_execute", _on_orm_execute)
     # Imported here, not on the first flush: its import registers Session listeners,
     # which must not happen while SQLAlchemy iterates them.
     import sqlalchemy_utils  # noqa: F401
@@ -356,6 +444,9 @@ def create_table() -> None:
         if not sa_inspect(conn).has_table(TABLE_NAME):
             audit_table.create(conn)
             print(f"audit: created table {TABLE_NAME}")
+        if not sa_inspect(conn).has_table(SESSIONS_TABLE):
+            sessions_table.create(conn)
+            print(f"audit: created table {SESSIONS_TABLE}")
         if dialect == "postgresql":
             _pg_triggers(conn)
         elif dialect == "sqlite":
@@ -487,6 +578,7 @@ def _record(
     target_name: Optional[str] = None,
     details: Optional[dict[str, Any]] = None,
     overrides: Optional[dict[str, Any]] = None,
+    context: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     record: dict[str, Any] = {
         "event_time": datetime.now(timezone.utc),
@@ -502,7 +594,9 @@ def _record(
         "node": _cut(_state.node, 128),
         "key_id": _state.key_id,
     }
-    record.update(_context())
+    # `context` replaces the current request's actor and client entirely (an idle
+    # timeout found during somebody else's request); `overrides` only fills in.
+    record.update(_context() if context is None else context)
     # Who and where, when the request context does not tell (logins, SQL Lab threads).
     if overrides:
         record.update({k: v for k, v in overrides.items() if v is not None})
@@ -527,11 +621,18 @@ def _insert(conn: Connection, records: list[dict[str, Any]]) -> None:
         record["id"] = result.inserted_primary_key[0]
 
 
-def record_event(category: str, action: str, **kwargs: Any) -> None:
+def record_event(
+    category: str,
+    action: str,
+    *,
+    also: Optional[Callable[[Connection, dict[str, Any]], None]] = None,
+    **kwargs: Any,
+) -> None:
     """Write one event in its own transaction (logins, logouts, file uploads).
 
-    A failed database write is logged and does not fail the caller; the stdout line
-    is still printed.
+    `also(conn, record)` runs in that transaction first (session tracking). A failed
+    database write is logged and does not fail the caller; the stdout line is still
+    printed.
     """
     if not _state.initialised:
         return
@@ -541,6 +642,8 @@ def record_event(category: str, action: str, **kwargs: Any) -> None:
             from superset.extensions import db
 
             with db.engine.begin() as conn:
+                if also is not None:
+                    also(conn, record)
                 _insert(conn, [record])
         except Exception:  # noqa: BLE001
             logger.exception("audit: could not write %s to %s", action, TABLE_NAME)
@@ -559,7 +662,7 @@ def _audit_login(sm: Any, method: str, username: str, user: Any) -> None:
                 target_type="ab_user",
                 target_id=user.id,
                 target_name=user.username,
-                details={"method": method},
+                details={"method": method, **_login_session_details()},
                 overrides={"actor_id": user.id, "actor_username": user.username},
             )
             return
@@ -587,20 +690,249 @@ def _audit_login(sm: Any, method: str, username: str, user: Any) -> None:
         logger.exception("audit: could not record a login")
 
 
+def _login_session_details() -> dict[str, Any]:
+    """What the login opens: a browser session (its tracking id, picked up by
+    _on_login) or JWT tokens, which have no logout and simply expire."""
+    from flask import current_app, g, has_request_context, request
+
+    if not has_request_context():
+        return {}
+    if request.path.rstrip("/") == JWT_LOGIN_PATH:
+        now = datetime.now(timezone.utc)
+        details: dict[str, Any] = {"session": "jwt"}
+        body = request.get_json(silent=True) or {}
+        for kind, key, default in (
+            ("access", "JWT_ACCESS_TOKEN_EXPIRES", timedelta(minutes=15)),
+            ("refresh", "JWT_REFRESH_TOKEN_EXPIRES", timedelta(days=30)),
+        ):
+            if kind == "refresh" and not body.get("refresh"):
+                continue
+            lifetime = current_app.config.get(key, default)
+            if isinstance(lifetime, (int, float)) and not isinstance(lifetime, bool):
+                lifetime = timedelta(seconds=lifetime)
+            details[f"{kind}_token_expires"] = (
+                _iso(now + lifetime) if isinstance(lifetime, timedelta) else "never"
+            )
+        return details
+    sid = secrets.token_hex(16)
+    g.lauretta_audit_sid = sid
+    return {"session": sid}
+
+
 def _on_logout(sender: Any, user: Any = None, **_: Any) -> None:
     try:
         if user is None or not getattr(user, "is_authenticated", False):
             return
+        from flask import has_request_context, session
+
+        sid = None
+        if has_request_context():
+            sid = session.pop(SESSION_SID_KEY, None)
+            session.pop(SESSION_SEEN_KEY, None)
+
+        def close(conn: Connection, record: dict[str, Any]) -> None:
+            if sid and _state.tracking:
+                conn.execute(
+                    sessions_table.update()
+                    .where(
+                        sessions_table.c.sid == sid, sessions_table.c.ended_at.is_(None)
+                    )
+                    .values(ended_at=record["event_time"], end_reason="logout")
+                )
+
         record_event(
             "auth",
             "auth.logout",
+            also=close,
             target_type="ab_user",
             target_id=user.id,
             target_name=user.username,
+            details={"reason": "logout", "session": sid},
             overrides={"actor_id": user.id, "actor_username": user.username},
         )
     except Exception:  # noqa: BLE001
         logger.exception("audit: could not record a logout")
+
+
+# ---------------------------------------------------------------------------
+# Browser sessions and idle timeouts
+# ---------------------------------------------------------------------------
+def _setting(name: str) -> int:
+    from flask import current_app, has_app_context
+
+    default = int(globals()[name])
+    if not has_app_context():
+        return default
+    return int(current_app.config.get(name, default))
+
+
+def _aware(value: datetime) -> datetime:
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+def _start_tracking(user: Any, sid: Optional[str] = None) -> None:
+    """A row for this browser session; its id lives in the (signed) Flask session."""
+    from flask import request, session
+
+    from superset.extensions import db
+
+    sid = sid or secrets.token_hex(16)
+    now = datetime.now(timezone.utc)
+    with db.engine.begin() as conn:
+        conn.execute(
+            sessions_table.insert().values(
+                sid=sid,
+                user_id=user.id,
+                username=_cut(user.username, 256),
+                ip_address=_cut(request.remote_addr, 64),
+                user_agent=_cut(request.user_agent.string or None, 512),
+                node=_cut(_state.node, 128),
+                started_at=now,
+                last_seen=now,
+            )
+        )
+    session[SESSION_SID_KEY] = sid
+    session[SESSION_SEEN_KEY] = now.timestamp()
+
+
+def _on_login(sender: Any, user: Any = None, **_: Any) -> None:
+    """flask-login's user_logged_in: a browser login (the JWT API never sends it)."""
+    try:
+        if user is None or not _state.tracking:
+            return
+        from flask import g
+
+        _start_tracking(user, getattr(g, "lauretta_audit_sid", None))
+    except Exception:  # noqa: BLE001 -- tracking must never break a login
+        logger.exception("audit: could not start tracking a session")
+
+
+def _touch_session() -> None:
+    """before_request: keep last_seen to within TOUCH seconds, and sweep now and then.
+
+    Only browser sessions (flask-login's _user_id in the cookie session); a session
+    started before this code ran, or one a sweep has already closed, gets a new row.
+    """
+    if not _state.tracking:
+        return
+    try:
+        from flask import session
+        from flask_login import current_user
+
+        now = datetime.now(timezone.utc)
+        if "_user_id" in session and current_user.is_authenticated:
+            sid = session.get(SESSION_SID_KEY)
+            seen = session.get(SESSION_SEEN_KEY) or 0
+            if not sid:
+                _start_tracking(current_user)
+            elif now.timestamp() - seen >= _setting("LAURETTA_AUDIT_TOUCH_SECONDS"):
+                _touch(sid, now)
+        if time.monotonic() - _state.last_sweep >= _setting(
+            "LAURETTA_AUDIT_SWEEP_SECONDS"
+        ):
+            _state.last_sweep = time.monotonic()
+            sweep_sessions()
+    except Exception as exc:  # noqa: BLE001 -- never fail a request over tracking
+        # Expected while the metadata database is read-only (an HA failover): one line,
+        # not a traceback per worker per minute.
+        logger.warning("audit: session tracking failed: %s", exc)
+
+
+def _touch(sid: str, now: datetime) -> None:
+    from flask import session
+    from flask_login import current_user
+
+    from superset.extensions import db
+
+    with db.engine.begin() as conn:
+        updated = conn.execute(
+            sessions_table.update()
+            .where(sessions_table.c.sid == sid, sessions_table.c.ended_at.is_(None))
+            .values(last_seen=now)
+        ).rowcount
+    if updated:
+        session[SESSION_SEEN_KEY] = now.timestamp()
+        return
+    # Closed by a sweep while the cookie was still valid (clock skew between nodes, or
+    # a lifetime raised without a restart everywhere): keep tracking under a new id.
+    logger.warning("audit: session %s was closed but is still in use", sid[:8])
+    _start_tracking(current_user)
+
+
+def sweep_sessions(
+    engine: Optional[sa.engine.Engine] = None,
+    lifetime: Optional[timedelta] = None,
+    now: Optional[datetime] = None,
+) -> int:
+    """Record an auth.logout (reason idle_timeout) for every browser session idle for
+    longer than the session lifetime. Returns how many it recorded.
+
+    A session counts as ended at last_seen + lifetime; its last request may have come
+    up to TOUCH seconds after last_seen, so a session is only closed once that much
+    more time (and a margin) has passed. Each row is claimed with a conditional UPDATE,
+    so workers and nodes sweeping at the same time never record one twice, and the
+    claim and its audit row commit together.
+    """
+    from flask import current_app
+
+    if engine is None:
+        from superset.extensions import db
+
+        engine = db.engine
+    lifetime = lifetime or current_app.permanent_session_lifetime
+    now = now or datetime.now(timezone.utc)
+    cutoff = (
+        now
+        - lifetime
+        - timedelta(seconds=_setting("LAURETTA_AUDIT_TOUCH_SECONDS") + 30)
+    )
+    t = sessions_table
+    records: list[dict[str, Any]] = []
+    with engine.begin() as conn:
+        rows = conn.execute(
+            sa.select(t)
+            .where(t.c.ended_at.is_(None), t.c.last_seen < cutoff)
+            .order_by(t.c.last_seen)
+            .limit(500)
+        ).fetchall()
+        for row in rows:
+            ended = _aware(row.last_seen) + lifetime
+            claimed = conn.execute(
+                t.update()
+                .where(t.c.sid == row.sid, t.c.ended_at.is_(None))
+                .values(ended_at=ended, end_reason="idle_timeout")
+            ).rowcount
+            if claimed != 1:
+                continue
+            records.append(
+                _record(
+                    "auth",
+                    "auth.logout",
+                    target_type="ab_user",
+                    target_id=row.user_id,
+                    target_name=row.username,
+                    details={
+                        "reason": "idle_timeout",
+                        "session": row.sid,
+                        "session_started": _iso(_aware(row.started_at)),
+                        "last_activity": _iso(_aware(row.last_seen)),
+                        "idle_limit_seconds": int(lifetime.total_seconds()),
+                        "session_node": row.node,
+                    },
+                    overrides={"event_time": ended},
+                    context={
+                        "actor_id": row.user_id,
+                        "actor_username": row.username,
+                        "ip_address": row.ip_address,
+                        "user_agent": row.user_agent,
+                        "request": "session idle timeout",
+                    },
+                )
+            )
+        if records and _state.db_enabled:
+            _insert(conn, records)
+    _emit_stdout(records)
+    return len(records)
 
 
 # ---------------------------------------------------------------------------
@@ -687,7 +1019,11 @@ def _mask_uri(value: Any) -> str:
     try:
         url = make_url_safe(str(value))
         query = {
-            k: (PASSWORD_MASK if _sensitive_name(k) or _CREDENTIAL_IN_VALUE.search(str(v)) else v)
+            k: (
+                PASSWORD_MASK
+                if _sensitive_name(k) or _CREDENTIAL_IN_VALUE.search(str(v))
+                else v
+            )
             for k, v in url.query.items()
         }
         if not url.password and query == dict(url.query):
@@ -701,7 +1037,8 @@ def _mask_uri(value: Any) -> str:
 
 
 def _redact(value: Any) -> Any:
-    """Nested dicts/lists with credential-like keys masked (e.g. dbs.extra connect_args)."""
+    """Nested dicts/lists with credential-like keys masked (e.g. dbs.extra's
+    connect_args)."""
     if isinstance(value, dict):
         return {
             k: (
@@ -839,6 +1176,148 @@ def _collect_pairs(obj: Any, pairs: dict[tuple[Any, ...], _Pair]) -> None:
                     pairs[key] = _Pair(obj, rel, other, op)
 
 
+def _permission_holders(conn: Connection, pvm: Any) -> list[tuple[Any, str, str]]:
+    """(role id, role name, permission label) for each role holding `pvm`, read with
+    Core on the flush's connection (no ORM loads inside a flush)."""
+    from flask_appbuilder.security.sqla.models import (
+        assoc_permissionview_role as link,
+        Permission,
+        PermissionView,
+        Role,
+        ViewMenu,
+    )
+
+    role, pv = Role.__table__, PermissionView.__table__
+    perm, vm = Permission.__table__, ViewMenu.__table__
+    rows = conn.execute(
+        sa.select(role.c.id, role.c.name, perm.c.name, vm.c.name)
+        .select_from(
+            link.join(role, role.c.id == link.c.role_id)
+            .join(pv, pv.c.id == link.c.permission_view_id)
+            .join(perm, perm.c.id == pv.c.permission_id)
+            .join(vm, vm.c.id == pv.c.view_menu_id)
+        )
+        .where(link.c.permission_view_id == pvm.id)
+    ).fetchall()
+    return [(r[0], r[1], f"{r[2]} on {r[3]}") for r in rows]
+
+
+def _permission_removed_records(
+    mapper: Any, holders: list[tuple[Any, str, str]]
+) -> list[dict[str, Any]]:
+    cause = getattr(getattr(mapper, "local_table", None), "name", None) or "unknown"
+    return [
+        _record(
+            "role",
+            "role.permission_remove",
+            target_type="ab_role",
+            target_id=role_id,
+            target_name=role_name,
+            details={
+                "permissions": [label],
+                "cause": f"permission deleted by Superset with a {cause} change",
+            },
+        )
+        for role_id, role_name, label in holders
+    ]
+
+
+def _stash_side(conn: Connection, records: list[dict[str, Any]]) -> None:
+    if (info := _conn_info(conn)) is not None:
+        info.setdefault(_SIDE, []).extend(records)
+
+
+# ---------------------------------------------------------------------------
+# Bulk statements
+# ---------------------------------------------------------------------------
+def _bulk_values(stmt: Any) -> dict[str, Any]:
+    raw = getattr(stmt, "_values", None) or {}
+    items = list(raw.items()) or list(getattr(stmt, "_ordered_values", None) or [])
+    values = {}
+    for key, value in items:
+        name = getattr(key, "key", None) or getattr(key, "name", None) or str(key)
+        value = getattr(value, "value", value)  # a BindParameter's literal
+        values[str(name)] = _value(str(name), None, value)
+    return values
+
+
+def _where_sql(stmt: Any, conn: Connection) -> Optional[str]:
+    where = getattr(stmt, "whereclause", None)
+    if where is None:
+        return None
+    try:
+        text = str(
+            where.compile(dialect=conn.dialect, compile_kwargs={"literal_binds": True})
+        )
+    except Exception:  # noqa: BLE001 -- a type without a literal form
+        text = str(where.compile(dialect=conn.dialect))
+    return _cut_long(_redact_json_text(text))
+
+
+def _affected(conn: Connection, table: Any, stmt: Any) -> list[Any]:
+    """Primary keys (whole rows for a link table) the statement is about to change."""
+    link = table.name in _SECURITY_LINKS
+    cols = list(table.c) if link else list(table.primary_key.columns) or list(table.c)
+    query = sa.select(*cols).select_from(table).limit(MAX_BULK_IDS + 1)
+    if (where := getattr(stmt, "whereclause", None)) is not None:
+        query = query.where(where)
+    out = []
+    for row in conn.execute(query):
+        values = [_plain(v) for v in row]
+        out.append(
+            dict(zip([c.name for c in cols], values, strict=True))
+            if link
+            else (values[0] if len(values) == 1 else values)
+        )
+    return out
+
+
+def _on_orm_execute(state: ORMExecuteState) -> Any:
+    """Session.execute of an UPDATE or DELETE (Query.update/delete included): these
+    skip the unit of work, so after_flush never sees their rows."""
+    if not _state.initialised or not (state.is_update or state.is_delete):
+        return None
+    stmt = state.statement
+    table = getattr(stmt, "table", None)
+    name = getattr(table, "name", None)
+    if not name or name in EXCLUDED_TABLES:
+        return None
+    op = "update" if state.is_update else "delete"
+    values = _bulk_values(stmt) if op == "update" else {}
+    noise = NOISE_COLUMNS | (USER_NOISE_COLUMNS if name == "ab_user" else frozenset())
+    if op == "update" and values and set(values) <= noise:
+        return None  # e.g. FAB's login_count write on a failed login
+    conn = state.session.connection()
+    if not _is_metadata(conn):
+        return None
+    details: dict[str, Any] = {"where": _where_sql(stmt, conn)}
+    if values:
+        details["values"] = values
+    try:
+        affected = _affected(conn, table, stmt)
+        details["affected"] = affected[:MAX_BULK_IDS]
+        if len(affected) > MAX_BULK_IDS:
+            details["affected_truncated"] = True
+    except Exception:  # noqa: BLE001 -- record the change even without its row list
+        logger.exception("audit: could not list the rows of a bulk %s", op)
+        details["affected"] = "unavailable"
+    result = state.invoke_statement()
+    rowcount = getattr(result, "rowcount", None)
+    if rowcount == 0:
+        return result
+    details["rows"] = rowcount
+    category = SECURITY_CATEGORIES.get(name) or (
+        _SECURITY_LINKS[name][1] if name in _SECURITY_LINKS else "data"
+    )
+    record = _record(
+        category, f"{category}.bulk_{op}", target_type=name, details=details
+    )
+    if _state.db_enabled:
+        _insert(conn, [record])
+    _queue(state.session, conn, [record])
+    return result
+
+
 # Many-to-many tables with their own events: secondary -> (owner table, category,
 # action stem, details key). Pairs are grouped per owner row.
 _SECURITY_LINKS = {
@@ -871,6 +1350,7 @@ def _sql_dml_record(obj: Any) -> Optional[dict[str, Any]]:
         "timed_out",
     }:
         return None
+    client = _SQL_CLIENTS.pop(str(obj.client_id), None)
     # executed_sql holds only the last block Superset ran; sql is the whole script.
     sql = obj.sql or obj.executed_sql or ""
     from superset.sql.parse import SQLScript
@@ -883,9 +1363,13 @@ def _sql_dml_record(obj: Any) -> Optional[dict[str, Any]]:
 
     if not any(mutates(s) for s in dict.fromkeys((obj.sql, obj.executed_sql)) if s):
         return None
-    # SQL Lab runs statements in a worker thread under a synthetic request ("GET /"),
-    # so the client address is not known here; the query's owner is.
+    # SQL Lab runs statements under a synthetic request ("GET /"): the client is the
+    # one remembered when the query was submitted (same process: synchronous SQL Lab;
+    # an async query run by a Celery worker has none) and the actor is the query owner.
     overrides: dict[str, Any] = {"request": f"SQL Lab query {obj.client_id}"}
+    if client:
+        overrides.update(client)
+        overrides["request"] = f"{client['request']} (SQL Lab query {obj.client_id})"
     from flask import has_request_context
 
     if not has_request_context() and obj.user_id:
@@ -909,6 +1393,17 @@ def _sql_dml_record(obj: Any) -> Optional[dict[str, Any]]:
     )
 
 
+def _remember_sql_client(obj: Any) -> None:
+    ctx = _context()
+    if not ctx.get("ip_address") or not obj.client_id:
+        return
+    _SQL_CLIENTS[str(obj.client_id)] = {
+        k: ctx[k] for k in ("ip_address", "user_agent", "request")
+    }
+    while len(_SQL_CLIENTS) > _SQL_CLIENTS_MAX:
+        _SQL_CLIENTS.popitem(last=False)
+
+
 def _describe(
     session: Session,
 ) -> tuple[
@@ -928,6 +1423,8 @@ def _describe(
         try:
             table = _table_name(obj)
             if table == "query":
+                if op == "create":
+                    _remember_sql_client(obj)
                 if op != "delete" and (record := _sql_dml_record(obj)) is not None:
                     records.append(record)
                 continue
@@ -1060,11 +1557,19 @@ def _after_flush(session: Session, _flush_context: Any) -> None:
     conn = session.connection()
     if not _is_metadata(conn):
         return
-    records: list[dict[str, Any]] = []
+    info = _conn_info(conn)
+    records: list[dict[str, Any]] = list((info or {}).pop(_SIDE, None) or [])
     if session.new or session.dirty or session.deleted:
-        records = _build_records(session)
-        if records and _state.db_enabled:
-            _insert(conn, records)  # fails the flush, and the change, if it cannot be written
+        records += _build_records(session)
+    if records and _state.db_enabled:
+        _insert(
+            conn, records
+        )  # fails the flush, and the change, if it cannot be written
+    _queue(session, conn, records)
+
+
+def _queue(session: Session, conn: Connection, records: list[dict[str, Any]]) -> None:
+    """Hold already-inserted records for stdout until their transaction commits."""
     root = conn.get_transaction()
     if not _owns(session, conn):
         if records:
@@ -1085,12 +1590,12 @@ def _after_flush(session: Session, _flush_context: Any) -> None:
 
 def _savepoints(conn: Connection) -> frozenset[str]:
     """Names of the connection savepoints open now (innermost first, then outwards)."""
-    names = set()
+    names: set[str] = set()
     nested = conn.get_nested_transaction()
     while nested is not None:
-        names.add(getattr(nested, "_savepoint", None))
+        if name := getattr(nested, "_savepoint", None):
+            names.add(name)
         nested = getattr(nested, "_previous_nested", None)
-    names.discard(None)
     return frozenset(names)
 
 
@@ -1191,6 +1696,7 @@ def _on_connection_rollback(conn: Connection) -> None:
     if (info := _conn_info(conn)) is not None:
         info.pop(_OPEN, None)
         info.pop(_DEFERRED, None)
+        info.pop(_SIDE, None)
 
 
 def _on_savepoint_rollback(conn: Connection, name: str, _context: Any) -> None:
@@ -1212,6 +1718,7 @@ def _on_checkin(_dbapi_conn: Any, record: Any) -> None:
     info = getattr(record, "info", None)
     if info is not None:
         info.pop(_OPEN, None)
+        info.pop(_SIDE, None)
     if info is not None and (lost := info.pop(_DEFERRED, None)):
         _warn_unprinted([r for _, records in lost for r in records])
 
@@ -1272,6 +1779,13 @@ def verify(old_secrets: Optional[list[str]] = None) -> int:
                 bad += 1
                 if len(first_bad) < 20:
                     first_bad.append(record["id"])
+    _report(ok, bad, unknown, first_bad, missing, gaps)
+    return bad + unknown
+
+
+def _report(
+    ok: int, bad: int, unknown: int, first_bad: list[int], missing: int, gaps: list[str]
+) -> None:
     print(f"audit verify: {ok} ok, {bad} TAMPERED, {unknown} signed with another key")
     if first_bad:
         print(f"audit verify: first tampered ids: {first_bad}")
@@ -1288,12 +1802,15 @@ def verify(old_secrets: Optional[list[str]] = None) -> int:
             f"audit verify: {missing} ids absent (rolled back or deleted), "
             f"first ranges: {gaps}"
         )
-    return bad + unknown
 
 
 def _main(argv: list[str]) -> int:
-    if not argv or argv[0] not in {"create-table", "verify"}:
-        print("usage: python -m lauretta_audit {create-table|verify}", file=sys.stderr)
+    commands = {"create-table", "verify", "sweep-sessions"}
+    if not argv or argv[0] not in commands:
+        print(
+            "usage: python -m lauretta_audit {create-table|verify|sweep-sessions}",
+            file=sys.stderr,
+        )
         return 2
     if argv[0] == "create-table":
         os.environ[INIT_ENV] = "1"
@@ -1306,6 +1823,9 @@ def _main(argv: list[str]) -> int:
     with app.app_context():
         if argv[0] == "create-table":
             lauretta_audit.create_table()
+            return 0
+        if argv[0] == "sweep-sessions":
+            print(f"audit: {lauretta_audit.sweep_sessions()} idle session(s) closed")
             return 0
         old = [k for k in os.environ.get(OLD_KEYS_ENV, "").split(",") if k.strip()]
         return 1 if lauretta_audit.verify(old) else 0

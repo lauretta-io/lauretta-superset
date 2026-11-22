@@ -41,6 +41,7 @@ logger = logging.getLogger(__name__)
 SESSION_TABLE = "ha_sessions"
 # lauretta_audit.TABLE_NAME, repeated so this module stays importable on its own.
 AUDIT_TABLE = "lauretta_audit_log"
+AUDIT_SESSIONS_TABLE = "lauretta_audit_sessions"
 
 # Set by docker/docker-init-ha.sh. The init runs `superset db upgrade` before the session
 # table exists, so the runtime check in init_sessions() must not apply there.
@@ -214,7 +215,9 @@ def wait_for_metadata(once: bool = False) -> int:
             with engine.connect() as conn:
                 inspector = inspect(conn)
                 missing = [
-                    t for t in (SESSION_TABLE, AUDIT_TABLE) if not inspector.has_table(t)
+                    t
+                    for t in (SESSION_TABLE, AUDIT_TABLE, AUDIT_SESSIONS_TABLE)
+                    if not inspector.has_table(t)
                 ]
             break
         except Exception as exc:  # noqa: BLE001 -- any failure: not writable (yet)

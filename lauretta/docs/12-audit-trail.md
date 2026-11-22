@@ -12,13 +12,14 @@ every mode (dev, nondev, secure, HA). The code is in
 
 | Requirement | `action` values | Notes |
 |---|---|---|
-| User logon / logoff | `auth.login` (outcome `success` or `failure`), `auth.logout` | Form login and the JWT API login (`/api/v1/security/login`). A failure records the reason: `invalid_credentials`, `unknown_user` or `inactive_user`. |
+| User logon / logoff | `auth.login` (outcome `success` or `failure`), `auth.logout` | Form login and the JWT API login (`/api/v1/security/login`). A failure records the reason: `invalid_credentials`, `unknown_user` or `inactive_user`. A browser login gets a session id (`details.session`) that its `auth.logout` carries too. The logout's `details.reason` is `logout` (the user logged out) or `idle_timeout` (see "Idle timeouts" below). A JWT login records when its tokens expire (`access_token_expires`, `refresh_token_expires`), because tokens have no logout. |
 | User account creation / deletion | `user.create`, `user.delete`, `user.update` | From the UI, the REST API and the CLI (`superset fab create-admin`, etc.). `user.update` covers deactivation, renames and password changes. A changed password is recorded as changed, never stored. |
 | Role assignment / revocation | `role.assign`, `role.revoke` | One row per user, listing the roles added or removed. Recorded whichever side made the change: the user's roles, or `PUT /roles/<id>/users`. Group equivalents: `group.role_assign`, `group.role_revoke`, `user.group_add`, `user.group_remove`. |
-| Permissions changed on a role | `role.permission_add`, `role.permission_remove` | Each row lists the permissions, e.g. `can_read on Dashboard`. Also `role.create`, `role.update`, `role.delete`. |
+| Permissions changed on a role | `role.permission_add`, `role.permission_remove` | Each row lists the permissions, e.g. `can_read on Dashboard`. Also `role.create`, `role.update`, `role.delete`. Deleting a dataset or database makes Superset delete its access permission from every role with raw SQL. Each role that held it gets a `role.permission_remove`, with `details.cause`. |
 | Changes to application data | `data.create`, `data.update`, `data.delete` | Every table in the metadata database: dashboards, charts, datasets and their columns and metrics, database connections, saved queries, alerts and reports, RLS rules, tags, themes, and so on. Ownership and dashboard-membership changes are included. |
 | | `data.sql_dml` | A SQL Lab statement that writes to a data source, whether it succeeded or was refused. |
 | | `data.file_upload` | A floor-map image upload. |
+| | `data.bulk_update`, `data.bulk_delete` (and `user.`/`role.`/`group.` for those tables) | One statement that changes many rows at once, such as `superset factory-reset` or a Superset command that deletes by filter. `details` has the filter (`where`), the values set, the number of rows and the primary keys affected (up to 1000). |
 
 Each row has:
 
@@ -43,7 +44,8 @@ whole value, so a value can still be matched against a backup.
 
 **Not recorded on purpose:** page views and queries (Superset's own `logs` and `query`
 tables already hold those), SQL Lab tab state, filter state and permalinks
-(`key_value`), favourites, server-side sessions (`ha_sessions`), and the permission
+(`key_value`), favourites, server-side sessions (`ha_sessions`), the audit trail's own
+session tracking (`lauretta_audit_sessions`), and the permission
 catalogue that `superset init` rebuilds (`ab_permission`, `ab_view_menu`,
 `ab_permission_view`). Granting those permissions to a role *is* recorded.
 
@@ -84,14 +86,16 @@ goes ahead, with the stdout line printed as usual.
 
 ## Setup
 
-Nothing to configure. The init creates the table, its triggers and its indexes, and
-running it again changes nothing:
+Nothing to configure. The init creates the two tables (`lauretta_audit_log` with its
+triggers and indexes, and `lauretta_audit_sessions`, see "Idle timeouts"). Running it
+again changes nothing:
 
 - modes 1–3: `docker/docker-init.sh` (the `superset-init` service, on every start);
 - HA: `docker/docker-init-ha.sh` (the one-shot init). **Existing HA deployments must
   run the one-shot init once when upgrading to this version**, with the web stopped on
   every node *before* the new code reaches any node, or the web refuses to start
-  (`table(s) lauretta_audit_log missing`). See "Upgrades" in [11](11-ha-mode.md).
+  (`table(s) lauretta_audit_log missing`, or `lauretta_audit_sessions` on a node that
+  already had the first). See "Upgrades" in [11](11-ha-mode.md).
 
 The table is created right after `superset db upgrade`, so the admin user and the
 `superset init` role setup are the first rows. A web or worker that starts without the
@@ -100,6 +104,32 @@ table exits with an error rather than running unaudited.
 The table is not part of Superset's Alembic migrations, for the same reason as the HA
 session table: a fork migration would conflict on every upstream upgrade
 ([08](08-upgrading-upstream.md)).
+
+## Idle timeouts
+
+Users are logged out after 30 minutes without a request (`PERMANENT_SESSION_LIFETIME`,
+[03](03-configuration.md)). Nobody performs that logout, so the audit trail keeps track
+of it itself:
+
+- A browser login adds a row to `lauretta_audit_sessions`. Requests keep its
+  `last_seen` current to within `LAURETTA_AUDIT_TOUCH_SECONDS` (default 60). That's
+  one small write per active user per minute.
+- Each worker sweeps the table every `LAURETTA_AUDIT_SWEEP_SECONDS` (default 60),
+  during an ordinary request. A session idle for longer than the lifetime + touch
+  interval + 30 seconds is closed with an `auth.logout`, `details.reason` `idle_timeout`.
+  Its `event_time` is when the session expired (`last_seen` + lifetime), so it is
+  accurate to within the touch interval. The row's `id` follows the order the sweep
+  found it in, so sort by `event_time`, not `id`, for a timeline.
+- A sweep only runs while somebody uses Superset. A timeout during a quiet night is
+  recorded with the first request in the morning, still with the right `event_time`.
+  To record it sooner, run `python -m lauretta_audit sweep-sessions` from cron.
+- Several workers and HA nodes sweep the same table. Each session is closed by
+  exactly one of them.
+- The two settings can be overridden in the Superset config (e.g.
+  `superset_config_docker.py`). There is no reason to change them in production.
+
+`lauretta_audit_sessions` is working state, not audit trail: it is updated in place
+and has no triggers. The audit record is the `auth.logout` row.
 
 ## Tamper protection
 
@@ -164,21 +194,20 @@ docker compose -f <compose-file> exec -e LAURETTA_AUDIT_OLD_KEYS='<old key>' \
 
 ## Known gaps
 
-- **Idle timeouts are not logoffs.** A session that expires after 30 minutes of
-  inactivity has no logout row. The user's last recorded activity marks the end. A JWT
-  API login has no logout either: the token simply expires.
-- **Writes outside the application** are not seen: SQL run directly against the metadata
-  database, or a data source written by other tools. Use the database's own auditing
-  (e.g. `pgaudit`) for that.
-- **Bulk ORM statements** (`query(...).delete()` / `.update()`, for example
-  `superset factory-reset`, off by default behind a feature flag) bypass the per-row
-  hooks and are not itemised. The UI and REST API change rows one by one and are covered.
-- **Side effects written with raw SQL by Superset itself** are covered by their cause,
-  not one by one. Deleting a dataset also removes its `datasource access` permission
-  from every role, and its columns and metrics. The dataset deletion is recorded, with
-  its values, but those follow-on rows are not.
-- **`data.sql_dml` has no client address.** SQL Lab runs the statement on a worker
-  thread. The user, time, database and SQL are recorded; `request` names the SQL Lab
-  query.
+- **JWT API logins have no logout.** A token cannot be ended, it expires. The login
+  row records when (`access_token_expires`, and `refresh_token_expires` when a refresh
+  token was issued).
+- **Writes outside the application** are not seen: SQL run directly against the
+  metadata database, or a data source written by other tools. That needs the
+  database's own auditing (e.g. `pgaudit` on the metadata server), which is outside
+  this repository.
+- **Other raw-SQL side effects in Superset** are covered by the change that caused
+  them, not one by one. Renaming a dataset or database also renames its permission,
+  and roles keep holding it under the new name. The rename itself is recorded.
+  (Permission *removals* are recorded per role, see the table above.)
+- **`data.sql_dml` for an async SQL Lab query** (run by a Celery worker) has no client
+  address, only the user, time, database and SQL. Synchronous queries, the only kind
+  on Lauretta connections (`allow_run_async` off), record the client that submitted
+  them.
 - **Before the first `create-table`** (first install, during `superset db upgrade`)
   events go to stdout only.
