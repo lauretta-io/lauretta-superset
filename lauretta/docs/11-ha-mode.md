@@ -118,6 +118,57 @@ from outside.
 prints `"writable":true` and the same `server` on every node; log in on one node, then
 open the same URL on another with the same cookie (or through DNS): still logged in.
 
+## Under raib-ha (the two-node RAIB cluster)
+
+When this stack runs under raib-ha (`retail_ai_backend`, `ha/`), raib-ha does Setup steps 3, 6
+and 7 itself. **Install it only by raib-ha's `ha/PRODUCTION_GUIDE.md` (§3.3, §5.9, §6)**; this
+section only says what it takes from this repo.
+
+- **Nobody runs compose by hand.** Pacemaker starts and stops the stack on each node through the
+  systemd unit `raib-ha-superset-ha`, as compose project `raib-ha-superset-ha`, with
+  `SUPERSET_RESTART=no` and `SUPERSET_PULL_POLICY=never`. raib-ha writes the compose variables and
+  the container env file (from `/etc/raib-ha/superset/superset.env`); `docker/.env-ha.local` is
+  not used. The one-shot init runs only through raib-ha's `provision.sh`, which also writes a
+  temporary `config.json` for the dashboard import. Never `up`, `run` or `down` this compose file
+  on a raib-ha node.
+- **This checkout, as it is** (raib-ha D46, 2026-11-10). The nodes run `/home/lauretta/lauretta-superset`
+  directly (`LAURETTA_SUPERSET_DIR`; no export, no commit pin). Keep it on this branch, at the
+  same commit on both nodes. raib-ha mounts `lauretta/` read-only. A change to
+  `docker-compose-ha.yml`, `docker/` or `lauretta/branding` goes live on a Superset restart, one
+  node at a time (raib-ha guide §8.21). New dashboard zips need raib-ha's provision re-run.
+  Changes under `superset/` or `superset-frontend/` are inside the image: rebuild and retag it.
+- **Images: reuse the secure-mode build, never rebuild on site.** HA mode adds no image code
+  (only files under `docker/`, which are mounted), so the image `docker-compose-secure.yml`
+  builds is the right one, if it is recent enough. Check it holds the 6.1 fork:
+  ```bash
+  docker run --rm --network none --entrypoint python lauretta-superset-secure:latest -c \
+    'import importlib.metadata as m; print(m.version("apache-superset"), m.version("flask-session"))'
+  # 6.1.0 0.8.0
+  ```
+  An image built before the 6.1 rebase (2026-09-21) does not do. The build sets no revision
+  label, so this check is the only proof. raib-ha uses fixed local names, so retag, then copy the
+  same images to the other node with `docker save` / `docker load`:
+
+  | Image | raib-ha name |
+  |---|---|
+  | `lauretta-superset-secure:latest` | `SUPERSET_IMAGE`, e.g. `raib-ha/superset:6.1.0-secure` (a local tag, not `latest`; its layers digest goes to `SUPERSET_IMAGE_DIGEST`) |
+  | `redis:7` | `raib-ha/redis:7` (fixed name) |
+  | `nginx:1.27-alpine` | `raib-ha/nginx:1.27-alpine` (fixed name) |
+
+  `docker tag <image> <raib-ha name>`. Secure mode puts nginx **on the host**, not in a
+  container, so a secure-mode server usually has no `nginx:1.27-alpine` image: it must be
+  carried in as a saved image.
+- **Floor maps: no UI uploads** (nginx answers 403, see below). New floor maps go into
+  `lauretta/images/` on this branch. When moving an existing deployment, copy its uploaded maps
+  (`lauretta/images/customs/`, runtime state, git-ignored) into `lauretta/images/customs/` of
+  this checkout on **both** nodes, readable by uid 1000 (`superset`); otherwise the migrated
+  Floor Map charts lose their images. raib-ha mounts `lauretta/` read-only, so deleting a
+  Floor Map chart or changing its image leaves the old `customs/` file in place (remove it by hand
+  on both nodes if needed).
+- **Moving from secure mode on the same host:** keep the old `SUPERSET_SECRET_KEY` (it decrypts
+  the stored connection passwords), stop the secure stack and its host nginx site before raib-ha
+  starts this stack (both want the HTTPS port), and move the metadata as raib-ha's guide §6 says.
+
 ## Upgrades
 
 Stop the web on **every** node, run the one-shot init once, then start them all.

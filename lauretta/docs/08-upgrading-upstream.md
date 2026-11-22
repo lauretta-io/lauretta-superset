@@ -151,6 +151,25 @@ local work.
 
 ## The metadata database is a separate migration
 
+The fork deliberately diverges from upstream in all five Compose db blocks:
+`docker-compose.yml`, `docker-compose-non-dev.yml`, `docker-compose-image-tag.yml`,
+`docker-compose-secure.yml` and `docker-compose-light.yml`. Keep the
+`${POSTGRES_IMAGE:-postgres:18}` image switch, `user: "70:70"`,
+`PGDATA=/var/lib/postgresql/18/data` and the volume target `/var/lib/postgresql`.
+Keep the `db-perms` service (`db-perms-light` in light) and the db dependency that
+waits for it to complete successfully.
+Keep the `db-init` service (`db-init-light` in light) and the dependency that makes
+Superset initialization wait for its successful completion. Do not restore
+upstream's `initdb.d` mount; DHI does not run it. The CI workflow service images
+also diverge: this fork uses `postgres:18-alpine`.
+
+On the next sync, resolve conflicts by applying upstream's unrelated changes
+around these settings, rather than taking either db block wholesale. Retain the
+fork's db-init wiring and CI major version, and check any new upstream db
+initialization against `docker/db-init.sh`. A later Postgres major bump needs a
+separate review of the pinned data path and upgrade procedure. See "Choosing the
+Postgres image" in [07](07-operations.md) before changing the user or mount path.
+
 Two independent things can change in one upstream release, and they want doing in
 order, not together:
 
