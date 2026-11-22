@@ -225,6 +225,10 @@ _PENDING = "lauretta_audit_pending"
 # on the connection drops them: a line may then be missing, but never printed for a
 # change that did not commit.
 _DEFERRED = "lauretta_audit_deferred"
+# Connection.info key: [(savepoint names, [records])] queued in this transaction. A
+# savepoint rolled back on the connection (also one the session did not open) empties
+# the record lists it covered, which are the same lists the session will print.
+_OPEN = "lauretta_audit_open"
 
 
 # ---------------------------------------------------------------------------
@@ -299,6 +303,11 @@ def _listen() -> None:
     event.listen(Session, "after_commit", _after_commit)
     event.listen(Session, "after_soft_rollback", _after_soft_rollback)
     event.listen(Session, "after_transaction_end", _after_transaction_end)
+    # Imported here, not on the first flush: its import registers Session listeners,
+    # which must not happen while SQLAlchemy iterates them.
+    import sqlalchemy_utils  # noqa: F401
+
+    event.listen(sa.engine.Engine, "commit", _on_connection_end)
     event.listen(sa.engine.Engine, "rollback", _on_connection_rollback)
     event.listen(sa.engine.Engine, "rollback_savepoint", _on_savepoint_rollback)
     event.listen(sa.pool.Pool, "checkin", _on_checkin)
@@ -776,6 +785,8 @@ def _column_changes(obj: Any, op: str, table: str) -> dict[str, Any]:
             new = hist.added[0] if hist.added else None
             if old == new or (not hist.deleted and new is None):
                 continue
+            if _plain(old) == _plain(new):  # e.g. the same UUID as object and as text
+                continue
             changes[name] = {
                 "old": _value(name, column, old),
                 "new": _value(name, column, new),
@@ -1062,6 +1073,18 @@ def _after_flush(session: Session, _flush_context: Any) -> None:
         session.info.setdefault(_PENDING, []).append(
             (session.get_nested_transaction(), records)
         )
+        conn.info.setdefault(_OPEN, []).append((_savepoints(conn), records))
+
+
+def _savepoints(conn: Connection) -> frozenset[str]:
+    """Names of the connection savepoints open now (innermost first, then outwards)."""
+    names = set()
+    nested = conn.get_nested_transaction()
+    while nested is not None:
+        names.add(getattr(nested, "_savepoint", None))
+        nested = getattr(nested, "_previous_nested", None)
+    names.discard(None)
+    return frozenset(names)
 
 
 def _after_commit(session: Session) -> None:
@@ -1113,28 +1136,47 @@ def _after_transaction_end(session: Session, transaction: SessionTransaction) ->
         session.info.pop(_PENDING, None)
 
 
-def _drop_deferred(conn: Connection) -> None:
+def _conn_info(conn: Connection) -> Optional[dict[str, Any]]:
     # Connection.info on an invalidated connection would try to reconnect.
     if conn.closed or conn.invalidated:
-        return
+        return None
     try:
-        conn.info.pop(_DEFERRED, None)
-    except Exception:  # noqa: BLE001 -- cleanup must never break a rollback
-        logger.debug("audit: could not clear deferred records", exc_info=True)
+        return conn.info
+    except Exception:  # noqa: BLE001 -- cleanup must never break a commit or rollback
+        logger.debug("audit: connection info unavailable", exc_info=True)
+        return None
+
+
+def _on_connection_end(conn: Connection) -> None:
+    if (info := _conn_info(conn)) is not None:
+        info.pop(_OPEN, None)
 
 
 def _on_connection_rollback(conn: Connection) -> None:
-    _drop_deferred(conn)
+    if (info := _conn_info(conn)) is not None:
+        info.pop(_OPEN, None)
+        info.pop(_DEFERRED, None)
 
 
-def _on_savepoint_rollback(conn: Connection, _name: str, _context: Any) -> None:
-    _drop_deferred(conn)
+def _on_savepoint_rollback(conn: Connection, name: str, _context: Any) -> None:
+    if (info := _conn_info(conn)) is None:
+        return
+    info.pop(_DEFERRED, None)
+    kept = []
+    for names, records in info.get(_OPEN) or []:
+        if name in names:
+            records.clear()  # the session's pending entry holds this same list
+        else:
+            kept.append((names, records))
+    info[_OPEN] = kept
 
 
 def _on_checkin(_dbapi_conn: Any, record: Any) -> None:
     # Joined-session rows the owner never flushed again: their commit is not observed,
     # so they get no stdout line (the rows themselves are in the table if committed).
     info = getattr(record, "info", None)
+    if info is not None:
+        info.pop(_OPEN, None)
     if info is not None and (lost := info.pop(_DEFERRED, None)):
         _warn_unprinted([r for _, records in lost for r in records])
 

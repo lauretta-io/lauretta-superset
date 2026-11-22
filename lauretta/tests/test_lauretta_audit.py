@@ -157,6 +157,38 @@ class AuditTransactionTest(unittest.TestCase):
         self.assertEqual(self.names(), ["a"])
         self.assertEqual(self.printed(), ["a"])
 
+    def test_connection_savepoint_in_owning_session(self) -> None:
+        # Codex finding: a savepoint opened on the connection, not the session.
+        with Session(self.engine) as s:
+            s.add(Thing(name="kept"))
+            s.flush()
+            sp = s.connection().begin_nested()
+            s.add(Thing(name="never committed"))
+            s.flush()
+            sp.rollback()
+            s.commit()
+        self.assertEqual(self.names(), ["kept"])
+        self.assertEqual(self.printed(), ["kept"])
+
+    def test_released_inner_savepoint_then_outer_rolled_back(self) -> None:
+        with Session(self.engine) as s:
+            outer = s.connection().begin_nested()
+            inner = s.begin_nested()
+            s.add(Thing(name="inner"))
+            s.flush()
+            inner.commit()
+            outer.rollback()
+            s.add(Thing(name="after"))
+            s.commit()
+        self.assertEqual(self.names(), ["after"])
+        self.assertEqual(self.printed(), ["after"])
+
+    def test_same_uuid_as_object_and_text_is_no_change(self) -> None:
+        import uuid
+
+        u = uuid.uuid4()
+        self.assertEqual(la._plain(u), la._plain(str(u)))
+
     def test_failed_flush_in_savepoint_keeps_earlier_records(self) -> None:
         # Codex finding: the flush's own sub-transaction rollback dropped them all.
         with Session(self.engine) as s:
