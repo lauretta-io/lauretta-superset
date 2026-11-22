@@ -769,6 +769,14 @@ def _cut_long(value: Any) -> Any:
     return f"{value[:MAX_VALUE_CHARS]}... [cut: {len(value)} chars, sha256:{digest}]"
 
 
+def _unchanged(old: Any, new: Any) -> bool:
+    if old == new:
+        return True
+    # The same UUID as an object and as text (seen from provision on the lab).
+    uuids = isinstance(old, uuid.UUID) or isinstance(new, uuid.UUID)
+    return uuids and str(old) == str(new)
+
+
 def _column_changes(obj: Any, op: str, table: str) -> dict[str, Any]:
     insp = sa_inspect(obj)
     skip = NOISE_COLUMNS | (USER_NOISE_COLUMNS if table == "ab_user" else frozenset())
@@ -784,9 +792,7 @@ def _column_changes(obj: Any, op: str, table: str) -> dict[str, Any]:
                 continue
             old = hist.deleted[0] if hist.deleted else None
             new = hist.added[0] if hist.added else None
-            if old == new or (not hist.deleted and new is None):
-                continue
-            if _plain(old) == _plain(new):  # e.g. the same UUID as object and as text
+            if _unchanged(old, new) or (not hist.deleted and new is None):
                 continue
             changes[name] = {
                 "old": _value(name, column, old),
@@ -1149,8 +1155,36 @@ def _conn_info(conn: Connection) -> Optional[dict[str, Any]]:
 
 
 def _on_connection_end(conn: Connection) -> None:
-    if (info := _conn_info(conn)) is not None:
-        info.pop(_OPEN, None)
+    """Fired just before the DBAPI commit. A transaction the server has already aborted
+    (an error was caught and the work went on) "commits" as a rollback without an
+    exception on PostgreSQL: empty its record lists so nothing is printed."""
+    if (info := _conn_info(conn)) is None:
+        return
+    queued = info.pop(_OPEN, None) or []
+    if queued and _commit_is_rollback(conn):
+        lost = [r for _, records in queued for r in records]
+        for _, records in queued:
+            records.clear()
+        if lost:
+            logger.warning(
+                "audit: commit of an aborted transaction: %d event(s) not printed, "
+                "their rows were rolled back",
+                len(lost),
+            )
+
+
+def _commit_is_rollback(conn: Connection) -> bool:
+    try:
+        fairy = conn.connection
+        dbapi = getattr(fairy, "dbapi_connection", None) or fairy.connection
+    except Exception:  # noqa: BLE001
+        return False
+    # psycopg2: libpq PQTRANS_INERROR (3) = the transaction is aborted.
+    status = getattr(getattr(dbapi, "info", None), "transaction_status", None)
+    if isinstance(status, int):
+        return status == 3
+    # sqlite3: no transaction left to commit (it was rolled back under us).
+    return getattr(dbapi, "in_transaction", None) is False
 
 
 def _on_connection_rollback(conn: Connection) -> None:

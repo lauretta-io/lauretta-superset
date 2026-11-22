@@ -11,6 +11,8 @@ No Superset app or database server: SQLite with the ORM, run inside the Superset
   docker run --rm --network none -v "$PWD":/src:ro -w /src \
     -e PYTHONPATH=/src/docker/pythonpath_dev --entrypoint python \
     <superset image> -m unittest discover -s lauretta/tests -v
+
+PostgreSQL-only cases run when AUDIT_TEST_PG_URL is set (see PostgresTest).
 """
 
 from __future__ import annotations
@@ -183,11 +185,25 @@ class AuditTransactionTest(unittest.TestCase):
         self.assertEqual(self.names(), ["after"])
         self.assertEqual(self.printed(), ["after"])
 
+    def test_commit_of_server_aborted_transaction_prints_nothing(self) -> None:
+        # Codex finding: an error the code caught aborted the transaction on the server;
+        # the later commit is a rollback without an exception.
+        with Session(self.engine) as s:
+            s.add(Thing(id=1, name="lost"))
+            s.flush()
+            with self.assertRaises(IntegrityError):
+                s.execute(sa.text("INSERT OR ROLLBACK INTO things (id, name) VALUES (1, 'dup')"))
+            s.commit()
+        self.assertEqual((self.names(), self.rows(), self.printed()), ([], [], []))
+
     def test_same_uuid_as_object_and_text_is_no_change(self) -> None:
         import uuid
 
         u = uuid.uuid4()
-        self.assertEqual(la._plain(u), la._plain(str(u)))
+        self.assertTrue(la._unchanged(u, str(u)))
+        self.assertTrue(la._unchanged(str(u), u))
+        self.assertFalse(la._unchanged({"x": 1}, '{"x": 1}'))  # Codex: a real change
+        self.assertFalse(la._unchanged(u, str(uuid.uuid4())))
 
     def test_failed_flush_in_savepoint_keeps_earlier_records(self) -> None:
         # Codex finding: the flush's own sub-transaction rollback dropped them all.
@@ -333,6 +349,63 @@ class AuditTransactionTest(unittest.TestCase):
             with self.assertRaisesRegex(sa.exc.IntegrityError, "append-only"):
                 with self.engine.begin() as conn:
                     conn.exec_driver_sql(sql)
+
+
+@unittest.skipUnless(os.environ.get("AUDIT_TEST_PG_URL"), "set AUDIT_TEST_PG_URL")
+class PostgresTest(unittest.TestCase):
+    """The PostgreSQL-only cases, against a throwaway server, e.g.
+    docker network create t; docker run -d --rm --name t-pg --network t \
+      -e POSTGRES_PASSWORD=t pgvector/pgvector:pg18
+    then the command above plus --network t
+      -e AUDIT_TEST_PG_URL=postgresql+psycopg2://postgres:t@t-pg/postgres"""
+
+    def setUp(self) -> None:
+        self.engine = sa.create_engine(os.environ["AUDIT_TEST_PG_URL"])
+        with self.engine.begin() as conn:
+            conn.exec_driver_sql(f"DROP TABLE IF EXISTS {la.TABLE_NAME}, things, notes")
+        Base.metadata.create_all(self.engine)
+        la.audit_table.create(self.engine)
+        with self.engine.begin() as conn:
+            la._pg_triggers(conn)
+        patcher = mock.patch.object(la, "_is_metadata", return_value=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.addCleanup(self.engine.dispose)
+        LINES.lines.clear()
+
+    def count(self, table: str) -> int:
+        with self.engine.connect() as conn:
+            return conn.exec_driver_sql(f"SELECT count(*) FROM {table}").scalar()
+
+    def test_commit_prints(self) -> None:
+        with Session(self.engine) as s:
+            s.add(Thing(name="a"))
+            s.commit()
+        self.assertEqual([l["target_name"] for l in LINES.lines], ["a"])
+        self.assertEqual(self.count(la.TABLE_NAME), 1)
+
+    def test_commit_of_aborted_transaction_prints_nothing(self) -> None:
+        # PostgreSQL answers COMMIT in an aborted transaction with ROLLBACK, no error.
+        with Session(self.engine) as s:
+            s.add(Thing(name="lost"))
+            s.flush()
+            with self.assertRaises(sa.exc.DBAPIError):
+                s.execute(sa.text("SELECT 1/0"))
+            s.commit()
+        self.assertEqual((self.count("things"), self.count(la.TABLE_NAME)), (0, 0))
+        self.assertEqual(LINES.lines, [])
+
+    def test_append_only(self) -> None:
+        with Session(self.engine) as s:
+            s.add(Thing(name="a"))
+            s.commit()
+        for sql in ("UPDATE", "DELETE FROM", "TRUNCATE"):
+            stmt = {"UPDATE": f"UPDATE {la.TABLE_NAME} SET outcome='x'",
+                    "DELETE FROM": f"DELETE FROM {la.TABLE_NAME}",
+                    "TRUNCATE": f"TRUNCATE {la.TABLE_NAME}"}[sql]
+            with self.assertRaisesRegex(sa.exc.DBAPIError, "append-only"):
+                with self.engine.begin() as conn:
+                    conn.exec_driver_sql(stmt)
 
 
 class PoolReuseTest(unittest.TestCase):
