@@ -1181,10 +1181,10 @@ def _commit_is_rollback(conn: Connection) -> bool:
         return False
     # psycopg2: libpq PQTRANS_INERROR (3) = the transaction is aborted.
     status = getattr(getattr(dbapi, "info", None), "transaction_status", None)
-    if isinstance(status, int):
-        return status == 3
-    # sqlite3: no transaction left to commit (it was rolled back under us).
-    return getattr(dbapi, "in_transaction", None) is False
+    # Other drivers: no reliable signal (sqlite3's in_transaction is also False after
+    # an outermost savepoint already committed), so assume the commit is real. Every
+    # Lauretta mode keeps its metadata in PostgreSQL.
+    return isinstance(status, int) and status == 3
 
 
 def _on_connection_rollback(conn: Connection) -> None:

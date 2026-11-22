@@ -185,16 +185,14 @@ class AuditTransactionTest(unittest.TestCase):
         self.assertEqual(self.names(), ["after"])
         self.assertEqual(self.printed(), ["after"])
 
-    def test_commit_of_server_aborted_transaction_prints_nothing(self) -> None:
-        # Codex finding: an error the code caught aborted the transaction on the server;
-        # the later commit is a rollback without an exception.
+    def test_outermost_savepoint_release_still_prints(self) -> None:
+        # Codex r5: a check on sqlite3's in_transaction dropped these lines.
         with Session(self.engine) as s:
-            s.add(Thing(id=1, name="lost"))
-            s.flush()
-            with self.assertRaises(IntegrityError):
-                s.execute(sa.text("INSERT OR ROLLBACK INTO things (id, name) VALUES (1, 'dup')"))
+            with s.begin_nested():
+                s.add(Thing(name="sp"))
             s.commit()
-        self.assertEqual((self.names(), self.rows(), self.printed()), ([], [], []))
+        self.assertEqual(self.names(), ["sp"])
+        self.assertEqual(self.printed(), ["sp"])
 
     def test_same_uuid_as_object_and_text_is_no_change(self) -> None:
         import uuid
