@@ -88,6 +88,10 @@ TRIGGER_FUNCTION = "lauretta_audit_log_append_only"
 # commands they run before `create-table` must not fail on the missing table.
 INIT_ENV = "LAURETTA_AUDIT_INIT"
 KEY_ENV = "LAURETTA_AUDIT_HMAC_KEY"
+# The `node` column. In a container the hostname is the container id, which changes on
+# every recreate and does not tell HA nodes apart; HA mode sets DATABASE_APPLICATION_NAME
+# per node (raib-ha: superset-ha-<node>), so that comes next.
+NODE_ENVS = ("LAURETTA_AUDIT_NODE", "DATABASE_APPLICATION_NAME")
 # `verify` only: comma-separated earlier LAURETTA_AUDIT_HMAC_KEY / SUPERSET_SECRET_KEY.
 OLD_KEYS_ENV = "LAURETTA_AUDIT_OLD_KEYS"
 
@@ -193,13 +197,20 @@ audit_table = sa.Table(
 )
 
 
+def _node_name() -> str:
+    for name in NODE_ENVS:
+        if value := os.environ.get(name, "").strip():
+            return value
+    return socket.gethostname()
+
+
 @dataclass
 class _State:
     initialised: bool = False
     db_enabled: bool = False
     key: bytes = b""
     key_id: str = ""
-    node: str = field(default_factory=socket.gethostname)
+    node: str = field(default_factory=_node_name)
 
 
 _state = _State()
@@ -988,11 +999,14 @@ def _after_soft_rollback(session: Session, previous: SessionTransaction) -> None
 # Verification
 # ---------------------------------------------------------------------------
 def verify(old_secrets: Optional[list[str]] = None) -> int:
-    """Recompute every row's HMAC. Returns the number of rows that do not match.
+    """Recompute every row's HMAC. Returns the number of rows that cannot be verified:
+    a mismatch, or a key_id none of the known keys has.
 
     Rows are checked against the current key, the key derived from the current
     SECRET_KEY, and each of `old_secrets` (previous LAURETTA_AUDIT_HMAC_KEY or
     SUPERSET_SECRET_KEY values), so rows written before a key rotation still verify.
+    An unknown key_id counts as a failure: key_id is just a column, and whoever can edit
+    a row can also set it to a value no key matches.
     """
     from flask import current_app
 
@@ -1030,6 +1044,12 @@ def verify(old_secrets: Optional[list[str]] = None) -> int:
     print(f"audit verify: {ok} ok, {bad} TAMPERED, {unknown} signed with another key")
     if first_bad:
         print(f"audit verify: first tampered ids: {first_bad}")
+    if unknown:
+        print(
+            f"audit verify: FAILED: {unknown} rows name a key that is not known here; "
+            f"pass earlier keys in {OLD_KEYS_ENV} (another node's or a rotated key), "
+            "or treat those rows as altered"
+        )
     if missing:
         # A rolled-back change also leaves a gap: its audit row was rolled back with
         # it. Compare these ranges with the stdout/SIEM copy, which never has them.
@@ -1037,7 +1057,7 @@ def verify(old_secrets: Optional[list[str]] = None) -> int:
             f"audit verify: {missing} ids absent (rolled back or deleted), "
             f"first ranges: {gaps}"
         )
-    return bad
+    return bad + unknown
 
 
 def _main(argv: list[str]) -> int:

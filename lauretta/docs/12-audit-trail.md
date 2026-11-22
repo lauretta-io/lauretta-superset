@@ -30,7 +30,7 @@ Each row has:
 | `target_type`, `target_id`, `target_name` | What it was done to: table, primary key and a readable name |
 | `details` | JSON. For creates and deletes, the row's values. For updates, `{"field": {"old": …, "new": …}}`. For role changes, the roles or permissions involved |
 | `ip_address`, `user_agent`, `request` | Client address (behind the reverse proxy this is the real client, via `ENABLE_PROXY_FIX`), browser, and `METHOD /path` |
-| `node` | Container hostname, which tells the HA nodes apart |
+| `node` | Which server wrote it: `LAURETTA_AUDIT_NODE` if set, else `DATABASE_APPLICATION_NAME` (HA mode; raib-ha sets `superset-ha-<node>`), else the container hostname (a container id, which changes on every recreate) |
 | `key_id`, `row_hmac` | Tamper evidence, see below |
 
 **Never stored:** password hashes, database passwords (the password in `sqlalchemy_uri`
@@ -87,8 +87,9 @@ running it again changes nothing:
 
 - modes 1–3: `docker/docker-init.sh` (the `superset-init` service, on every start);
 - HA: `docker/docker-init-ha.sh` (the one-shot init). **Existing HA deployments must
-  run the one-shot init once after upgrading to this version**, or the web refuses to
-  start (`table(s) lauretta_audit_log missing`).
+  run the one-shot init once when upgrading to this version**, with the web stopped on
+  every node *before* the new code reaches any node, or the web refuses to start
+  (`table(s) lauretta_audit_log missing`). See "Upgrades" in [11](11-ha-mode.md).
 
 The table is created right after `superset db upgrade`, so the admin user and the
 `superset init` role setup are the first rows. A web or worker that starts without the
@@ -116,7 +117,9 @@ session table: a fork migration would conflict on every upstream upgrade
   # audit verify: 2 ids absent (rolled back or deleted), first ranges: ['901-902']
   ```
 
-  It exits 1 if any row fails. A changed row fails its HMAC. A deleted row leaves a
+  It exits 1 if any row fails: a changed row, or a row whose `key_id` matches none of
+  the keys it knows (pass earlier keys as shown under "Key rotation"; an unknown key is
+  also what an edited `key_id` looks like). A changed row fails its HMAC. A deleted row leaves a
   gap in `id`. So does a change that was rolled back, so a gap on its own proves
   nothing. Look the missing ids up in the shipped stdout copy: if an id is there, it
   was committed and later deleted.

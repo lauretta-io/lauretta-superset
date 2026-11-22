@@ -174,6 +174,15 @@ section only says what it takes from this repo.
 Stop the web on **every** node, run the one-shot init once, then start them all.
 Never run two Superset versions against one metadata database.
 
+Stop the web **before** the new commit reaches any node. `docker/` is mounted live and
+gunicorn loads the app in each worker (no `--preload`), so a worker that restarts
+(timeout, `WORKER_MAX_REQUESTS`) runs the new code at once. Example: the first version
+with the audit trail ([12](12-audit-trail.md)) refuses to boot a worker while
+`lauretta_audit_log` is missing, so pulling it under a running web takes that node down
+at its next worker restart. Order: stop every web, update the checkout on every node, run
+the one-shot init on one, start every web. Under raib-ha this is the guide's §5.9
+"Provision re-run", with the update done inside the hold.
+
 ## Floor-map uploads (disabled)
 
 The upload endpoint writes into `lauretta/images/` **on the node that served the
