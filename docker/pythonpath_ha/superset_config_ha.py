@@ -136,6 +136,15 @@ FEATURE_FLAGS = {
 }
 
 # ---------------------------------------------------------------------------
+# No CSV / Excel / Columnar uploads to databases
+# ---------------------------------------------------------------------------
+# The upload API checks every file against this list, so an empty one rejects all of
+# them, whatever a database's "Allow file uploads" setting or a role's can_upload says.
+# The frontend also hides the upload menu items when the list is empty.
+# Floor-map images are separate (ALLOWED_FLOOR_IMAGE_EXTENSIONS, blocked in nginx).
+ALLOWED_EXTENSIONS: set[str] = set()
+
+# ---------------------------------------------------------------------------
 # Internal write probe for readiness
 # ---------------------------------------------------------------------------
 BLUEPRINTS = [*getattr(_shared, "BLUEPRINTS", []), lauretta_ha.write_probe]
