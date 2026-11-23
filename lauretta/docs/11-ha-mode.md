@@ -186,6 +186,13 @@ metadata database (replicated with everything else) with a local copy per node. 
 volume adds a single point of failure; a sync job between nodes leaves a window in which
 a chart save on one node cannot find a file uploaded on the other.
 
+## Data file uploads (disabled)
+
+HA mode sets `ALLOWED_EXTENSIONS` to an empty set. The upload menu items are hidden for
+every user, and the upload API rejects every CSV, Excel and Columnar file ("File extension
+is not allowed."), regardless of a database's "Allow file uploads to database" setting or a
+role's `can_upload`.
+
 ## Known limits
 
 - **Session writes.** Secure mode's rolling timeout (`SESSION_REFRESH_EACH_REQUEST`)
