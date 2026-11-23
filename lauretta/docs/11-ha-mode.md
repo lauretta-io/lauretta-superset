@@ -210,6 +210,20 @@ message). The web login (`/login/`) is rate limited in nginx; the API login woul
 Superset's app-wide limit, and nothing in HA mode uses it: the browser uses the form and
 embedding is off. The rest of `/api/v1/security/` (e.g. `csrf_token`) is unchanged.
 
+## Imports (disabled)
+
+nginx answers every Superset import with 403 (JSON message): `POST
+/api/v1/<dashboard|chart|dataset|database|saved_query|theme|assets>/import/`. Each takes
+a ZIP upload, and HA mode has no upload function. Exports stay available. The Import
+buttons in the UI remain visible but fail. Lauretta dashboards are installed on the server
+by the one-shot init (`superset import-dashboards`, not through nginx). A one-off import
+is done the same way on one node, with the ZIP under `lauretta/` (mounted at
+`/app/lauretta`); the audit trail records it with actor `system`:
+
+```bash
+docker exec <superset container> superset import-dashboards -p /app/lauretta/dashboards/<file>.zip -u admin
+```
+
 ## Known limits
 
 - **Session writes.** Secure mode's rolling timeout (`SESSION_REFRESH_EACH_REQUEST`)
