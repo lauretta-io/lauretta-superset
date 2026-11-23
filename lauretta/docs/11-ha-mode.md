@@ -203,6 +203,13 @@ every user, and the upload API rejects every CSV, Excel and Columnar file ("File
 is not allowed."), regardless of a database's "Allow file uploads to database" setting or a
 role's `can_upload`.
 
+## JWT API login (disabled)
+
+nginx answers `POST /api/v1/security/login` and `/api/v1/security/refresh` with 403 (JSON
+message). The web login (`/login/`) is rate limited in nginx; the API login would only get
+Superset's app-wide limit, and nothing in HA mode uses it: the browser uses the form and
+embedding is off. The rest of `/api/v1/security/` (e.g. `csrf_token`) is unchanged.
+
 ## Known limits
 
 - **Session writes.** Secure mode's rolling timeout (`SESSION_REFRESH_EACH_REQUEST`)
