@@ -59,6 +59,9 @@ docker compose -f <compose-file> run --rm --no-deps superset \
 docker compose -f <compose-file> up -d
 ```
 
+Audit rows signed before the rotation stay verifiable when the old key is passed to
+`python -m lauretta_audit verify`; see "Key rotation" in [12](12-audit-trail.md).
+
 The same commands recover a stack already restarted onto the new key, where init dies
 with `ValueError: Invalid decryption key`. The app container waits on init and so
 never starts, which is why this is `run --rm --no-deps` rather than `exec`.

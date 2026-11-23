@@ -37,7 +37,13 @@ from flask import abort, send_file, jsonify, request, session
 from flask_caching.backends.filesystemcache import FileSystemCache
 from flask_login import current_user
 
+import lauretta_audit
+
 logger = logging.getLogger()
+
+# Security audit trail (lauretta/docs/12-audit-trail.md): this manager records logins;
+# FLASK_APP_MUTATOR below wires up everything else.
+CUSTOM_SECURITY_MANAGER = lauretta_audit.security_manager_class()
 
 
 def _require_authenticated_user(view):
@@ -383,6 +389,9 @@ def _cleanup_temp_images():
 
 
 def FLASK_APP_MUTATOR(app):
+   # ── Security audit trail: changes, logouts, the table check ──
+   lauretta_audit.init_app(app)
+
    # ── Mark every session permanent so PERMANENT_SESSION_LIFETIME applies ──
    @app.before_request
    def _make_session_permanent():
@@ -594,6 +603,13 @@ def FLASK_APP_MUTATOR(app):
            return abort(400, description="Invalid image path")
 
        image_file.save(save_path)
+       lauretta_audit.record_event(
+           "data",
+           "data.file_upload",
+           target_type="floor_map_image",
+           target_name=file_name,
+           details={"original_name": original_name, "bytes": save_path.stat().st_size},
+       )
 
        return jsonify({
            "file_name": file_name,

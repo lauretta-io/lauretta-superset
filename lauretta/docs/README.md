@@ -49,6 +49,7 @@ See [Choosing the Postgres image](07-operations.md#choosing-the-postgres-image) 
 | [09 Verification and troubleshooting](09-verification-and-troubleshooting.md) | Health checks, scanners, import log messages |
 | [10 Development](10-development.md) | Custom plugins, upstream patches, image tags and builds |
 | [11 HA mode](11-ha-mode.md) | Mode 4: active-active on two or more nodes, `/ready`, running under raib-ha |
+| [12 Security audit trail](12-audit-trail.md) | Logins, account, role and data changes: what is recorded, where, tamper protection |
 
 ## Reading paths
 

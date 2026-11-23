@@ -27,7 +27,8 @@
 # at any time (WORKER_MAX_REQUESTS, timeouts, OOM). Measured: one worker killed during
 # such a window took the whole container down. So this script:
 #   1. waits until a writable metadata database answers (and refuses to go on if the
-#      session table is missing: the one-shot init has not run -- that stays loud);
+#      session or audit table is missing: the one-shot init has not run -- that stays
+#      loud);
 #   2. runs gunicorn (docker-bootstrap.sh app-gunicorn) in its own process group;
 #   3. if gunicorn exits with 3 while no writable database answers, goes back to 1;
 #      any other exit, or 3 with the database up (a real boot failure), is final.
@@ -48,7 +49,7 @@ on_term() {
 trap on_term TERM INT
 
 # Writable-database check: lauretta_ha.wait_for_metadata(). Exit 0 writable (and the
-# session table exists), 1 not writable (--once only), 2 session table missing.
+# session and audit tables exist), 1 not writable (--once only), 2 a table missing.
 WAIT_FOR_DB=(python -c 'import sys, lauretta_ha; sys.exit(lauretta_ha.wait_for_metadata("--once" in sys.argv))')
 
 # run_bg CMD...: run CMD in its own process group, wait for it; sets $rc. The wait is

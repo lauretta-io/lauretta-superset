@@ -23,3 +23,4 @@
 !superset_config_docker_light.py
 !superset_config_local.example
 !lauretta_gunicorn.py
+!lauretta_audit.py

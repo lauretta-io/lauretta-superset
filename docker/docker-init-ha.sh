@@ -25,7 +25,7 @@
 # would race (concurrent CREATEs are not serialised by checkfirst).
 #
 # Steps, all idempotent:
-#   1. superset db upgrade
+#   1. superset db upgrade, then the audit table (lauretta/docs/12-audit-trail.md)
 #   2. admin user (only if it does not exist yet; ADMIN_PASSWORD is required)
 #   3. superset init (roles and permissions)
 #   4. the server-side session table (lauretta_ha.SESSION_TABLE)
@@ -35,6 +35,8 @@ set -euo pipefail
 # lauretta_ha.init_sessions() refuses to start without the session table, which step 4
 # creates only after the CLI commands below have run.
 export SUPERSET_HA_INIT=1
+# Likewise lauretta_audit.init_app() and the audit table, created right after step 1.
+export LAURETTA_AUDIT_INIT=1
 
 step() { printf '######## HA init %s: %s\n' "$1" "$2"; }
 
@@ -43,8 +45,10 @@ if [ -z "${ADMIN_PASSWORD:-}" ] || [ "${ADMIN_PASSWORD}" = "admin" ]; then
     exit 1
 fi
 
-step 1/5 "superset db upgrade"
+step 1/5 "superset db upgrade, audit table"
 superset db upgrade
+# Before the admin user and `superset init`, so both are in the audit trail.
+python -m lauretta_audit create-table
 
 step 2/5 "admin user ${ADMIN_USERNAME:-admin}"
 # create-admin only prints a message and exits 0 when the user exists, so this neither
