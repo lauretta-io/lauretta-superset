@@ -228,7 +228,8 @@ placing it in `lauretta/images/`:
 - `POST /api/v1/lauretta/images/upload` stores the file in `lauretta/images/tmp/`
   under a sanitised, randomised name, and returns
   `/api/v1/lauretta/images/tmp/<file>`. The file's magic bytes must match its
-  extension.
+  extension. Only the session that uploaded it can read it back; after a logout the
+  file is unreadable (except to Admin) until a chart is saved with it.
 - When a Floor Map chart is saved (created or updated) with a `tmp/` image, the file
   moves to `lauretta/images/customs/` and the chart is rewritten to point there.
 - When a chart's image changes, the old `customs/` file is deleted. When a chart is
@@ -243,14 +244,42 @@ them.
 
 | Route | Returns |
 |---|---|
-| `GET /api/v1/lauretta/floors` | `[{name, image}]` for every floor in `config.json`, deduplicated by name |
-| `GET /api/v1/lauretta/images/<ref>` | The image file. `<ref>` is a filename in `lauretta/images/`, or `customs/<file>`, or `tmp/<file>` |
+| `GET /api/v1/lauretta/floors` | `[{name, image}]` for the floors in `config.json` of the properties the caller can read, deduplicated by name |
+| `GET /api/v1/lauretta/images/<ref>` | The image file, if the caller may read it (below). `<ref>` is a filename in `lauretta/images/`, a floor code such as `L1`, `customs/<file>`, or `tmp/<file>` |
 | `POST /api/v1/lauretta/images/upload` | `{file_name, public_url}`; form field `file` |
 
 All three require a logged-in Superset session in every mode and answer
 `401 {"error": "Authentication required"}` otherwise. They are registered directly on
-the Flask app, outside Flask-AppBuilder's permission layer, so any logged-in user can
-call them regardless of role.
+the Flask app, outside Flask-AppBuilder's permission layer, so they check access
+themselves (`docker/pythonpath_dev/lauretta_access.py`), in terms of the caller's
+Superset data access:
+
+- **Property.** Each `dashboards[]` entry in `config.json` is a property. The caller
+  can read it with access to the database the import created for it (Database access,
+  or all-database / all-datasource access), or to any dataset in that database
+  (Dataset, schema or catalog access). The database is found by the UUID the import
+  derives from the entry's `path`, so renaming the database does not change access.
+- **`/floors`** lists only the floors of properties the caller can read.
+- **`/images/<ref>`**, by where the file lives:
+  - a file in `lauretta/images/` that a `config.json` floor names: callers who can
+    read a property naming it. Charts do not grant access to these files, so a chart
+    writer cannot read another property's floor plan by pointing a chart at it.
+  - any other file in `lauretta/images/`, and `customs/<file>`: callers who can access
+    a Floor Map chart whose `floor_image` points at it (owners, and anyone with access
+    to the chart's dataset).
+  - `tmp/<file>`: only the session that uploaded it, until a chart is saved with it.
+
+  A file the caller may not read answers exactly like a missing one: `404`. A floor
+  code (`L1`) resolves to the first matching file the caller may read. Images are
+  served with `Cache-Control: private, no-cache`, so browsers revalidate (cheap, by
+  ETag) and the check runs on every view.
+- **Upload** needs `can_write` on `Chart` and access to at least one dataset (what it
+  takes to build a Floor Map chart); otherwise `403`. Gamma has `can_write` on `Chart`,
+  so a Gamma user with no data access cannot upload, but one with a dataset can.
+
+Admin can read every floor and image and can upload. The user that renders reports
+and thumbnails (`ALERT_REPORTS_EXECUTORS` / `THUMBNAIL_EXECUTORS`) needs access to the
+property too, or floor images are missing from screenshots.
 
 ## Inspecting a dashboard ZIP
 
