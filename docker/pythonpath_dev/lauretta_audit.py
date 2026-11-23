@@ -23,19 +23,24 @@ Every event is written to two places:
   * one JSON line on stdout (logger `lauretta.audit`), for a log shipper / SIEM.
 
 Captured events (see lauretta/docs/12-audit-trail.md for the full list):
-  * auth.login (success and failure, with the reason) and auth.logout: an explicit
-    logout, or an idle timeout found by the session sweep (lauretta_audit_sessions)
+  * auth.login (success and failure, with the reason; method "machine" for the
+    browser session Superset opens as a user for reports, alerts and thumbnails) and
+    auth.logout: an explicit logout, or an idle timeout found by the session sweep
+    (lauretta_audit_sessions)
   * user.create / user.update / user.delete
   * role.assign / role.revoke (user <-> role), role.permission_add / _remove,
     role.create / role.update / role.delete, and the group equivalents
   * data.create / data.update / data.delete for every other ORM-mapped table in the
     metadata database (dashboards, charts, datasets, databases, ...), minus the
     bookkeeping tables in EXCLUDED_TABLES
-  * <category>.bulk_update / .bulk_delete: a statement that changes many rows at once
-    (Query.update/delete, session.execute(update(...)))
+  * <category>.bulk_create / .bulk_update / .bulk_delete: a statement that changes
+    many rows at once (Query.update/delete, session.execute(insert/update/delete))
+  * <category>.create / .update for rows written with Session.bulk_insert_mappings /
+    bulk_update_mappings, which skip the unit of work (dataset columns and metrics)
   * role.permission_remove for permissions Superset deletes with raw SQL when a
     dataset or database is deleted or changed
-  * data.sql_dml: a SQL Lab statement that writes to a data source
+  * data.sql_dml: a SQL Lab statement that writes to a data source, or a Jinja
+    templated one that may (its rendered script is not stored)
   * data.file_upload: a floor-map image upload
 
 Changes made through the ORM are captured in `after_flush` and inserted on the same
@@ -58,6 +63,7 @@ Command line (PYTHONPATH must include this directory, as in every compose mode):
 from __future__ import annotations
 
 import enum
+import functools
 import hashlib
 import hmac
 
@@ -391,6 +397,7 @@ def _listen() -> None:
     event.listen(Session, "after_soft_rollback", _after_soft_rollback)
     event.listen(Session, "after_transaction_end", _after_transaction_end)
     event.listen(Session, "do_orm_execute", _on_orm_execute)
+    _patch_bulk_mappings()
     # Imported here, not on the first flush: its import registers Session listeners,
     # which must not happen while SQLAlchemy iterates them.
     import sqlalchemy_utils  # noqa: F401
@@ -796,15 +803,38 @@ def _start_tracking(user: Any, sid: Optional[str] = None) -> None:
 
 
 def _on_login(sender: Any, user: Any = None, **_: Any) -> None:
-    """flask-login's user_logged_in: a browser login (the JWT API never sends it)."""
+    """flask-login's user_logged_in: a browser login (the JWT API never sends it).
+
+    A login through one of the auth methods above has already been recorded and left
+    its session id in `g`. Without one, login_user() was called directly: for a real
+    user that is Superset's machine auth (superset/utils/machine_auth.py), which opens
+    a browser session as a user to render reports, alerts and thumbnails. It is
+    recorded here, so its later logout (an idle timeout) has a matching login.
+    Embedded and public dashboards log in AnonymousUserMixin, which is skipped.
+    """
     try:
-        if user is None or not _state.tracking:
+        if user is None or not getattr(user, "is_authenticated", False):
             return
         from flask import g
 
-        _start_tracking(user, getattr(g, "lauretta_audit_sid", None))
+        # Popped: the next login_user() in this app context (several report
+        # screenshots in one Celery task) must not reuse it.
+        sid = g.pop("lauretta_audit_sid", None)
+        if sid is None:
+            sid = secrets.token_hex(16)
+            record_event(
+                "auth",
+                "auth.login",
+                target_type="ab_user",
+                target_id=user.id,
+                target_name=user.username,
+                details={"method": "machine", "session": sid},
+                overrides={"actor_id": user.id, "actor_username": user.username},
+            )
+        if _state.tracking:
+            _start_tracking(user, sid)
     except Exception:  # noqa: BLE001 -- tracking must never break a login
-        logger.exception("audit: could not start tracking a session")
+        logger.exception("audit: could not record or track a login")
 
 
 def _touch_session() -> None:
@@ -897,9 +927,15 @@ def sweep_sessions(
         ).fetchall()
         for row in rows:
             ended = _aware(row.last_seen) + lifetime
+            # last_seen too: a request that touched the session since the SELECT
+            # keeps it open.
             claimed = conn.execute(
                 t.update()
-                .where(t.c.sid == row.sid, t.c.ended_at.is_(None))
+                .where(
+                    t.c.sid == row.sid,
+                    t.c.ended_at.is_(None),
+                    t.c.last_seen == row.last_seen,
+                )
                 .values(ended_at=ended, end_reason="idle_timeout")
             ).rowcount
             if claimed != 1:
@@ -1272,24 +1308,48 @@ def _affected(conn: Connection, table: Any, stmt: Any) -> list[Any]:
     return out
 
 
-def _on_orm_execute(state: ORMExecuteState) -> Any:
-    """Session.execute of an UPDATE or DELETE (Query.update/delete included): these
-    skip the unit of work, so after_flush never sees their rows."""
-    if not _state.initialised or not (state.is_update or state.is_delete):
-        return None
-    stmt = state.statement
-    table = getattr(stmt, "table", None)
-    name = getattr(table, "name", None)
-    if not name or name in EXCLUDED_TABLES:
-        return None
-    op = "update" if state.is_update else "delete"
-    values = _bulk_values(stmt) if op == "update" else {}
-    noise = NOISE_COLUMNS | (USER_NOISE_COLUMNS if name == "ab_user" else frozenset())
-    if op == "update" and values and set(values) <= noise:
-        return None  # e.g. FAB's login_count write on a failed login
-    conn = state.session.connection()
-    if not _is_metadata(conn):
-        return None
+def _inserted_rows(stmt: Any, params: Any) -> list[dict[str, Any]]:
+    """The rows of an INSERT statement: .values(...) (one row or a list of rows) or
+    the executemany parameter list. [] when they cannot be read."""
+    multi = getattr(stmt, "_multi_values", None) or ()
+    rows: list[Any] = [row for batch in multi for row in batch]
+    if not rows and getattr(stmt, "_values", None):
+        rows = [stmt._values]  # noqa: SLF001
+    if not rows and params:
+        rows = list(params) if isinstance(params, (list, tuple)) else [params]
+    out = []
+    for row in rows:
+        if not isinstance(row, dict):
+            return []  # positional values: no column names to show
+        values = {}
+        for key, value in row.items():
+            name = str(getattr(key, "key", None) or getattr(key, "name", None) or key)
+            # The table's column, for redaction by type (EncryptedType).
+            column = stmt.table.c.get(name)
+            values[name] = _value(name, column, getattr(value, "value", value))
+        out.append(values)
+    return out
+
+
+def _insert_details(stmt: Any, params: Any) -> dict[str, Any]:
+    """details of a bulk INSERT, before it runs: the rows (up to MAX_BULK_IDS)."""
+    try:
+        rows = _inserted_rows(stmt, params)
+    except Exception:  # noqa: BLE001 -- record the insert even without its rows
+        logger.exception("audit: could not read the rows of a bulk insert")
+        rows = []
+    details: dict[str, Any] = {}
+    if rows:
+        details["values"] = rows[:MAX_BULK_IDS]
+        if len(rows) > MAX_BULK_IDS:
+            details["values_truncated"] = True
+    return details
+
+
+def _filter_details(
+    stmt: Any, conn: Connection, table: Any, op: str, values: dict[str, Any]
+) -> dict[str, Any]:
+    """details of a bulk UPDATE or DELETE, before it runs: filter, values, rows hit."""
     details: dict[str, Any] = {"where": _where_sql(stmt, conn)}
     if values:
         details["values"] = values
@@ -1298,9 +1358,36 @@ def _on_orm_execute(state: ORMExecuteState) -> Any:
         details["affected"] = affected[:MAX_BULK_IDS]
         if len(affected) > MAX_BULK_IDS:
             details["affected_truncated"] = True
-    except Exception:  # noqa: BLE001 -- record the change even without its row list
+    except Exception:  # noqa: BLE001 -- record the change even without its rows
         logger.exception("audit: could not list the rows of a bulk %s", op)
         details["affected"] = "unavailable"
+    return details
+
+
+def _on_orm_execute(state: ORMExecuteState) -> Any:
+    """Session.execute of an INSERT, UPDATE or DELETE (Query.update/delete included):
+    these skip the unit of work, so after_flush never sees their rows."""
+    if not _state.initialised or not (
+        state.is_insert or state.is_update or state.is_delete
+    ):
+        return None
+    stmt = state.statement
+    table = getattr(stmt, "table", None)
+    name = getattr(table, "name", None)
+    if not name or name in EXCLUDED_TABLES:
+        return None
+    op = "create" if state.is_insert else "update" if state.is_update else "delete"
+    values = _bulk_values(stmt) if op == "update" else {}
+    noise = NOISE_COLUMNS | (USER_NOISE_COLUMNS if name == "ab_user" else frozenset())
+    if op == "update" and values and set(values) <= noise:
+        return None  # e.g. FAB's login_count write on a failed login
+    conn = state.session.connection()
+    if not _is_metadata(conn):
+        return None
+    if op == "create":
+        details = _insert_details(stmt, state.parameters)
+    else:
+        details = _filter_details(stmt, conn, table, op, values)
     result = state.invoke_statement()
     rowcount = getattr(result, "rowcount", None)
     if rowcount == 0:
@@ -1316,6 +1403,148 @@ def _on_orm_execute(state: ORMExecuteState) -> Any:
         _insert(conn, [record])
     _queue(state.session, conn, [record])
     return result
+
+
+def _patch_bulk_mappings() -> None:
+    """Record Session.bulk_insert_mappings / bulk_update_mappings.
+
+    SQLAlchemy 1.4 runs them outside the unit of work and Session.execute, so neither
+    after_flush nor do_orm_execute sees them, and Superset saves dataset columns and
+    metrics with them (DatasetDAO.update_columns / update_metrics). Each written row
+    becomes a <category>.create or .update event on the same connection, like a flush.
+    """
+    if getattr(Session.bulk_insert_mappings, "_lauretta_audit", False):
+        return
+    insert_mappings = Session.bulk_insert_mappings
+    update_mappings = Session.bulk_update_mappings
+
+    @functools.wraps(insert_mappings)
+    def bulk_insert_mappings(
+        self: Session, mapper: Any, mappings: Any, *args: Any, **kwargs: Any
+    ) -> Any:
+        mappings = list(mappings)
+        result = insert_mappings(self, mapper, mappings, *args, **kwargs)
+        if target := _mapping_target(self, mapper, mappings):
+            _record_mappings(self, *target, mappings, "create", {})
+        return result
+
+    @functools.wraps(update_mappings)
+    def bulk_update_mappings(
+        self: Session, mapper: Any, mappings: Any, *args: Any, **kwargs: Any
+    ) -> Any:
+        mappings = list(mappings)
+        target = _mapping_target(self, mapper, mappings)
+        before: dict[tuple[Any, ...], dict[str, Any]] = {}
+        try:
+            before = _rows_before(*target, mappings) if target else {}
+        except Exception:  # noqa: BLE001 -- record the update, without old values
+            logger.exception("audit: could not read the rows of a bulk update")
+        result = update_mappings(self, mapper, mappings, *args, **kwargs)
+        if target:
+            _record_mappings(self, *target, mappings, "update", before)
+        return result
+
+    for wrapper in (bulk_insert_mappings, bulk_update_mappings):
+        wrapper._lauretta_audit = True  # type: ignore[attr-defined]
+    Session.bulk_insert_mappings = bulk_insert_mappings
+    Session.bulk_update_mappings = bulk_update_mappings
+
+
+def _mapping_target(
+    session: Session, mapper: Any, mappings: list[Any]
+) -> Optional[tuple[Any, Connection]]:
+    """(mapper, connection) when these rows are audited, else None."""
+    if not _state.initialised or not mappings:
+        return None
+    mapper = sa_inspect(mapper)
+    if mapper.local_table.name in EXCLUDED_TABLES:
+        return None
+    conn = session.connection(bind_arguments={"mapper": mapper})
+    return (mapper, conn) if _is_metadata(conn) else None
+
+
+def _mapping_pk(mapper: Any, mapping: dict[str, Any]) -> tuple[Any, ...]:
+    return tuple(
+        mapping.get(mapper.get_property_by_column(col).key)
+        for col in mapper.primary_key
+    )
+
+
+def _rows_before(
+    mapper: Any, conn: Connection, mappings: list[dict[str, Any]]
+) -> dict[tuple[Any, ...], dict[str, Any]]:
+    """The current values of the rows an update mapping is about to change, by key."""
+    table = mapper.local_table
+    attrs = [a for a in mapper.column_attrs if a.columns[0].table is table]
+    pk_cols = list(mapper.primary_key)
+    query = sa.select(*pk_cols, *[a.columns[0] for a in attrs])
+    pks = list({_mapping_pk(mapper, m) for m in mappings})
+    out: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for start in range(0, len(pks), 500):
+        chunk = pks[start : start + 500]
+        where = (
+            pk_cols[0].in_([pk[0] for pk in chunk])
+            if len(pk_cols) == 1
+            else sa.tuple_(*pk_cols).in_(chunk)
+        )
+        for row in conn.execute(query.where(where)):
+            pk = tuple(row[: len(pk_cols)])
+            out[pk] = {
+                a.key: value
+                for a, value in zip(attrs, row[len(pk_cols) :], strict=True)
+            }
+    return out
+
+
+def _record_mappings(  # pylint: disable=too-many-arguments
+    session: Session,
+    mapper: Any,
+    conn: Connection,
+    mappings: list[dict[str, Any]],
+    op: str,
+    before: dict[tuple[Any, ...], dict[str, Any]],
+) -> None:
+    table = mapper.local_table.name
+    skip = NOISE_COLUMNS | (USER_NOISE_COLUMNS if table == "ab_user" else frozenset())
+    category = SECURITY_CATEGORIES.get(table, "data")
+    records = []
+    for mapping in mappings:
+        pk = _mapping_pk(mapper, mapping)
+        old = before.get(pk, {})
+        details: dict[str, Any] = {}
+        # Column attributes only: an update mapping may be a whole instance __dict__.
+        for attr in mapper.column_attrs:
+            name = attr.key
+            if name in skip or name not in mapping:
+                continue
+            column, new = attr.columns[0], mapping[name]
+            if op == "create":
+                if new is not None:
+                    details.setdefault("values", {})[name] = _value(name, column, new)
+            elif not _unchanged(old.get(name), new):
+                details.setdefault("changes", {})[name] = {
+                    "old": _value(name, column, old.get(name)),
+                    "new": _value(name, column, new),
+                }
+        if op == "update" and not details:
+            continue  # rewritten with the values it already had
+        label = next((mapping[a] for a in _LABEL_ATTRS if mapping.get(a)), None)
+        target_id: Any = None  # an inserted row's id is not returned
+        if any(v is not None for v in pk):
+            target_id = pk[0] if len(pk) == 1 else list(pk)
+        records.append(
+            _record(
+                category,
+                f"{category}.{op}",
+                target_type=table,
+                target_id=target_id,
+                target_name=label,
+                details=details,
+            )
+        )
+    if records and _state.db_enabled:
+        _insert(conn, records)  # fails the write if the audit row cannot be stored
+    _queue(session, conn, records)
 
 
 # Many-to-many tables with their own events: secondary -> (owner table, category,
@@ -1351,17 +1580,15 @@ def _sql_dml_record(obj: Any) -> Optional[dict[str, Any]]:
     }:
         return None
     client = _SQL_CLIENTS.pop(str(obj.client_id), None)
-    # executed_sql holds only the last block Superset ran; sql is the whole script.
     sql = obj.sql or obj.executed_sql or ""
-    from superset.sql.parse import SQLScript
-
-    def mutates(script: str) -> bool:
-        try:
-            return SQLScript(script, obj.database.db_engine_spec.engine).has_mutation()
-        except Exception:  # noqa: BLE001 -- unparsable SQL is rejected by Superset itself
-            return False
-
-    if not any(mutates(s) for s in dict.fromkeys((obj.sql, obj.executed_sql)) if s):
+    verdict = _dml_verdict(
+        obj.sql,
+        obj.executed_sql,
+        obj.database.db_engine_spec.engine,
+        bool(getattr(obj.database, "allow_dml", True)),
+        status,
+    )
+    if verdict is None:
         return None
     # SQL Lab runs statements under a synthetic request ("GET /"): the client is the
     # one remembered when the query was submitted (same process: synchronous SQL Lab;
@@ -1388,9 +1615,50 @@ def _sql_dml_record(obj: Any) -> Optional[dict[str, Any]]:
             "schema": obj.schema,
             "sql": _value("sql", None, sql),
             "error": _value("error_message", None, obj.error_message),
+            **(
+                {"mutation": "unknown: Jinja template, rendered script not stored"}
+                if verdict == "template"
+                else {}
+            ),
         },
         overrides=overrides,
     )
+
+
+_JINJA_MARKERS = ("{{", "{%", "{#")
+
+
+def _dml_verdict(
+    sql: Optional[str],
+    executed_sql: Optional[str],
+    engine: str,
+    allow_dml: bool,
+    status: str,
+) -> Optional[str]:
+    """Whether a finished SQL Lab query is recorded as data.sql_dml: 'mutation' when
+    its SQL writes, 'template' when a Jinja template may have, None for a read.
+
+    Query.sql keeps the template, which often does not parse, and executed_sql holds
+    only the last block Superset ran, so a templated write can be invisible in both.
+    Superset checks the rendered script against allow_dml, so a templated query that
+    succeeded on a database without DML wrote nothing; every other one is recorded
+    (a refused attempt fails, so it is recorded too).
+    """
+    from superset.sql.parse import SQLScript
+
+    def mutates(script: str) -> bool:
+        try:
+            return SQLScript(script, engine).has_mutation()
+        except Exception:  # noqa: BLE001 -- unparsable: see the template rule below
+            return False
+
+    if any(mutates(s) for s in dict.fromkeys((sql, executed_sql)) if s):
+        return "mutation"
+    text = sql or ""
+    templated = any(marker in text for marker in _JINJA_MARKERS)
+    if templated and (allow_dml or status != "success"):
+        return "template"
+    return None
 
 
 def _remember_sql_client(obj: Any) -> None:

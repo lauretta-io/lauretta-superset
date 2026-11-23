@@ -497,6 +497,190 @@ class GapsTest(unittest.TestCase):
         self.assertEqual([line["action"] for line in LINES.lines], ["auth.logout"])
 
 
+class BulkWritesTest(unittest.TestCase):
+    """Writes that skip after_flush: bulk mappings (dataset columns and metrics) and
+    ORM INSERT statements (asset import links)."""
+
+    setUp = AuditTransactionTest.setUp
+    tearDown = AuditTransactionTest.tearDown
+    rows = AuditTransactionTest.rows
+    names = AuditTransactionTest.names
+    _seed = GapsTest._seed
+
+    def test_bulk_mappings_record_each_row(self) -> None:
+        self._seed("a", "b")
+        before = len(self.rows())
+        with Session(self.engine) as s:
+            s.bulk_insert_mappings(
+                Thing, [{"name": "c", "extra": '{"password": "hunter2"}'}]
+            )
+            a = s.get(Thing, 1)
+            # DatasetDAO passes a whole instance __dict__ plus the new values.
+            s.bulk_update_mappings(
+                Thing, [{**a.__dict__, "name": "a2"}, {"id": 2, "name": "b"}]
+            )
+            self.assertEqual(LINES.lines, [])  # not committed yet
+            s.commit()
+        rows = self.rows()[before:]
+        self.assertEqual([r["action"] for r in rows], ["data.create", "data.update"])
+        created, updated = (json.loads(r["details"]) for r in rows)
+        self.assertEqual(
+            created["values"], {"name": "c", "extra": '{"password": "[REDACTED]"}'}
+        )
+        self.assertEqual(rows[0]["target_name"], "c")
+        # Only the row that changed, and only its changed column; b was unchanged.
+        self.assertEqual(updated, {"changes": {"name": {"old": "a", "new": "a2"}}})
+        self.assertEqual(rows[1]["target_id"], "1")
+        self.assertEqual(self.names(), ["a2", "b", "c"])
+        self.assertEqual(
+            [line["action"] for line in LINES.lines], ["data.create", "data.update"]
+        )
+        for row in rows:
+            self.assertEqual(la._sign(row, la._state.key), row["row_hmac"])
+
+    def test_bulk_mappings_rolled_back_print_nothing(self) -> None:
+        self._seed("a")
+        before = len(self.rows())
+        with Session(self.engine) as s:
+            s.bulk_insert_mappings(Thing, [{"name": "c"}])
+            s.bulk_update_mappings(Thing, [{"id": 1, "name": "z"}])
+            s.rollback()
+        self.assertEqual(LINES.lines, [])
+        self.assertEqual(len(self.rows()), before)
+        self.assertEqual(self.names(), ["a"])
+
+    def test_orm_insert_statements_are_recorded(self) -> None:
+        with Session(self.engine) as s:
+            s.execute(sa.insert(Thing.__table__).values([{"name": "x"}, {"name": "y"}]))
+            s.execute(sa.insert(Thing.__table__), [{"name": "p"}, {"name": "q"}])
+            s.commit()
+        rows = self.rows()
+        self.assertEqual([r["action"] for r in rows], ["data.bulk_create"] * 2)
+        self.assertEqual(
+            [json.loads(r["details"]) for r in rows],
+            [
+                {"rows": 2, "values": [{"name": "x"}, {"name": "y"}]},
+                {"rows": 2, "values": [{"name": "p"}, {"name": "q"}]},
+            ],
+        )
+        self.assertEqual(len(LINES.lines), 2)
+
+    def test_sweep_skips_a_session_touched_since_its_select(self) -> None:
+        from datetime import datetime, timedelta, timezone
+
+        la.sessions_table.create(self.engine)
+        now = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+        with self.engine.begin() as conn:
+            conn.execute(
+                la.sessions_table.insert().values(
+                    sid="old",
+                    user_id=7,
+                    username="ann",
+                    started_at=now - timedelta(hours=2),
+                    last_seen=now - timedelta(minutes=40),
+                )
+            )
+
+        # Another worker's touch lands between the sweep's SELECT and its claim.
+        touched: list[bool] = []
+
+        def touch(conn, cursor, statement, *_):  # noqa: ANN001
+            if statement.startswith("UPDATE lauretta_audit_sessions") and not touched:
+                touched.append(True)
+                seen = (now - timedelta(seconds=5)).strftime("%Y-%m-%d %H:%M:%S.%f")
+                cursor.execute(
+                    "UPDATE lauretta_audit_sessions SET last_seen = ? "
+                    "WHERE sid = 'old'",
+                    (seen,),
+                )
+
+        event.listen(self.engine, "before_cursor_execute", touch)
+        self.addCleanup(event.remove, self.engine, "before_cursor_execute", touch)
+        self.assertEqual(la.sweep_sessions(self.engine, timedelta(minutes=30), now), 0)
+        with self.engine.connect() as conn:
+            ended = conn.execute(sa.select(la.sessions_table.c.ended_at)).scalar()
+        self.assertIsNone(ended)
+        self.assertEqual(LINES.lines, [])
+
+
+class DmlVerdictTest(unittest.TestCase):
+    """Which finished SQL Lab queries become data.sql_dml."""
+
+    TEMPLATE = "{% set t = 'items' %}DELETE FROM {{ t }}; SELECT 1"
+
+    def verdict(self, sql, executed, allow_dml=False, status="success"):  # noqa: ANN001
+        return la._dml_verdict(sql, executed, "postgresql", allow_dml, status)
+
+    def test_plain_write_and_read(self) -> None:
+        self.assertEqual(
+            self.verdict("DELETE FROM t", None, status="failed"), "mutation"
+        )
+        self.assertIsNone(self.verdict("SELECT 1", "SELECT 1", allow_dml=True))
+
+    def test_template_that_may_have_written(self) -> None:
+        # Only the final SELECT is in executed_sql; the template does not parse.
+        self.assertEqual(
+            self.verdict(self.TEMPLATE, "SELECT 1", allow_dml=True), "template"
+        )
+        # Refused by Superset (no DML on this database): the attempt is recorded.
+        self.assertEqual(self.verdict(self.TEMPLATE, None, status="failed"), "template")
+
+    def test_template_that_cannot_have_written(self) -> None:
+        # Superset checks the rendered script: success without DML wrote nothing.
+        self.assertIsNone(self.verdict(self.TEMPLATE, "SELECT 1"))
+
+
+class MachineLoginTest(unittest.TestCase):
+    """login_user() without an audited auth method: Superset's machine auth."""
+
+    def setUp(self) -> None:
+        import flask
+
+        self.flask = flask
+        self.app = flask.Flask(__name__)
+        self.user = mock.Mock(is_authenticated=True, id=5, username="reporter")
+
+    def test_recorded_as_a_machine_login_and_tracked(self) -> None:
+        with (
+            self.app.test_request_context("/login"),
+            mock.patch.object(la, "record_event") as record,
+            mock.patch.object(la, "_start_tracking") as track,
+            mock.patch.object(la._state, "tracking", True),
+        ):
+            la._on_login(None, user=self.user)
+        details = record.call_args.kwargs["details"]
+        self.assertEqual(record.call_args.args, ("auth", "auth.login"))
+        self.assertEqual(details["method"], "machine")
+        # The tracked session is the one the login names: the logout will match.
+        track.assert_called_once_with(self.user, details["session"])
+
+    def test_audited_login_is_not_recorded_twice(self) -> None:
+        with (
+            self.app.test_request_context("/login"),
+            mock.patch.object(la, "record_event") as record,
+            mock.patch.object(la, "_start_tracking") as track,
+            mock.patch.object(la._state, "tracking", True),
+        ):
+            self.flask.g.lauretta_audit_sid = "abc"
+            la._on_login(None, user=self.user)
+            self.assertNotIn("lauretta_audit_sid", self.flask.g)
+        record.assert_not_called()
+        track.assert_called_once_with(self.user, "abc")
+
+    def test_anonymous_login_is_ignored(self) -> None:
+        from flask_login import AnonymousUserMixin
+
+        with (
+            self.app.test_request_context("/embedded/x"),
+            mock.patch.object(la, "record_event") as record,
+            mock.patch.object(la, "_start_tracking") as track,
+            mock.patch.object(la._state, "tracking", True),
+        ):
+            la._on_login(None, user=AnonymousUserMixin())
+        record.assert_not_called()
+        track.assert_not_called()
+
+
 @unittest.skipUnless(os.environ.get("AUDIT_TEST_PG_URL"), "set AUDIT_TEST_PG_URL")
 class PostgresTest(unittest.TestCase):
     """The PostgreSQL-only cases, against a throwaway server, e.g.
