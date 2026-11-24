@@ -701,6 +701,63 @@ class FileSinkTest(unittest.TestCase):
         self.assertTrue(all(x["lauretta_audit"] == 1 for x in lines))
         self.assertEqual(os.stat(path).st_mode & 0o777, 0o640)
 
+    def test_rotation_keeps_the_configured_backups(self) -> None:
+        path = os.path.join(self.tmp.name, "audit.jsonl")
+        la._state.file_path = path
+        self.addCleanup(setattr, la._state, "file_max_bytes", la._state.file_max_bytes)
+        self.addCleanup(setattr, la._state, "file_backups", la._state.file_backups)
+        la._state.file_max_bytes, la._state.file_backups = 1500, 3
+        for i in range(40):
+            la._emit_stdout([la._record("auth", "auth.login", target_name=f"u{i}")])
+        names = sorted(os.listdir(self.tmp.name))
+        self.assertEqual(
+            names, ["audit.jsonl", "audit.jsonl.1", "audit.jsonl.2", "audit.jsonl.3"]
+        )
+        seen = []
+        for name in reversed(names[1:]):  # oldest first
+            with open(os.path.join(self.tmp.name, name)) as f:
+                seen += [json.loads(line)["target_name"] for line in f]
+        with open(path) as f:
+            seen += [json.loads(line)["target_name"] for line in f]
+        self.assertEqual(seen[-1], "u39")
+        # in order, with no gaps among what is kept (the oldest file was dropped)
+        first = int(seen[0][1:])
+        self.assertEqual(seen, [f"u{i}" for i in range(first, 40)])
+        for name in names:
+            self.assertLess(
+                os.path.getsize(os.path.join(self.tmp.name, name)), 1500 + 600
+            )
+
+    def test_concurrent_writers_with_rotation_lose_nothing(self) -> None:
+        import multiprocessing
+
+        path = os.path.join(self.tmp.name, "audit.jsonl")
+
+        def writer(n: int) -> None:
+            la._state.file_path = path
+            la._state.file_max_bytes, la._state.file_backups = 20000, 1000
+            for i in range(150):
+                la._emit_stdout(
+                    [la._record("auth", "auth.login", target_name=f"{n}-{i}")]
+                )
+
+        ctx = multiprocessing.get_context("fork")
+        procs = [ctx.Process(target=writer, args=(n,)) for n in range(4)]
+        for proc in procs:
+            proc.start()
+        for proc in procs:
+            proc.join(60)
+            self.assertEqual(proc.exitcode, 0)
+        names = os.listdir(self.tmp.name)
+        self.assertGreater(len(names), 3)  # it did rotate
+        seen = []
+        for name in names:
+            with open(os.path.join(self.tmp.name, name)) as f:
+                seen += [json.loads(line)["target_name"] for line in f]  # no torn lines
+        self.assertEqual(
+            sorted(seen), sorted(f"{n}-{i}" for n in range(4) for i in range(150))
+        )
+
     def test_unwritable_file_never_raises(self) -> None:
         la._state.file_path = "/proc/no/such/dir/audit.jsonl"
         la._emit_stdout([la._record("auth", "auth.login")])
