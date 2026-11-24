@@ -118,9 +118,18 @@ How to watch it:
   user), mode `0640`. The agent needs root, or read access to that path.
 - **Writes:** each event is appended once its database transaction commits. Several
   workers append under a lock, so lines never interleave.
-- **Rotation:** nothing rotates the file. Use the agent's own handling or `logrotate`
-  (`create 0640 1000 1000`; `copytruncate` is not needed, because the app reopens the
-  file for every batch).
+- **Rotation:** built in, by size. When `audit.jsonl` reaches 50 MB it becomes
+  `audit.jsonl.1`, older files move up (`.2`, `.3`, …), and a new empty `audit.jsonl`
+  takes its place. 20 rotated files are kept, about 1 GB per node; the oldest is
+  deleted. Settings (env): `LAURETTA_AUDIT_FILE_MAX_MB` (50), `LAURETTA_AUDIT_FILE_BACKUPS`
+  (20). Point the agent at `audit.jsonl` only, not `audit.jsonl*`, and let it follow
+  the file by inode (the default for Filebeat, Fluent Bit, Vector and the Splunk
+  forwarder). Don't add `logrotate` on top.
+- **Retention:** rotated files are a shipping buffer, not the archive. The kept files
+  cover days to weeks, depending on traffic. Long-term retention is the SIEM copy and the
+  `lauretta_audit_log` table, which nothing deletes. If the SIEM agent is down for
+  longer than the kept files cover, events missing from the SIEM are still in the table
+  (`report`).
 - **Gaps:** the file and the table hold the same events with the same `id`s. An `id`
   in the SIEM but missing from the table means a deleted row. The SIEM copy is the
   one that settles it.

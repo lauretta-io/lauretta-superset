@@ -131,6 +131,12 @@ LAURETTA_AUDIT_PRIVILEGED_ROLES = ("Admin",)
 # The SIEM file. Unset: DEFAULT_FILE; empty: no file.
 FILE_ENV = "LAURETTA_AUDIT_FILE"
 DEFAULT_FILE = "/app/superset_home/audit/audit.jsonl"
+# Size rotation of that file: at FILE_MAX_MB it becomes audit.jsonl.1 (the older ones
+# move up to .2, .3, ...) and the oldest beyond FILE_BACKUPS is deleted.
+FILE_MAX_MB_ENV = "LAURETTA_AUDIT_FILE_MAX_MB"
+FILE_BACKUPS_ENV = "LAURETTA_AUDIT_FILE_BACKUPS"
+DEFAULT_FILE_MAX_MB = 50
+DEFAULT_FILE_BACKUPS = 20
 # Requests by privileged accounts that are not recorded: assets, probes, the frontend's
 # own telemetry and polling. (method or "*", path prefix)
 QUIET_REQUESTS = (
@@ -304,6 +310,8 @@ class _State:
     last_sweep: float = 0.0
     file_path: Optional[str] = None  # the SIEM file; None: none
     file_warned: bool = False
+    file_max_bytes: int = DEFAULT_FILE_MAX_MB * 1024 * 1024
+    file_backups: int = DEFAULT_FILE_BACKUPS
 
 
 _state = _State()
@@ -415,6 +423,8 @@ def init_app(app: Flask) -> None:
     _state.db_enabled = TABLE_NAME not in missing
     _state.tracking = SESSIONS_TABLE not in missing
     _state.file_path = os.environ.get(FILE_ENV, DEFAULT_FILE).strip() or None
+    _state.file_max_bytes = _env_int(FILE_MAX_MB_ENV, DEFAULT_FILE_MAX_MB) * 1024 * 1024
+    _state.file_backups = _env_int(FILE_BACKUPS_ENV, DEFAULT_FILE_BACKUPS)
     app.before_request(_touch_session)
     app.after_request(_audit_privileged)
 
@@ -666,26 +676,68 @@ def _emit_stdout(records: list[dict[str, Any]]) -> None:
     _append_file(lines)
 
 
+def _env_int(name: str, default: int) -> int:
+    try:
+        return max(int(os.environ.get(name, "").strip() or default), 1)
+    except ValueError:
+        logger.warning("audit: %s is not a number; using %d", name, default)
+        return default
+
+
 def _append_file(lines: list[str]) -> None:
     """Append to the SIEM file: one write under an exclusive lock, so lines from
-    several workers never interleave. Opened per batch, so a rename by logrotate is
-    picked up at once. A failure is logged once per process, never raised: the table
-    and stdout still have the event."""
+    several workers never interleave, then rotate it if it has grown past the limit.
+    A failure is logged once per process, never raised: the table and stdout still
+    have the event."""
     path = _state.file_path
     if not path or not lines:
         return
     try:
         os.makedirs(os.path.dirname(path) or ".", mode=0o750, exist_ok=True)
-        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o640)
+        fd = _open_locked(path)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
             os.write(fd, ("\n".join(lines) + "\n").encode())
+            if os.fstat(fd).st_size >= _state.file_max_bytes:
+                _rotate(path, _state.file_backups)
         finally:
             os.close(fd)  # also releases the lock
     except OSError as exc:
         if not _state.file_warned:
             _state.file_warned = True
             logger.warning("audit: cannot append to %s: %s", path, exc)
+
+
+def _open_locked(path: str) -> int:
+    """The current file at `path`, opened for append and locked. Another worker may
+    rotate it while this one waits for the lock; then the lock is on a file that is no
+    longer `path`, so open again: lines always land in the current file."""
+    for _ in range(10):
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o640)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            current = os.stat(path)
+        except FileNotFoundError:
+            current = None
+        mine = os.fstat(fd)
+        if current and (current.st_ino, current.st_dev) == (mine.st_ino, mine.st_dev):
+            return fd
+        os.close(fd)
+    raise OSError(f"{path} keeps being rotated away")
+
+
+def _rotate(path: str, backups: int) -> None:
+    """audit.jsonl -> .1 -> .2 ... -> .<backups>, the oldest beyond that deleted.
+    Called with the lock on `path` held, so only one worker rotates. A new, empty
+    file takes its place at once, so the path always exists for the SIEM agent, which
+    (following the file by inode) reads the rest of the old one, then the new one."""
+    oldest = f"{path}.{backups}"
+    if os.path.exists(oldest):
+        os.remove(oldest)
+    for n in range(backups - 1, 0, -1):
+        if os.path.exists(f"{path}.{n}"):
+            os.rename(f"{path}.{n}", f"{path}.{n + 1}")
+    os.rename(path, f"{path}.1")
+    os.close(os.open(path, os.O_WRONLY | os.O_CREAT, 0o640))
 
 
 def _insert(conn: Connection, records: list[dict[str, Any]]) -> None:
