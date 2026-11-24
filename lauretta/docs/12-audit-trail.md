@@ -20,6 +20,9 @@ every mode (dev, nondev, secure, HA). The code is in
 | | `data.sql_dml` | A SQL Lab statement that writes to a data source, whether it succeeded or was refused. A Jinja-templated query is recorded whenever it may have written, with `details.mutation` = `unknown: …`: Superset keeps only the template and the last statement it ran, not the rendered script. That is every templated query that failed, and every one on a database with `allow_dml` on. A templated query that succeeded on a database without DML cannot have written (Superset checks the rendered script) and is not recorded. |
 | | `data.file_upload` | A floor-map image upload. |
 | | `data.bulk_create`, `data.bulk_update`, `data.bulk_delete` (and `user.`/`role.`/`group.` for those tables) | One statement that changes many rows at once, such as `superset factory-reset`, a Superset command that deletes by filter, or the dashboard–chart links an asset import inserts. `details` has the number of rows and, for an insert, the rows (up to 1000); for an update or delete, the filter (`where`), the values set and the primary keys affected (up to 1000). |
+| Repeated failed logins | `auth.repeated_failure` | One username, or one client address, failed to log in 5 times within 10 minutes (`LAURETTA_AUDIT_FAILED_LOGIN_THRESHOLD`, `LAURETTA_AUDIT_FAILED_LOGIN_WINDOW_SECONDS`). `target_type` says which (`username` or `ip_address`). An address alert lists the usernames tried, which shows password spraying. At most one alert per key per window, across all workers and HA nodes. |
+| Activities of privileged accounts | `access.request` | Every request by a holder of a role in `LAURETTA_AUDIT_PRIVILEGED_ROLES` (default `Admin`): what they viewed, listed, queried, downloaded or exported. `details` has the method, path, query arguments (credential-like ones masked) and status. For SQL Lab, it also has the SQL text (including SELECTs). For chart data, it has the result format, so `csv`/`xlsx` shows a download. Changes they make also get their own `data.*`/`user.*`/`role.*` rows. Not recorded: static assets, health checks, and the frontend's own logging and polling (`QUIET_REQUESTS` in the code). |
+| Access to the audit trail | `audit.report`, `audit.verify` | Somebody exported or verified the audit trail with the command-line tool, with the filters, the row count and the OS user. Reading the table or the files directly is not seen by the application, see "Known gaps". |
 
 Each row has:
 
@@ -60,6 +63,8 @@ recorded `data.update` on `dbs`. Any SQL Lab write after that is a `data.sql_dml
 
 ## Where it goes
 
+Three copies of every event:
+
 1. **The `lauretta_audit_log` table** in the metadata database. Query it with any SQL
    client, for example:
 
@@ -71,18 +76,87 @@ recorded `data.update` on `dbs`. Any SQL Lab write after that is a `data.sql_dml
    ORDER BY id;
    ```
 
-2. **stdout, one JSON line per event**, with `"lauretta_audit": 1` and the same fields
-   (including the row `id`). Point a log shipper (Fluent Bit, Vector, the Docker
-   `syslog`/`fluentd` logging driver, …) at the container logs and filter on that key
-   to send the events to a SIEM. **This copy is only kept if something ships it:** the
-   compose files use Docker's `json-file` driver with rotation (secure and HA: 5 × 10 MB
-   per container), so unshipped lines are gone after a few days of normal traffic.
+2. **The SIEM file**, one JSON line per event with `"lauretta_audit": 1` and the same
+   fields (including the row `id`): `/app/superset_home/audit/audit.jsonl` inside the
+   container (`LAURETTA_AUDIT_FILE`; set it empty to turn the file off). It holds audit
+   events only, so the SIEM agent needs no filter. See "The SIEM file" below.
+3. **stdout**, the same lines, mixed into the container log. The compose files rotate
+   it (secure and HA: 5 × 10 MB per container), so it is gone after a few days. Use
+   the file, not this, for the SIEM.
 
 A data change and its audit row are written in the same database transaction. If the
 change is rolled back, so is its audit row, and no stdout line is printed. If the
 audit row cannot be written, the change fails. Logins and logouts are written in their
 own transaction. A database failure there is logged as an error and the login still
 goes ahead, with the stdout line printed as usual.
+
+## The SIEM file
+
+`/app/superset_home/audit/audit.jsonl` lives in the `superset_home` Docker volume of
+each compose project. On the host it is:
+
+```
+/var/lib/docker/volumes/<project>_superset_home/_data/audit/audit.jsonl
+```
+
+To find it:
+
+```bash
+docker volume inspect <project>_superset_home -f '{{ .Mountpoint }}'
+```
+
+The project names:
+- raib-ha: `raib-ha-superset-ha`, so
+  `/var/lib/docker/volumes/raib-ha-superset-ha_superset_home/_data/audit/audit.jsonl`.
+- this repo's HA compose file: `lauretta-superset-ha`.
+
+How to watch it:
+- **Every node has its own file**, holding the events that node handled. Point the
+  SIEM agent at the file on each node. The `node` field tells them apart. Logins and
+  requests land on whichever node served them, so neither file alone is complete.
+- **Owner and access:** the file is owned by uid 1000 (the container's `superset`
+  user), mode `0640`. The agent needs root, or read access to that path.
+- **Writes:** each event is appended once its database transaction commits. Several
+  workers append under a lock, so lines never interleave.
+- **Rotation:** nothing rotates the file. Use the agent's own handling or `logrotate`
+  (`create 0640 1000 1000`; `copytruncate` is not needed, because the app reopens the
+  file for every batch).
+- **Gaps:** the file and the table hold the same events with the same `id`s. An `id`
+  in the SIEM but missing from the table means a deleted row. The SIEM copy is the
+  one that settles it.
+- **Protection:** this file is not protected on the host (root can edit it). The
+  protected copy is the one in the SIEM, which is why it has to be shipped.
+
+## Reports
+
+```bash
+docker exec <superset container> python -m lauretta_audit report \
+    --from 2026-11-01 --to 2026-11-30 [--user NAME] [--category auth] \
+    [--action auth.login] [--out /app/superset_home/audit/report.csv]
+```
+
+A CSV with every column, oldest first, plus `seal_ok`: `yes` if the row's HMAC checks
+out, `NO` if the row was altered or was signed with a key not known here (see "Key
+rotation"). Dates are UTC and `--to` is inclusive. Without `--out` the CSV goes to
+stdout. A file is written `0600`. Each run is recorded as an `audit.report` event.
+`verify` is recorded the same way, as `audit.verify`.
+
+Categories: `auth`, `user`, `role`, `group`, `data`, `access`, `audit`.
+
+## Checklist 18.6 (Audit Trails and Report)
+
+| Item | Covered by |
+|---|---|
+| 18.6.2.1 Login/logout | `auth.login`, `auth.logout` (incl. idle timeouts) |
+| 18.6.2.2 Privileged/administrator activities | `access.request` for every request, plus the change rows |
+| 18.6.2.3 Failed login | `auth.login` outcome `failure`, with the reason |
+| 18.6.2.4 Data creation/modification/deletion | `data.*`, `data.sql_dml`, bulk rows |
+| 18.6.2.5 Sensitive master data | changes to `dbs`, `ab_user`, `ab_role`, RLS rules etc., secrets redacted |
+| 18.6.2.6 Repeated failed logins | `auth.repeated_failure` |
+| 18.6.2.7 Accounts, role assignment and changes | `user.*`, `role.assign/revoke`, `role.permission_*` |
+| 18.6.2.8 Access to the audit log | `audit.report` / `audit.verify` for access through this tool. Direct database reads need pgaudit, and reads of the files need host auditing (auditd); both are outside this repository (raib-ha). |
+| 18.6.2 Reports | `python -m lauretta_audit report` |
+| 18.6.3 Protected from modification/deletion | "Tamper protection" below, plus the SIEM copy |
 
 ## Setup
 
@@ -210,4 +284,12 @@ docker compose -f <compose-file> exec -e LAURETTA_AUDIT_OLD_KEYS='<old key>' \
   on Lauretta connections (`allow_run_async` off), record the client that submitted
   them.
 - **Before the first `create-table`** (first install, during `superset db upgrade`)
-  events go to stdout only.
+  events go to stdout and the SIEM file only, without an `id`.
+- **Reading the audit trail outside this tool** is not recorded by the application.
+  That covers a SQL client on the metadata database and reading the SIEM file or
+  container logs on the host. This needs pgaudit on `lauretta_audit_log` and auditd on
+  the file and on `docker exec`, both set up by raib-ha. `audit.report` records the
+  container's OS user (`superset`), not the person who ran `docker exec`; the host
+  audit log has that.
+- **`access.request` is per request, not per click.** Opening a dashboard as an
+  administrator records each API call it makes (one per chart).
