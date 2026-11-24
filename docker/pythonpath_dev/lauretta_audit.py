@@ -18,9 +18,11 @@
 """
 Security audit trail: who did what, to what, when, from where.
 
-Every event is written to two places:
-  * the append-only table `lauretta_audit_log` in the metadata database, and
-  * one JSON line on stdout (logger `lauretta.audit`), for a log shipper / SIEM.
+Every event is written to three places:
+  * the append-only table `lauretta_audit_log` in the metadata database,
+  * one JSON line on stdout (logger `lauretta.audit`), and
+  * the same line appended to LAURETTA_AUDIT_FILE (default
+    /app/superset_home/audit/audit.jsonl), the file a SIEM agent watches.
 
 Captured events (see lauretta/docs/12-audit-trail.md for the full list):
   * auth.login (success and failure, with the reason; method "machine" for the
@@ -42,6 +44,11 @@ Captured events (see lauretta/docs/12-audit-trail.md for the full list):
   * data.sql_dml: a SQL Lab statement that writes to a data source, or a Jinja
     templated one that may (its rendered script is not stored)
   * data.file_upload: a floor-map image upload
+  * access.request: every request by a privileged account (LAURETTA_AUDIT_PRIVILEGED_
+    ROLES, default Admin): what it viewed, queried, downloaded or exported
+  * auth.repeated_failure: one username or client address failing to log in
+    LAURETTA_AUDIT_FAILED_LOGIN_THRESHOLD times within the window
+  * audit.report / audit.verify: somebody read the audit trail with this tool
 
 Changes made through the ORM are captured in `after_flush` and inserted on the same
 connection, so the audit row commits or rolls back with the change it describes; the
@@ -58,12 +65,18 @@ Command line (PYTHONPATH must include this directory, as in every compose mode):
   python -m lauretta_audit create-table   # init scripts; idempotent
   python -m lauretta_audit verify         # recompute every row's HMAC
   python -m lauretta_audit sweep-sessions # record idle timeouts now (cron; optional)
+  python -m lauretta_audit report [--from DATE] [--to DATE] [--user NAME]
+      [--category C] [--action A] [--out FILE]   # CSV report, with a seal check
 """
 
 from __future__ import annotations
 
+import argparse
+import csv
 import enum
+import fcntl
 import functools
+import getpass
 import hashlib
 import hmac
 
@@ -109,6 +122,28 @@ SESSION_SEEN_KEY = "_lauretta_audit_seen"
 #   SWEEP: how often (seconds) each worker looks for timed-out sessions
 LAURETTA_AUDIT_TOUCH_SECONDS = 60
 LAURETTA_AUDIT_SWEEP_SECONDS = 60
+#   FAILED_LOGIN_*: N failed logins for one username or one client address within
+#   the window raise one auth.repeated_failure (then at most one per window)
+LAURETTA_AUDIT_FAILED_LOGIN_THRESHOLD = 5
+LAURETTA_AUDIT_FAILED_LOGIN_WINDOW_SECONDS = 600
+# Roles whose holders have every request recorded (access.request). A list in config.
+LAURETTA_AUDIT_PRIVILEGED_ROLES = ("Admin",)
+# The SIEM file. Unset: DEFAULT_FILE; empty: no file.
+FILE_ENV = "LAURETTA_AUDIT_FILE"
+DEFAULT_FILE = "/app/superset_home/audit/audit.jsonl"
+# Requests by privileged accounts that are not recorded: assets, probes, the frontend's
+# own telemetry and polling. (method or "*", path prefix)
+QUIET_REQUESTS = (
+    ("*", "/static/"),
+    ("*", "/health"),
+    ("*", "/ready"),
+    ("*", "/favicon"),
+    ("*", "/api/v1/log/"),
+    ("POST", "/login/"),  # the login itself is auth.login
+    ("GET", "/api/v1/me/"),
+    ("GET", "/api/v1/security/csrf_token/"),
+    ("GET", "/api/v1/async_event/"),
+)
 # Bulk statements: at most this many affected primary keys are listed.
 MAX_BULK_IDS = 1000
 JWT_LOGIN_PATH = "/api/v1/security/login"
@@ -267,6 +302,8 @@ class _State:
     node: str = field(default_factory=_node_name)
     tracking: bool = False  # SESSIONS_TABLE exists: idle timeouts are recorded
     last_sweep: float = 0.0
+    file_path: Optional[str] = None  # the SIEM file; None: none
+    file_warned: bool = False
 
 
 _state = _State()
@@ -377,7 +414,9 @@ def init_app(app: Flask) -> None:
         logger.warning("audit table(s) %s missing: stdout only", ", ".join(missing))
     _state.db_enabled = TABLE_NAME not in missing
     _state.tracking = SESSIONS_TABLE not in missing
+    _state.file_path = os.environ.get(FILE_ENV, DEFAULT_FILE).strip() or None
     app.before_request(_touch_session)
+    app.after_request(_audit_privileged)
 
     if not _state.initialised:
         from flask_login import user_logged_in, user_logged_out
@@ -613,13 +652,40 @@ def _record(
 
 
 def _emit_stdout(records: list[dict[str, Any]]) -> None:
+    """The two log copies, stdout and the SIEM file, once the rows have committed."""
+    lines = []
     for record in records:
         line = dict(record)
         line["event_time"] = _iso(record["event_time"])
         line["details"] = json.loads(record["details"])
-        audit_logger.info(
+        lines.append(
             json.dumps({"lauretta_audit": 1, **line}, ensure_ascii=False, default=str)
         )
+    for text in lines:
+        audit_logger.info(text)
+    _append_file(lines)
+
+
+def _append_file(lines: list[str]) -> None:
+    """Append to the SIEM file: one write under an exclusive lock, so lines from
+    several workers never interleave. Opened per batch, so a rename by logrotate is
+    picked up at once. A failure is logged once per process, never raised: the table
+    and stdout still have the event."""
+    path = _state.file_path
+    if not path or not lines:
+        return
+    try:
+        os.makedirs(os.path.dirname(path) or ".", mode=0o750, exist_ok=True)
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o640)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            os.write(fd, ("\n".join(lines) + "\n").encode())
+        finally:
+            os.close(fd)  # also releases the lock
+    except OSError as exc:
+        if not _state.file_warned:
+            _state.file_warned = True
+            logger.warning("audit: cannot append to %s: %s", path, exc)
 
 
 def _insert(conn: Connection, records: list[dict[str, Any]]) -> None:
@@ -693,8 +759,182 @@ def _audit_login(sm: Any, method: str, username: str, user: Any) -> None:
                 "actor_username": username or "",
             },
         )
+        from flask import has_request_context, request
+
+        ip = request.remote_addr if has_request_context() else None
+        check_repeated_failures(username or None, ip)
     except Exception:  # noqa: BLE001 -- auditing must never break a login
         logger.exception("audit: could not record a login")
+
+
+def check_repeated_failures(
+    username: Optional[str],
+    ip_address: Optional[str],
+    engine: Optional[sa.engine.Engine] = None,
+    now: Optional[datetime] = None,
+) -> int:
+    """auth.repeated_failure when a username, or a client address (a password spray
+    across usernames), has failed THRESHOLD times within WINDOW seconds; at most one
+    per key per window. Returns how many it recorded.
+
+    Reads the failures back from the audit table, so it counts across workers and HA
+    nodes. On PostgreSQL an advisory lock serialises the check, so two nodes never
+    raise the same one twice.
+    """
+    if not _state.db_enabled or not (username or ip_address):
+        return 0
+    if engine is None:
+        from superset.extensions import db
+
+        engine = db.engine
+    threshold = _setting("LAURETTA_AUDIT_FAILED_LOGIN_THRESHOLD")
+    window = _setting("LAURETTA_AUDIT_FAILED_LOGIN_WINDOW_SECONDS")
+    now = now or datetime.now(timezone.utc)
+    since = now - timedelta(seconds=window)
+    t = audit_table
+    records: list[dict[str, Any]] = []
+    with engine.begin() as conn:
+        if conn.dialect.name == "postgresql":
+            conn.execute(
+                sa.text("SELECT pg_advisory_xact_lock(hashtext(:n))"),
+                {"n": "lauretta_audit_repeated_failure"},
+            )
+        for kind, column, value in (
+            ("username", t.c.actor_username, username),
+            ("ip_address", t.c.ip_address, ip_address),
+        ):
+            if not value:
+                continue
+            failed = sa.and_(
+                t.c.action == "auth.login",
+                t.c.outcome == "failure",
+                t.c.event_time >= since,
+                column == value,
+            )
+            count, first = conn.execute(
+                sa.select(sa.func.count(), sa.func.min(t.c.event_time)).where(failed)
+            ).one()
+            if count < threshold:
+                continue
+            raised = conn.execute(
+                sa.select(sa.func.count()).where(
+                    t.c.action == "auth.repeated_failure",
+                    t.c.event_time >= since,
+                    t.c.target_type == kind,
+                    t.c.target_name == value,
+                )
+            ).scalar()
+            if raised:
+                continue
+            details: dict[str, Any] = {
+                "failures": count,
+                "threshold": threshold,
+                "window_seconds": window,
+                "first_failure": _iso(_aware(first)),
+            }
+            if kind == "ip_address":
+                names = conn.execute(
+                    sa.select(t.c.actor_username).distinct().where(failed).limit(20)
+                ).scalars()
+                details["usernames"] = sorted(n for n in names if n)
+            records.append(
+                _record(
+                    "auth",
+                    "auth.repeated_failure",
+                    outcome="failure",
+                    target_type=kind,
+                    target_name=value,
+                    details=details,
+                    overrides={"event_time": now},
+                )
+            )
+        if records:
+            _insert(conn, records)
+    _emit_stdout(records)
+    return len(records)
+
+
+# ---------------------------------------------------------------------------
+# Privileged accounts: every request
+# ---------------------------------------------------------------------------
+def _privileged_roles() -> frozenset[str]:
+    from flask import current_app
+
+    roles = current_app.config.get(
+        "LAURETTA_AUDIT_PRIVILEGED_ROLES", LAURETTA_AUDIT_PRIVILEGED_ROLES
+    )
+    return frozenset(roles or ())
+
+
+def _quiet(method: str, path: str) -> bool:
+    return any(
+        (m == "*" or m == method) and path.startswith(prefix)
+        for m, prefix in QUIET_REQUESTS
+    )
+
+
+def _request_details(request: Any) -> dict[str, Any]:
+    """What a request asked for: query arguments, and for SQL Lab and chart data the
+    SQL or the data format (a download)."""
+    details: dict[str, Any] = {"method": request.method, "path": request.path}
+    args = {
+        k: (REDACTED if _sensitive_name(k) else _cut_long(v))
+        for k, v in request.args.items()
+    }
+    if args:
+        details["args"] = args
+    body = _request_body(request)
+    if request.path.startswith("/api/v1/sqllab/"):
+        for key in ("sql", "database_id", "catalog", "schema"):
+            if body.get(key) is not None:
+                details[key] = _cut_long(_redact(body[key]))
+    if "/chart/data" in request.path:
+        for key in ("result_format", "result_type", "datasource"):
+            if body.get(key):
+                details[key] = body[key]
+    return details
+
+
+def _request_body(request: Any) -> dict[str, Any]:
+    """The JSON body, or a form's form_data field (chart downloads); {} otherwise."""
+    body: Any = request.get_json(silent=True) if request.is_json else None
+    if body is None and request.form.get("form_data"):
+        try:
+            body = json.loads(request.form["form_data"])
+        except ValueError:
+            body = None
+    return body if isinstance(body, dict) else {}
+
+
+def _audit_privileged(response: Any) -> Any:
+    """after_request: one access.request per request by a privileged account, so what
+    an administrator viewed, queried, downloaded or exported is on record (changes
+    also get their own rows). Never fails the request."""
+    try:
+        from flask import request
+        from flask_login import current_user
+
+        if not _state.initialised or not getattr(
+            current_user, "is_authenticated", False
+        ):
+            return response
+        if _quiet(request.method, request.path):
+            return response
+        held = {r.name for r in getattr(current_user, "roles", []) or []}
+        roles = sorted(held & _privileged_roles())
+        if not roles:
+            return response
+        status = int(getattr(response, "status_code", 0) or 0)
+        record_event(
+            "access",
+            "access.request",
+            outcome="success" if status < 400 else "failure",
+            target_type=request.endpoint,
+            details={**_request_details(request), "status": status, "roles": roles},
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("audit: could not record a privileged request: %s", exc)
+    return response
 
 
 def _login_session_details() -> dict[str, Any]:
@@ -2014,14 +2254,9 @@ def verify(old_secrets: Optional[list[str]] = None) -> int:
     An unknown key_id counts as a failure: key_id is just a column, and whoever can edit
     a row can also set it to a value no key matches.
     """
-    from flask import current_app
-
     from superset.extensions import db
 
-    candidates = [_state.key, _derived_key(str(current_app.config["SECRET_KEY"]))]
-    for secret in old_secrets or []:
-        candidates += [secret.encode(), _derived_key(secret)]
-    keys = {_key_id(key): key for key in candidates}
+    keys = _known_keys(old_secrets)
     ok = bad = unknown = 0
     first_bad: list[int] = []
     gaps: list[str] = []
@@ -2048,7 +2283,146 @@ def verify(old_secrets: Optional[list[str]] = None) -> int:
                 if len(first_bad) < 20:
                     first_bad.append(record["id"])
     _report(ok, bad, unknown, first_bad, missing, gaps)
+    record_event(
+        "audit",
+        "audit.verify",
+        outcome="success" if not (bad or unknown) else "failure",
+        target_type=TABLE_NAME,
+        details={
+            "ok": ok,
+            "tampered": bad,
+            "unknown_key": unknown,
+            "missing_ids": missing,
+            "os_user": _os_user(),
+        },
+    )
     return bad + unknown
+
+
+def _known_keys(old_secrets: Optional[list[str]] = None) -> dict[str, bytes]:
+    from flask import current_app
+
+    candidates = [_state.key, _derived_key(str(current_app.config["SECRET_KEY"]))]
+    for secret in old_secrets or []:
+        candidates += [secret.encode(), _derived_key(secret)]
+    return {_key_id(key): key for key in candidates}
+
+
+def _os_user() -> str:
+    for name in ("SUDO_USER", "LOGNAME", "USER"):
+        if value := os.environ.get(name, "").strip():
+            return value
+    try:
+        return getpass.getuser()
+    except Exception:  # noqa: BLE001 -- no passwd entry for the uid
+        return f"uid {os.getuid()}"
+
+
+# ---------------------------------------------------------------------------
+# Reports
+# ---------------------------------------------------------------------------
+REPORT_COLUMNS = (
+    "id",
+    "event_time",
+    "category",
+    "action",
+    "outcome",
+    "actor_id",
+    "actor_username",
+    "target_type",
+    "target_id",
+    "target_name",
+    "ip_address",
+    "user_agent",
+    "request",
+    "node",
+    "details",
+    "seal_ok",
+)
+
+
+def report(  # pylint: disable=too-many-arguments
+    out: Any,
+    since: Optional[datetime] = None,
+    until: Optional[datetime] = None,
+    user: Optional[str] = None,
+    category: Optional[str] = None,
+    action: Optional[str] = None,
+    engine: Optional[sa.engine.Engine] = None,
+    keys: Optional[dict[str, bytes]] = None,
+) -> int:
+    """Write the audit rows matching the filters to `out` as CSV, oldest first, each
+    with seal_ok (its HMAC checks out). Records an audit.report event: reading the
+    audit trail is itself on record. Returns the number of rows."""
+    if engine is None:
+        from superset.extensions import db
+
+        engine = db.engine
+    keys = keys if keys is not None else _known_keys()
+    t = audit_table
+    query = sa.select(t).order_by(t.c.event_time, t.c.id)
+    if since is not None:
+        query = query.where(t.c.event_time >= since)
+    if until is not None:
+        query = query.where(t.c.event_time < until)
+    if user:
+        query = query.where(t.c.actor_username == user)
+    if category:
+        query = query.where(t.c.category == category)
+    if action:
+        query = query.where(t.c.action == action)
+    writer = csv.writer(out)
+    writer.writerow(REPORT_COLUMNS)
+    rows = 0
+    with engine.connect() as conn:
+        for row in conn.execution_options(stream_results=True).execute(query):
+            record = dict(row._mapping)
+            key = keys.get(record["key_id"])
+            sealed = key is not None and hmac.compare_digest(
+                _sign(record, key), record["row_hmac"]
+            )
+            record["event_time"] = _iso(_aware(record["event_time"]))
+            record["seal_ok"] = "yes" if sealed else "NO"
+            writer.writerow([record.get(c) for c in REPORT_COLUMNS])
+            rows += 1
+    filters = {
+        "from": since and _iso(since),
+        "to": until and _iso(until),
+        "user": user,
+        "category": category,
+        "action": action,
+    }
+    record_event(
+        "audit",
+        "audit.report",
+        target_type=TABLE_NAME,
+        details={
+            "filters": {k: v for k, v in filters.items() if v},
+            "rows": rows,
+            "os_user": _os_user(),
+        },
+    )
+    return rows
+
+
+def _day(text: str) -> datetime:
+    return datetime.strptime(text, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+
+
+def _report_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="python -m lauretta_audit report")
+    parser.add_argument("--from", dest="since", type=_day, help="YYYY-MM-DD (UTC)")
+    parser.add_argument(
+        "--to", dest="until", type=_day, help="YYYY-MM-DD (UTC), inclusive"
+    )
+    parser.add_argument("--user", help="actor username")
+    parser.add_argument("--category", help="auth, user, role, group, data, access, ...")
+    parser.add_argument("--action", help="e.g. auth.login")
+    parser.add_argument("--out", help="CSV file (default: stdout)")
+    args = parser.parse_args(argv)
+    if args.until is not None:
+        args.until += timedelta(days=1)
+    return args
 
 
 def _report(
@@ -2073,13 +2447,15 @@ def _report(
 
 
 def _main(argv: list[str]) -> int:
-    commands = {"create-table", "verify", "sweep-sessions"}
+    commands = {"create-table", "verify", "sweep-sessions", "report"}
     if not argv or argv[0] not in commands:
         print(
-            "usage: python -m lauretta_audit {create-table|verify|sweep-sessions}",
+            "usage: python -m lauretta_audit "
+            "{create-table|verify|sweep-sessions|report}",
             file=sys.stderr,
         )
         return 2
+    report_args = _report_args(argv[1:]) if argv[0] == "report" else None
     if argv[0] == "create-table":
         os.environ[INIT_ENV] = "1"
     from superset.app import create_app
@@ -2095,8 +2471,28 @@ def _main(argv: list[str]) -> int:
         if argv[0] == "sweep-sessions":
             print(f"audit: {lauretta_audit.sweep_sessions()} idle session(s) closed")
             return 0
+        if report_args is not None:
+            return _run_report(lauretta_audit, report_args)
         old = [k for k in os.environ.get(OLD_KEYS_ENV, "").split(",") if k.strip()]
         return 1 if lauretta_audit.verify(old) else 0
+
+
+def _run_report(module: Any, args: argparse.Namespace) -> int:
+    kwargs = {
+        "since": args.since,
+        "until": args.until,
+        "user": args.user,
+        "category": args.category,
+        "action": args.action,
+    }
+    if not args.out:
+        rows = module.report(sys.stdout, **kwargs)
+    else:
+        fd = os.open(args.out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", newline="", encoding="utf-8") as out:
+            rows = module.report(out, **kwargs)
+    print(f"audit report: {rows} rows", file=sys.stderr)
+    return 0
 
 
 if __name__ == "__main__":

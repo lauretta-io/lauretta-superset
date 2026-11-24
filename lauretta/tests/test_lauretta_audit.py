@@ -681,6 +681,193 @@ class MachineLoginTest(unittest.TestCase):
         track.assert_not_called()
 
 
+class FileSinkTest(unittest.TestCase):
+    """The SIEM file: one JSON line per committed event, appended."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.addCleanup(setattr, la._state, "file_path", None)
+        self.addCleanup(setattr, la._state, "file_warned", False)
+
+    def test_lines_are_appended(self) -> None:
+        path = os.path.join(self.tmp.name, "audit", "audit.jsonl")
+        la._state.file_path = path
+        la._emit_stdout([la._record("auth", "auth.login", target_name="a")])
+        la._emit_stdout([la._record("auth", "auth.logout", target_name="a")])
+        with open(path) as f:
+            lines = [json.loads(line) for line in f]
+        self.assertEqual([x["action"] for x in lines], ["auth.login", "auth.logout"])
+        self.assertTrue(all(x["lauretta_audit"] == 1 for x in lines))
+        self.assertEqual(os.stat(path).st_mode & 0o777, 0o640)
+
+    def test_unwritable_file_never_raises(self) -> None:
+        la._state.file_path = "/proc/no/such/dir/audit.jsonl"
+        la._emit_stdout([la._record("auth", "auth.login")])
+        self.assertTrue(la._state.file_warned)
+
+
+class RepeatedFailureTest(unittest.TestCase):
+    setUp = AuditTransactionTest.setUp
+    tearDown = AuditTransactionTest.tearDown
+    rows = AuditTransactionTest.rows
+
+    def _fail(self, when, username="bob", ip="198.51.100.9") -> None:  # noqa: ANN001
+        rec = la._record(
+            "auth",
+            "auth.login",
+            outcome="failure",
+            target_name=username,
+            overrides={"event_time": when},
+            context={
+                "actor_id": None,
+                "actor_username": username,
+                "ip_address": ip,
+                "user_agent": None,
+                "request": "POST /login/",
+            },
+        )
+        with self.engine.begin() as conn:
+            la._insert(conn, [rec])
+
+    def test_threshold_window_and_once_per_window(self) -> None:
+        from datetime import datetime, timedelta, timezone
+
+        now = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+        self._fail(now - timedelta(minutes=30))  # outside the 10-minute window
+        for i in range(4):
+            self._fail(now - timedelta(minutes=5 - i))
+        self.assertEqual(
+            la.check_repeated_failures("bob", "198.51.100.9", self.engine, now), 0
+        )
+        self._fail(now - timedelta(seconds=10), username="carol")  # same address
+        got = la.check_repeated_failures("carol", "198.51.100.9", self.engine, now)
+        self.assertEqual(got, 1)  # the address: 5 failures; carol has only 1
+        self._fail(now - timedelta(seconds=5))
+        self.assertEqual(
+            la.check_repeated_failures("bob", "198.51.100.9", self.engine, now), 1
+        )
+        self.assertEqual(
+            la.check_repeated_failures("bob", "198.51.100.9", self.engine, now), 0
+        )
+        alerts = [r for r in self.rows() if r["action"] == "auth.repeated_failure"]
+        self.assertEqual(
+            sorted((r["target_type"], r["target_name"]) for r in alerts),
+            [("ip_address", "198.51.100.9"), ("username", "bob")],
+        )
+        by_ip = next(r for r in alerts if r["target_type"] == "ip_address")
+        self.assertEqual(json.loads(by_ip["details"])["usernames"], ["bob", "carol"])
+        self.assertEqual(la._sign(by_ip, la._state.key), by_ip["row_hmac"])
+
+
+class ReportTest(unittest.TestCase):
+    setUp = AuditTransactionTest.setUp
+    tearDown = AuditTransactionTest.tearDown
+
+    def test_csv_filters_and_seal_check(self) -> None:
+        import csv
+        import io
+        from datetime import datetime, timedelta, timezone
+
+        day = datetime(2026, 3, 1, tzinfo=timezone.utc)
+        recs = [
+            la._record(
+                "auth",
+                "auth.login",
+                target_name="a",
+                overrides={"event_time": day + timedelta(hours=h), "actor_username": u},
+            )
+            for h, u in ((1, "ann"), (2, "bob"), (30, "ann"))
+        ]
+        with self.engine.begin() as conn:
+            la._insert(conn, recs)
+            conn.exec_driver_sql(f"DROP TRIGGER {la.TABLE_NAME}_no_update")
+            conn.exec_driver_sql(
+                f"UPDATE {la.TABLE_NAME} SET target_name='x' WHERE id={recs[1]['id']}"
+            )
+        out = io.StringIO()
+        keys = {la._state.key_id: la._state.key}
+        with mock.patch.object(la, "record_event") as recorded:
+            n = la.report(
+                out,
+                since=day,
+                until=day + timedelta(days=1),
+                engine=self.engine,
+                keys=keys,
+            )
+        rows = list(csv.DictReader(io.StringIO(out.getvalue())))
+        self.assertEqual(n, 2)
+        self.assertEqual([r["actor_username"] for r in rows], ["ann", "bob"])
+        self.assertEqual([r["seal_ok"] for r in rows], ["yes", "NO"])
+        self.assertEqual(recorded.call_args.args[:2], ("audit", "audit.report"))
+        self.assertEqual(recorded.call_args.kwargs["details"]["rows"], 2)
+        with mock.patch.object(la, "record_event"):
+            n = la.report(io.StringIO(), user="ann", engine=self.engine, keys=keys)
+        self.assertEqual(n, 2)
+
+
+class PrivilegedRequestTest(unittest.TestCase):
+    """access.request for every request by a privileged account."""
+
+    def setUp(self) -> None:
+        import flask
+
+        self.app = flask.Flask("t")
+        self.app.config["LAURETTA_AUDIT_PRIVILEGED_ROLES"] = ["Admin"]
+
+        @self.app.route("/<path:p>", methods=["GET", "POST"])
+        def anything(p):  # noqa: ANN001, ANN202
+            return "ok"
+
+        self.app.after_request(la._audit_privileged)
+        self.client = self.app.test_client()
+        patcher = mock.patch.object(la, "record_event")
+        self.recorded = patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _as(self, *roles: str):  # noqa: ANN202
+        user = mock.Mock(is_authenticated=True, roles=[mock.Mock() for _ in roles])
+        for role, name in zip(user.roles, roles, strict=True):
+            role.name = name
+        return mock.patch("flask_login.current_user", user)
+
+    def details(self) -> dict:
+        return self.recorded.call_args.kwargs["details"]
+
+    def test_admin_requests_are_recorded(self) -> None:
+        with self._as("Admin", "Gamma"):
+            self.client.get("/api/v1/dashboard/?q=(page:0)&access_token=s3cret")
+            d = self.details()
+            self.assertEqual(d["path"], "/api/v1/dashboard/")
+            self.assertEqual(d["args"], {"q": "(page:0)", "access_token": la.REDACTED})
+            self.assertEqual(d["roles"], ["Admin"])
+            self.client.post(
+                "/api/v1/sqllab/execute/", json={"sql": "SELECT 1", "database_id": 2}
+            )
+            self.assertEqual(self.details()["sql"], "SELECT 1")
+            self.client.post(
+                "/api/v1/chart/data",
+                data={
+                    "form_data": json.dumps(
+                        {"result_format": "csv", "result_type": "full"}
+                    )
+                },
+            )
+            self.assertEqual(self.details()["result_format"], "csv")
+            calls = self.recorded.call_count
+            self.client.get("/static/assets/x.js")
+            self.client.post("/api/v1/log/")
+            self.assertEqual(self.recorded.call_count, calls)  # quiet paths
+
+    def test_other_users_are_not(self) -> None:
+        with self._as("Gamma"):
+            self.client.get("/api/v1/dashboard/")
+        anon = mock.Mock(is_authenticated=False)
+        with mock.patch("flask_login.current_user", anon):
+            self.client.get("/api/v1/dashboard/")
+        self.recorded.assert_not_called()
+
+
 @unittest.skipUnless(os.environ.get("AUDIT_TEST_PG_URL"), "set AUDIT_TEST_PG_URL")
 class PostgresTest(unittest.TestCase):
     """The PostgreSQL-only cases, against a throwaway server, e.g.
