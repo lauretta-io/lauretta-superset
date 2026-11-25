@@ -20,6 +20,9 @@
 # DON'T ignore the .gitignore
 !.gitignore
 !superset_config.py
+!lauretta_access.py
 !superset_config_docker_light.py
 !superset_config_local.example
 !lauretta_gunicorn.py
+!lauretta_audit.py
+!lauretta_ldap.py

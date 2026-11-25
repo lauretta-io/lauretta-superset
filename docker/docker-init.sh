@@ -17,6 +17,10 @@
 #
 set -e
 
+# The CLI commands below load the app before the audit table exists; this lets them
+# (lauretta_audit.init_app) start without it. See lauretta/docs/12-audit-trail.md.
+export LAURETTA_AUDIT_INIT=1
+
 #
 # Always install local overrides first
 #
@@ -66,6 +70,8 @@ fi
 # Initialize the database
 echo_step "1" "Starting" "Applying DB migrations"
 superset db upgrade
+# Before the admin user and `superset init`, so both are in the audit trail.
+python -m lauretta_audit create-table
 echo_step "1" "Complete" "Applying DB migrations"
 
 # Create an admin user

@@ -36,7 +36,7 @@ from flask import (
 )
 from flask_appbuilder import BaseView, Model, ModelView
 from flask_appbuilder.actions import action
-from flask_appbuilder.const import AUTH_OAUTH
+from flask_appbuilder.const import AUTH_DB, AUTH_OAUTH
 from flask_appbuilder.forms import DynamicForm
 from flask_appbuilder.models.sqla.filters import BaseFilter
 from flask_appbuilder.security.sqla.models import User
@@ -483,7 +483,14 @@ def cached_common_bootstrap_data(  # pylint: disable=unused-argument
     else:
         language = app.config.get("BABEL_DEFAULT_LOCALE", "en")
     auth_type = app.config["AUTH_TYPE"]
-    auth_user_registration = app.config["AUTH_USER_REGISTRATION"]
+    # Flask-AppBuilder serves the self-registration pages (/register/, the pending
+    # registrations list) for database and OAuth login only. Under LDAP,
+    # AUTH_USER_REGISTRATION means "create the user at the first directory login",
+    # and a Register button would lead to a 404.
+    auth_user_registration = app.config["AUTH_USER_REGISTRATION"] and auth_type in (
+        AUTH_DB,
+        AUTH_OAUTH,
+    )
     frontend_config["AUTH_USER_REGISTRATION"] = auth_user_registration
     should_show_recaptcha = auth_user_registration and (auth_type != AUTH_OAUTH)
 

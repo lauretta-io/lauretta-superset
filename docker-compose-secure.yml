@@ -145,15 +145,52 @@ services:
         max-size: "10m"
         max-file: "5"
 
+  db-perms:
+    image: ${POSTGRES_IMAGE:-postgres:18}
+    user: "0:0"
+    entrypoint:
+      - sh
+      - -c
+      - >-
+        if [ -f /var/lib/postgresql/PG_VERSION ]; then
+        echo "db_home holds a pre-18 cluster; run scripts/upgrade-postgres.sh" >&2;
+        exit 1;
+        fi;
+        mkdir -p /var/lib/postgresql/18/data &&
+        chown -R 70:70 /var/lib/postgresql/18 &&
+        chmod 700 /var/lib/postgresql/18/data
+    volumes:
+      - db_home:/var/lib/postgresql
+    restart: "no"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+    mem_limit: 64m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
   db:
+    depends_on:
+      db-perms:
+        condition: service_completed_successfully
     <<: *superset-env
-    image: postgres:17
+    image: ${POSTGRES_IMAGE:-postgres:18}
+    user: "70:70"
+    environment:
+      PGDATA: /var/lib/postgresql/18/data
     container_name: superset_db_secure
     restart: unless-stopped
     # No published ports.
     volumes:
-      - db_home:/var/lib/postgresql/data
-      - ./docker/docker-entrypoint-initdb.d:/docker-entrypoint-initdb.d:ro
+      - db_home:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 10s
@@ -161,18 +198,34 @@ services:
       retries: 5
     security_opt:
       - no-new-privileges:true
-    # Same reasoning as redis: the entrypoint runs initdb as root then drops to the
-    # `postgres` user.
     cap_drop:
       - ALL
-    cap_add:
-      - CHOWN
-      - SETUID
-      - SETGID
-      - DAC_OVERRIDE
-      - FOWNER
     pids_limit: 512
     mem_limit: 2g
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  db-init:
+    <<: *superset-env
+    image: ${POSTGRES_IMAGE:-postgres:18}
+    user: "70:70"
+    environment:
+      DATABASE_HOST: db
+    volumes:
+      - ./docker/db-init.sh:/db-init.sh:ro
+    entrypoint: ["bash", "/db-init.sh"]
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 128m
     logging:
       driver: json-file
       options:
@@ -206,6 +259,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      db-init:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
     volumes: *superset-volumes

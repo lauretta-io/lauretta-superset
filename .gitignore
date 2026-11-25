@@ -151,3 +151,7 @@ PROJECT.md
 oxc-custom-build/
 *.code-workspace
 *.duckdb
+
+# raib-ha (HA mode): runtime floor-map uploads and temp files, not source
+lauretta/images/customs/
+lauretta/images/tmp/

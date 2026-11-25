@@ -26,6 +26,7 @@ import os
 import sys
 import uuid
 import re
+from collections.abc import Callable
 from functools import wraps
 from pathlib import Path
 from urllib.parse import quote
@@ -37,7 +38,13 @@ from flask import abort, send_file, jsonify, request, session
 from flask_caching.backends.filesystemcache import FileSystemCache
 from flask_login import current_user
 
+import lauretta_audit
+
 logger = logging.getLogger()
+
+# Security audit trail (lauretta/docs/12-audit-trail.md): this manager records logins;
+# FLASK_APP_MUTATOR below wires up everything else.
+CUSTOM_SECURITY_MANAGER = lauretta_audit.security_manager_class()
 
 
 def _require_authenticated_user(view):
@@ -264,6 +271,7 @@ LOG_LEVEL = getattr(logging, log_level_text.upper(), logging.INFO)
 LAURETTA_IMAGES_DIR = Path("/app/lauretta/images")
 LAURETTA_CUSTOM_IMAGES_DIR = Path("/app/lauretta/images/customs")
 LAURETTA_TEMP_IMAGES_DIR = Path("/app/lauretta/images/tmp")
+LAURETTA_DASHBOARDS_CONFIG = Path("/app/lauretta/dashboards/config.json")
 # Accepted upload extensions, each mapped to a test of its magic bytes. One dict
 # rather than a set plus a lookup table: membership is what makes an extension
 # allowed and the value is what confirms the bytes match, so adding an extension
@@ -295,9 +303,18 @@ and referenced within the app via "/static/assets/branding/{image_name}"
 # APP_ICON = "/static/assets/branding/lauretta-banner.png"
 # APP_NAME = "Lauretta Superset"
 
-def _resolve_floor_image(floor_ref: str) -> Path | None:
+def _resolve_floor_image(
+    floor_ref: str, allowed: Callable[[Path], bool] | None = None
+) -> Path | None:
+    """The image file `floor_ref` names, or None.
+
+    With `allowed` (a Path -> bool check), only files it accepts are returned; for a
+    floor-code or "default" lookup that is the first accepted match.
+    """
     if not floor_ref:
         return None
+    if allowed is None:
+        allowed = lambda _path: True  # noqa: E731
 
     cleaned_ref = floor_ref.strip().lstrip("/")
     if cleaned_ref.startswith("locked:"):
@@ -315,6 +332,7 @@ def _resolve_floor_image(floor_ref: str) -> Path | None:
                 candidate_custom.is_file()
                 and candidate_custom.parent == LAURETTA_CUSTOM_IMAGES_DIR.resolve()
                 and candidate_custom.suffix.lower() in ALLOWED_FLOOR_IMAGE_EXTENSIONS
+                and allowed(candidate_custom)
             ):
                 return candidate_custom
 
@@ -327,6 +345,7 @@ def _resolve_floor_image(floor_ref: str) -> Path | None:
                 candidate_temp.is_file()
                 and candidate_temp.parent == LAURETTA_TEMP_IMAGES_DIR.resolve()
                 and candidate_temp.suffix.lower() in ALLOWED_FLOOR_IMAGE_EXTENSIONS
+                and allowed(candidate_temp)
             ):
                 return candidate_temp
 
@@ -338,6 +357,7 @@ def _resolve_floor_image(floor_ref: str) -> Path | None:
         candidate_by_name.is_file()
         and candidate_by_name.parent == LAURETTA_IMAGES_DIR.resolve()
         and candidate_by_name.suffix.lower() in ALLOWED_FLOOR_IMAGE_EXTENSIONS
+        and allowed(candidate_by_name)
     ):
         return candidate_by_name
 
@@ -345,21 +365,19 @@ def _resolve_floor_image(floor_ref: str) -> Path | None:
     if target_code == "default":
         target_code = ""
 
-    matched: list[Path] = []
     for image_path in sorted(LAURETTA_IMAGES_DIR.iterdir()):
         if not image_path.is_file():
             continue
         if image_path.suffix.lower() not in ALLOWED_FLOOR_IMAGE_EXTENSIONS:
             continue
-        if not target_code:
-            matched.append(image_path)
-            continue
         stem_parts = image_path.stem.split("_")
         floor_code = stem_parts[-1] if len(stem_parts) > 1 else image_path.stem
-        if floor_code.lower() == target_code:
-            matched.append(image_path)
+        if (not target_code or floor_code.lower() == target_code) and allowed(
+            image_path
+        ):
+            return image_path
 
-    return matched[0] if matched else None
+    return None
 
 
 def _cleanup_temp_images():
@@ -383,6 +401,9 @@ def _cleanup_temp_images():
 
 
 def FLASK_APP_MUTATOR(app):
+   # ── Security audit trail: changes, logouts, the table check ──
+   lauretta_audit.init_app(app)
+
    # ── Mark every session permanent so PERMANENT_SESSION_LIFETIME applies ──
    @app.before_request
    def _make_session_permanent():
@@ -530,39 +551,39 @@ def FLASK_APP_MUTATOR(app):
 
    # NOTE: these routes are registered straight onto the Flask app, so they bypass
    # FAB's permission layer entirely. @_require_authenticated_user is what keeps
-   # them from being anonymously reachable — do not remove it.
+   # them from being anonymously reachable, and lauretta_access is what limits a
+   # logged-in user to their own properties' data — do not remove either.
+   import lauretta_access
+
+   def _floor_access() -> lauretta_access.FloorAccess:
+       return lauretta_access.FloorAccess(
+           config_path=LAURETTA_DASHBOARDS_CONFIG,
+           customs_dir=LAURETTA_CUSTOM_IMAGES_DIR,
+           tmp_dir=LAURETTA_TEMP_IMAGES_DIR,
+           resolve=_resolve_floor_image,
+       )
+
    @app.get("/api/v1/lauretta/floors")
    @_require_authenticated_user
    def lauretta_floors_list():
-       """Return the list of floors from config.json."""
-       config_path = Path("/app/lauretta/dashboards/config.json")
-       if not config_path.exists():
-           return jsonify([])
-       import json as _json
-       with open(config_path) as f:
-           config = _json.load(f)
-       all_floors = []
-       seen = set()
-       for dash in config.get("dashboards", []):
-           for floor in dash.get("floors", []):
-               name = floor.get("name", "")
-               image = floor.get("image", "")
-               if name and name not in seen:
-                   seen.add(name)
-                   all_floors.append({"name": name, "image": image})
-       return jsonify(all_floors)
+       """Return the floors in config.json of the properties the caller can read."""
+       return jsonify(_floor_access().floors())
 
    @app.get("/api/v1/lauretta/images/<path:floor_ref>")
    @_require_authenticated_user
    def lauretta_floor_image(floor_ref: str):
-       image_path = _resolve_floor_image(floor_ref)
+       # A file the caller may not read is reported exactly like a missing one.
+       image_path = _resolve_floor_image(floor_ref, _floor_access().may_read_image)
        if not image_path:
            return abort(404, description=f"Floor image not found for '{floor_ref}'")
-       return send_file(image_path) 
+       return lauretta_access.private_image_response(send_file(image_path))
 
    @app.post("/api/v1/lauretta/images/upload")
    @_require_authenticated_user
    def lauretta_floor_image_upload():
+       if not _floor_access().may_upload():
+           return abort(403, description="Not allowed to upload floor-map images")
+
        image_file = request.files.get("file")
        if not image_file or not image_file.filename:
            return abort(400, description="Missing image file")
@@ -592,8 +613,17 @@ def FLASK_APP_MUTATOR(app):
        save_path = (LAURETTA_TEMP_IMAGES_DIR / file_name).resolve()
        if save_path.parent != LAURETTA_TEMP_IMAGES_DIR.resolve():
            return abort(400, description="Invalid image path")
+       # Only this session may read the file back until a chart moves it to customs/.
+       lauretta_access.remember_temp_upload(file_name)
 
        image_file.save(save_path)
+       lauretta_audit.record_event(
+           "data",
+           "data.file_upload",
+           target_type="floor_map_image",
+           target_name=file_name,
+           details={"original_name": original_name, "bytes": save_path.stat().st_size},
+       )
 
        return jsonify({
            "file_name": file_name,
