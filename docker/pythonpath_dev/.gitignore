@@ -25,3 +25,4 @@
 !superset_config_local.example
 !lauretta_gunicorn.py
 !lauretta_audit.py
+!lauretta_ldap.py
