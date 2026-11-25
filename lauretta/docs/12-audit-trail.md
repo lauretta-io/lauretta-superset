@@ -163,7 +163,7 @@ Categories: `auth`, `user`, `role`, `group`, `data`, `access`, `audit`.
 | 18.6.2.5 Sensitive master data | changes to `dbs`, `ab_user`, `ab_role`, RLS rules etc., secrets redacted |
 | 18.6.2.6 Repeated failed logins | `auth.repeated_failure` |
 | 18.6.2.7 Accounts, role assignment and changes | `user.*`, `role.assign/revoke`, `role.permission_*` |
-| 18.6.2.8 Access to the audit log | `audit.report` / `audit.verify` for access through this tool. Direct database reads need pgaudit, and reads of the files need host auditing (auditd); both are outside this repository (raib-ha). |
+| 18.6.2.8 Access to the audit log | `audit.report` / `audit.verify` for access through this tool. Direct database reads: under raib-ha the supmeta image logs every read of `lauretta_audit_log` with pgAudit (object audit, role `lauretta_auditor`, `docker/ha/supmeta/pgaudit.conf`; raib-ha D104), which is why audit rows are inserted without `RETURNING`. Reads of the files need host auditing (auditd, raib-ha D103). |
 | 18.6.2 Reports | `python -m lauretta_audit report` |
 | 18.6.3 Protected from modification/deletion | "Tamper protection" below, plus the SIEM copy |
 

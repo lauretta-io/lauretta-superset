@@ -925,6 +925,12 @@ class PrivilegedRequestTest(unittest.TestCase):
         self.recorded.assert_not_called()
 
 
+class NoReturningTest(unittest.TestCase):
+    def test_audit_table_never_uses_returning(self) -> None:
+        """raib-ha D104 (see PostgresTest.test_audit_insert_without_returning)."""
+        self.assertFalse(la.audit_table.implicit_returning)
+
+
 @unittest.skipUnless(os.environ.get("AUDIT_TEST_PG_URL"), "set AUDIT_TEST_PG_URL")
 class PostgresTest(unittest.TestCase):
     """The PostgreSQL-only cases, against a throwaway server, e.g.
@@ -957,6 +963,27 @@ class PostgresTest(unittest.TestCase):
             s.commit()
         self.assertEqual([line["target_name"] for line in LINES.lines], ["a"])
         self.assertEqual(self.count(la.TABLE_NAME), 1)
+
+    def test_audit_insert_without_returning(self) -> None:
+        """raib-ha D104: pgAudit logs reads of the audit table; INSERT ... RETURNING needs
+        SELECT, so audit rows are inserted with the id from nextval() first, no RETURNING."""
+        seen: list[str] = []
+
+        def _sql(conn, cursor, statement, *args) -> None:  # noqa: ANN001
+            seen.append(statement)
+
+        event.listen(self.engine, "before_cursor_execute", _sql)
+        self.addCleanup(event.remove, self.engine, "before_cursor_execute", _sql)
+        record = {
+            "event_time": la.datetime.now(la.timezone.utc), "category": "auth",
+            "action": "auth.login", "outcome": "failure", "key_id": "k", "row_hmac": "h",
+        }
+        with self.engine.begin() as conn:
+            la._insert(conn, [dict(record), dict(record)])
+        inserts = [x for x in seen if x.lstrip().upper().startswith(f"INSERT INTO {la.TABLE_NAME.upper()}")]
+        self.assertEqual(len(inserts), 2, seen)
+        self.assertFalse([x for x in inserts if "RETURNING" in x.upper()], inserts)
+        self.assertEqual(self.count(la.TABLE_NAME), 2)
 
     def test_commit_of_aborted_transaction_prints_nothing(self) -> None:
         # PostgreSQL answers COMMIT in an aborted transaction with ROLLBACK, no error.
