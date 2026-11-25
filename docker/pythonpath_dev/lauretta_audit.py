@@ -244,6 +244,11 @@ HASHED_FIELDS = (
 )
 
 _metadata = sa.MetaData()
+# implicit_returning=False: an insert takes its id from the sequence first (SELECT nextval),
+# never INSERT ... RETURNING id. Under raib-ha the supmeta database logs every read of this
+# table with pgAudit (role lauretta_auditor holds SELECT on it, raib-ha D104); RETURNING needs
+# SELECT too, so with it every audit row written would also be object-audited
+# (AUDIT: OBJECT,...,WRITE,INSERT).
 audit_table = sa.Table(
     TABLE_NAME,
     _metadata,
@@ -272,6 +277,7 @@ audit_table = sa.Table(
     sa.Index("ix_lauretta_audit_log_event_time", "event_time"),
     sa.Index("ix_lauretta_audit_log_actor", "actor_username"),
     sa.Index("ix_lauretta_audit_log_action", "category", "action"),
+    implicit_returning=False,
 )
 
 
