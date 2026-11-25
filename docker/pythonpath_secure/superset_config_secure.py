@@ -33,6 +33,7 @@ import os
 from datetime import timedelta
 from urllib.parse import quote, urlparse
 
+import lauretta_ldap
 from redis import Redis
 
 # ---------------------------------------------------------------------------
@@ -282,3 +283,13 @@ WEBDRIVER_OPTION_ARGS = [
 # public DNS and egress for SUPERSET_PUBLIC_URL.
 WEBDRIVER_BASEURL = os.environ.get("WEBDRIVER_BASEURL", SUPERSET_PUBLIC_URL)
 WEBDRIVER_BASEURL_USER_FRIENDLY = SUPERSET_PUBLIC_URL
+
+# ---------------------------------------------------------------------------
+# Active Directory login (lauretta/docs/13-ad-login.md)
+# ---------------------------------------------------------------------------
+# Only when /app/ldap holds ldap.json (docker-compose-ha.yml mounts SUPERSET_LDAP_DIR
+# there). Then it sets AUTH_TYPE = AUTH_LDAP and the AUTH_LDAP_*, AUTH_ROLES_* and
+# AUTH_USER_REGISTRATION* keys, replacing AUTH_USER_REGISTRATION = False above: AD
+# users get a Superset account at their first login, with roles from their groups.
+# Without ldap.json nothing changes. A broken directory raises here.
+globals().update(lauretta_ldap.ldap_settings())

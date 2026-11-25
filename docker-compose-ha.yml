@@ -48,6 +48,8 @@
 #       SUPERSET_TLS_DIR      directory with cert.pem (full chain) and key.pem
 #       SUPERSET_PG_CA        CA file that verifies the metadata servers' certificates
 #       SUPERSET_READY_DIR    host directory holding ready.json (the readiness status)
+#       SUPERSET_LDAP_DIR     AD login: ldap.json, bind_password, ca.pem  default off
+#                             (lauretta/docs/13-ad-login.md)
 #       SUPERSET_HTTPS_PORT   published HTTPS port                default 443
 #       SUPERSET_HTTPS_BIND   address it is published on          default 0.0.0.0
 #       SUPERSET_PROBE_PORT   internal server, on 127.0.0.1 only  default 8089
@@ -72,6 +74,14 @@ x-superset-volumes: &superset-volumes
   - type: bind
     source: ${SUPERSET_PG_CA:?set SUPERSET_PG_CA to the metadata CA file}
     target: /app/pgca/ca.pem
+    read_only: true
+    bind:
+      create_host_path: false
+  # AD login (lauretta/docs/13-ad-login.md): a directory with ldap.json, bind_password
+  # and ca.pem. Unset: an empty directory in the checkout, and password login stays.
+  - type: bind
+    source: ${SUPERSET_LDAP_DIR:-./docker/ldap-disabled}
+    target: /app/ldap
     read_only: true
     bind:
       create_host_path: false

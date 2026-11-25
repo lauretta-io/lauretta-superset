@@ -353,9 +353,18 @@ def security_manager_class() -> type:
             return user
 
         def auth_user_ldap(self, username: str, password: str) -> Any:
+            if not _ldap_input_allowed(username, password):
+                _audit_login(self, "ldap", username or "", None, "refused_input")
+                return None
             user = super().auth_user_ldap(username, password)
             _audit_login(self, "ldap", username, user)
             return user
+
+        def get_roles_from_keys(self, role_keys: list[str]) -> Any:
+            # AD group DNs: compare in lauretta_ldap's normalised form, the form
+            # AUTH_ROLES_MAPPING is stored in, so a group DN typed in another case
+            # still maps to its roles.
+            return super().get_roles_from_keys(_role_keys(self.auth_type, role_keys))
 
         def auth_user_oauth(self, userinfo: dict[str, Any]) -> Any:
             user = super().auth_user_oauth(userinfo)
@@ -778,7 +787,31 @@ def record_event(
 # ---------------------------------------------------------------------------
 # Logins and logouts
 # ---------------------------------------------------------------------------
-def _audit_login(sm: Any, method: str, username: str, user: Any) -> None:
+def _role_keys(auth_type: int, role_keys: list[str]) -> list[str]:
+    """Under LDAP, the group DNs in lauretta_ldap's normalised form."""
+    from flask_appbuilder.security.manager import AUTH_LDAP
+
+    if auth_type != AUTH_LDAP:
+        return role_keys
+    import lauretta_ldap
+
+    return [lauretta_ldap.normalize_dn(key) for key in role_keys]
+
+
+def _ldap_input_allowed(username: str, password: str) -> bool:
+    """lauretta_ldap.username_allowed with the pattern from ldap.json."""
+    import lauretta_ldap
+    from flask import current_app
+
+    pattern = current_app.config.get(
+        "LAURETTA_LDAP_USERNAME_PATTERN", lauretta_ldap.DEFAULT_USERNAME_PATTERN
+    )
+    return lauretta_ldap.username_allowed(username, password, pattern)
+
+
+def _audit_login(
+    sm: Any, method: str, username: str, user: Any, reason: Optional[str] = None
+) -> None:
     try:
         if user:
             record_event(
@@ -792,12 +825,13 @@ def _audit_login(sm: Any, method: str, username: str, user: Any) -> None:
             )
             return
         existing = sm.find_user(username=username) if username else None
-        if existing is None:
-            reason = "unknown_user"
-        elif not existing.is_active:
-            reason = "inactive_user"
-        else:
-            reason = "invalid_credentials"
+        if reason is None:  # else the caller refused the attempt itself
+            if existing is None:
+                reason = "unknown_user"
+            elif not existing.is_active:
+                reason = "inactive_user"
+            else:
+                reason = "invalid_credentials"
         record_event(
             "auth",
             "auth.login",

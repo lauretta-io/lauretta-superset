@@ -174,9 +174,13 @@ ENV PLAYWRIGHT_BROWSERS_PATH=/usr/local/share/playwright-browsers
 
 ARG INCLUDE_CHROMIUM="false"
 ARG INCLUDE_FIREFOX="false"
+# Pinned: an unpinned install took whatever was newest, and playwright 1.65's bundled
+# node driver needs libatomic.so.1, which this base image lacks, so the build failed
+# before `install-deps` could add it. 1.63.0 is the version the deployed images carry.
+ARG PLAYWRIGHT_VERSION="1.63.0"
 RUN --mount=type=cache,target=${SUPERSET_HOME}/.cache/uv \
     if [ "${INCLUDE_CHROMIUM}" = "true" ] || [ "${INCLUDE_FIREFOX}" = "true" ]; then \
-        uv pip install playwright && \
+        uv pip install "playwright==${PLAYWRIGHT_VERSION}" && \
         playwright install-deps && \
         if [ "${INCLUDE_CHROMIUM}" = "true" ]; then playwright install chromium; fi && \
         if [ "${INCLUDE_FIREFOX}" = "true" ]; then playwright install firefox; fi; \
@@ -312,4 +316,9 @@ CMD ["/app/docker/entrypoints/docker-ci.sh"]
 FROM lean AS production
 USER root
 RUN uv pip install .[postgres,thumbnails]
+# Active Directory login (AUTH_LDAP, lauretta/docs/13-ad-login.md). python-ldap ships
+# no Linux wheels: it compiles against libldap2-dev/libsasl2-dev from python-common,
+# and the helper installs the compiler for this step only. Same pin as
+# requirements/development.txt.
+RUN /app/docker/pip-install.sh --requires-build-essential --no-cache python-ldap==3.4.4
 USER superset

@@ -50,6 +50,7 @@ See [Choosing the Postgres image](07-operations.md#choosing-the-postgres-image) 
 | [10 Development](10-development.md) | Custom plugins, upstream patches, image tags and builds |
 | [11 HA mode](11-ha-mode.md) | Mode 4: active-active on two or more nodes, `/ready`, running under raib-ha |
 | [12 Security audit trail](12-audit-trail.md) | Logins, account, role and data changes: what is recorded, where, tamper protection |
+| [13 Active Directory login](13-ad-login.md) | AD users log in over LDAPS by group: what to ask the AD team, the LDAP directory, checks, rollback |
 
 ## Reading paths
 
