@@ -136,7 +136,14 @@ SUPERSET_LDAP_DIR=/etc/lauretta-superset/ldap docker compose -f docker-compose-h
 Every node at once, with the same directory contents. Otherwise some nodes take AD logins and
 others local passwords.
 
-**Rollback:** unset `SUPERSET_LDAP_DIR` (or remove `ldap.json`) and recreate the containers.
+**Don't edit the mounted directory in place.** Gunicorn re-reads the config whenever it
+replaces a worker, so a change there goes live worker by worker, without a restart: a typo in
+`ldap.json` makes the next new worker fail to start, and an `ldap.json` added to a mounted
+empty directory switches workers to AD one at a time. To change the settings, prepare a new
+directory, run `check` against it (step 3), then point `SUPERSET_LDAP_DIR` at it and recreate
+the containers.
+
+**Rollback:** unset `SUPERSET_LDAP_DIR` and recreate the containers.
 
 **Under raib-ha:** raib-ha writes the compose variables and runs compose; it does not pass
 `SUPERSET_LDAP_DIR` yet. That needs a raib-ha change (the variable in its compose env file and
@@ -155,9 +162,18 @@ the directory on both nodes) before AD login can be switched on there.
 | Local `admin` | Refused |
 
 Logins and failures are in the audit trail ([12](12-audit-trail.md)) with `method` `ldap`.
-Failure reasons: `invalid_credentials` (wrong password, or not in a group, or disabled; AD does
-not say which), `unknown_user`, `inactive_user`, `refused_input`. Repeated failures raise
-`auth.repeated_failure` as for password logins.
+The failure `reason` depends on whether Superset already has an account by that name, not on
+what AD said:
+
+| Reason | When |
+|---|---|
+| `unknown_user` | No Superset account yet, and AD refused: not in a listed group, disabled, nested-only, unknown, or wrong password |
+| `invalid_credentials` | A Superset account exists, and AD refused: wrong password, removed from the groups, or disabled since |
+| `inactive_user` | The account is deactivated in Superset |
+| `refused_input` | The username has filter characters or breaks `username_pattern`, or the password is empty; AD was not asked |
+
+Repeated failures raise `auth.repeated_failure` as for password logins. Usernames are stored
+and audited in lower case.
 `docker compose logs superset | grep -i ldap` shows connection and certificate errors.
 
 ## Behaviour to know

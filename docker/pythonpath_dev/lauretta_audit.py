@@ -356,6 +356,9 @@ def security_manager_class() -> type:
             if not _ldap_input_allowed(username, password):
                 _audit_login(self, "ldap", username or "", None, "refused_input")
                 return None
+            # AD matches logins case-insensitively; one spelling keeps the account
+            # FAB registers at the first login, and the audit trail, consistent.
+            username = username.lower()
             user = super().auth_user_ldap(username, password)
             _audit_login(self, "ldap", username, user)
             return user

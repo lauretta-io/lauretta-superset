@@ -186,6 +186,13 @@ class LdapSettingsTest(unittest.TestCase):
             f.write("{not json")
         self._fails("cannot read")
 
+    def test_unreadable_directory_is_an_error(self) -> None:
+        self._write()
+        with mock.patch(
+            "os.stat", side_effect=PermissionError(13, "Permission denied")
+        ):
+            self._fails("Permission denied")
+
     def test_needs_python_ldap(self) -> None:
         self._write()
         with mock.patch.dict(sys.modules, {"ldap": None}):
