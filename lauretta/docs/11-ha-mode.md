@@ -139,7 +139,8 @@ section only says what it takes from this repo.
   Changes under `superset/` or `superset-frontend/` are inside the image: rebuild and retag it.
 - **Images: reuse the secure-mode build, never rebuild on site.** HA mode adds no image code
   (only files under `docker/`, which are mounted), so the image `docker-compose-secure.yml`
-  builds is the right one, if it is recent enough. Check it holds the 6.1 fork:
+  builds is the right one, if it is recent enough. AD login ([13](13-ad-login.md)) also needs
+  python-ldap in it. Check it holds the 6.1 fork:
   ```bash
   docker run --rm --network none --entrypoint python lauretta-superset-secure:latest -c \
     'import importlib.metadata as m; print(m.version("apache-superset"), m.version("flask-session"))'
